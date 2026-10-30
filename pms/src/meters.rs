@@ -1163,14 +1163,25 @@ mod tests {
         assert_eq!(threads, t.cpus.len());
     }
 
-    /// Every machine has Microsoft Basic Render Driver among its adapters: it's a software one, left out of GPU meters
-    /// unless software_gpus, and its engines are recognised by their LUID in any case.
+    /// The adapters DXGI flags as software (Microsoft Basic Render Driver, on most machines) are left out of GPU
+    /// meters unless software_gpus, recognised by their LUID in any case; the others never are. Whatever adapters
+    /// this machine has: on a VM without a GPU, Basic Render may be its one adapter, and not flagged software.
     #[test]
     fn software_gpus_are_skipped() {
+        let software: Vec<String> = {
+            let factory = unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }.unwrap();
+            (0..)
+                .map_while(|i| unsafe { factory.EnumAdapters1(i) }.ok())
+                .filter_map(|a| unsafe { a.GetDesc1() }.ok())
+                .filter(|d| d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0)
+                .map(|d| format!("0x{:08x}_0x{:08x}", d.AdapterLuid.HighPart as u32, d.AdapterLuid.LowPart))
+                .collect()
+        };
         let names = gpu_names(false);
-        let warp = names.iter().find(|(_, n)| n.contains("Basic Render")).map(|(l, _)| l.clone()).expect("WARP is listed");
-        assert!(skipped_gpu(&warp.to_ascii_uppercase()));
-        gpu_names(true);
-        assert!(!skipped_gpu(&warp));
+        for luid in names.keys() {
+            assert_eq!(skipped_gpu(&luid.to_ascii_uppercase()), software.contains(luid), "{luid}: {}", names[luid]);
+        }
+        let names = gpu_names(true);
+        assert!(names.keys().all(|luid| !skipped_gpu(luid)));
     }
 }

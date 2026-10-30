@@ -231,11 +231,18 @@ fn pgo_train(seconds: u64) -> Result {
     }
     step(&format!("PGO: training on this taskbar for {seconds} s"));
     // Whichever daemon runs now (ours, the installed one) steps aside, and comes back after.
+    let running = running_daemon();
     let was_running = quietly(&cli, &["daemon", "stop"]);
     if was_running {
         println!("stopped the running daemon; it starts again after the training");
         std::thread::sleep(Duration::from_secs(3));
     }
+    // The instrumented TAP goes into explorer in place of the one there (which a daemon would otherwise keep using),
+    // with no daemon running meanwhile.
+    if !quietly(&cli, &["inject"]) {
+        return Err("couldn't inject the instrumented TAP into explorer".into());
+    }
+    println!("injected the instrumented TAP (it stays in explorer, working as usual, until explorer restarts)");
     // The bundled example exercises nearly everything: every meter style, the backdrop, the hot mic, toasts.
     let config = std::env::temp_dir().join("pms-pgo.toml");
     std::fs::copy(root().join("pms.example.toml"), &config).map_err(|e| e.to_string())?;
@@ -264,13 +271,23 @@ fn pgo_train(seconds: u64) -> Result {
     let _ = d.wait();
     let _ = std::fs::remove_file(&config);
     if was_running {
-        let normal = root().join("target").join("release").join("pmsd.exe");
+        let normal = running.unwrap_or_else(|| root().join("target").join("release").join("pmsd.exe"));
         match Command::new(&normal).spawn() {
             Ok(_) => println!("started {} again", normal.display()),
             Err(e) => println!("couldn't start {} again: {e}", normal.display()),
         }
     }
     Ok(())
+}
+
+/// The running daemon's exe, if one runs (to start the same one again after the training).
+fn running_daemon() -> Option<PathBuf> {
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", "(Get-Process pmsd -ErrorAction SilentlyContinue | Select-Object -First 1).Path"])
+        .output()
+        .ok()?;
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    path.is_file().then_some(path)
 }
 
 fn pgo_merge() -> Result {
