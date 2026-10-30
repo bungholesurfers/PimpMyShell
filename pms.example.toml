@@ -1,0 +1,244 @@
+# PimpMyShell config. Copy to %LOCALAPPDATA%\PimpMyShell\pms.toml, then:
+#   pms daemon                 keep it applied (foreground; Ctrl+C restores the stock taskbar)
+#   pms autostart on           run the windowless daemon at every logon
+#   pms meters <this file>     just the meters, without the daemon
+# The daemon reloads this file when it changes. Every section is optional.
+
+# Default meter sample interval (each [[meter]] may set its own interval_ms).
+interval_ms = 1000
+
+# Value text font (fixed-width by default): value_font = "Cascadia Mono, Consolas"
+
+# Meter height: "compact" (3/4 of the taskbar), "tall" (default, halfway to full) or "full".
+# When space runs short the strip squeezes (spacing, graphics, then text width) and finally
+# hides meters from the end of the list; order them by importance.
+meter_height = "tall"
+
+# Look: "auto" follows Windows' light/dark mode for the taskbar (Settings > Personalization >
+# Colors > "Choose your default Windows mode"); or "dark" / "light". It picks the backdrop below and
+# whether PimpMyShell's text is light or dark.
+theme = "auto"
+
+# Frame-rate cap for the long-running animations (the hot-mic alert): fewer frames, less work for
+# the compositor (on a 240 Hz display, 60 fps took its GPU time for the alert down by ~40%, 30 by ~65%).
+# max_fps applies always (unset: none, the display's full rate); battery_fps while the PC runs on its
+# battery (unset: 30; 0: none). The lower one wins.
+# max_fps     = 60
+# battery_fps = 30
+
+# GPU meters and agg = "engine" counters leave out software adapters - Microsoft Basic Render Driver
+# (WARP), which Windows keeps for when there's no GPU driver, and whose "GPU" work is really CPU work.
+# software_gpus = true
+
+# Software update. update_check: whether the daemon checks GitHub for a newer version by itself, every
+# day or two, and downloads it - it installs only once you say so (unset: the daemon asks, once).
+# update_channel: "stable" (the version the repository's update/stable.txt names) or "latest" (the
+# newest release published). Only installers signed with PimpMyShell's release key are ever run.
+# update_check   = true
+# update_channel = "stable"
+
+# [backdrop]: replace the stock acrylic with PimpMyShell's (blur + tint + grain). Omit the section
+# to keep the stock acrylic.
+[backdrop]
+tint  = "#7F060606"   # #AARRGGBB over the blurred desktop; alpha = opacity
+grain = 0.01          # 0 = no grain
+# gaps = "#18FFFFFF"  # paint the free space between buttons
+
+# The look in light mode (without this table: tint #C8F3F3F3, grain 0.01).
+[backdrop.light]
+tint  = "#C8F3F3F3"
+grain = 0.01
+
+# [hotmic]: wash the taskbar in a breathing color while any app has the microphone open.
+[hotmic]
+color     = "#E53935"
+period_ms = 1600      # one breath; 0 = steady
+low       = 0.25      # opacity range of the breath
+high      = 0.7
+broad_ms  = 5000      # whole-taskbar warning first, then it settles around the "in use by" label
+ignore    = []        # e.g. ["obs64.exe"]: substrings of the app's consent-store key
+
+# [toasts]: show notifications inside the taskbar (the tray slides away meanwhile) instead of
+# as popups. Native banners are switched off per app while the daemon runs and restored when it
+# stops. Clicking a toast or its buttons acts like clicking the real one. Do not disturb and
+# full-screen apps still hold toasts back.
+[toasts]
+duration_ms = 7000
+ignore      = []      # apps that keep native banners (name or AUMID substring), e.g. ["Teams"]
+
+# [start_glow]: a glow behind the Start button - none at rest, `hover` (its opacity) while the pointer
+# is over it, the brighter `press` while it's pressed, `open` while the Start menu is open (from the
+# Windows key too); fading over hover_ms, or the quicker press_ms into and out of a press; reaching
+# hover_radius, or press_radius while pressed (DIPs). Omit the section for the stock button.
+[start_glow]
+color        = "#4CC2FF"
+hover        = 0.45
+press        = 0.9
+open         = 0.6
+hover_ms     = 220
+press_ms     = 70
+hover_radius = 120
+press_radius = 170
+
+# [app_glow]: the same behind every app's taskbar button, in the color its icon shows most of.
+[app_glow]
+hover        = 0.4
+press        = 0.8
+hover_ms     = 220
+press_ms     = 70
+hover_radius = 90
+press_radius = 130
+
+# [counters]: name = 'English PDH path', or { path = '...', agg = "...", default = <n> }.
+#   Wildcard instances (*) are aggregated, skipping `_Total`: agg = "sum" (default), "max",
+#   "min", "avg", or "engine" (GPU Engine counters: per-engine sum, then the busiest engine,
+#   which is how Task Manager computes GPU %). `default` stands in when the counter can't be read.
+#   Browse paths with:  typeperf -q   /   typeperf -qx "GPU Engine"
+#
+# Builtins usable in expressions: ram_total, vram_total (dedicated memory of all GPUs),
+#   swap_total, swap_used (pagefiles, bytes, live), cpu_count.
+#
+# [[meter]]:
+#   label, unit ("%", "bytes", "bytes/s", "bits/s", or any suffix), decimals
+#   style        "history" (sparkline, default), "bar" (gauge with a peak marker),
+#                "pie" (slices), "cores" (a user/kernel bar per CPU thread, grouped by topology),
+#                "engines" (a bar per GPU engine that has shown activity),
+#                "bars" (a vertical bar per expression; names = [...] label them in tooltips)
+#   expr         expression (+ - * / ( ) min max abs); for a pie, a list: one per slice
+#   max          full scale: number or expression; omitted = auto-scale (pie: slices' sum)
+#   color        #RRGGBB / #AARRGGBB; colors = [...] for pie slices or cores [user, kernel]
+#   group        meters in different groups get a separator between them
+#   value        false: no value text (bar, pie, cores, engines); the tooltip still has it
+#   tooltip      false: no hover tooltip
+#   show_above   only show while the value is at least this (number or expression)
+#   names        pie / bars: a name per slice or bar, for the tooltip
+#   bar_width    cores / engines / bars: DIPs per bar
+#   caption      false: no label beside the meter on the taskbar (the tooltip still has it)
+#   snug         true: right against the meter before it, no separator or spacing
+#   glow         cores / engines: "level" (default: by load now), "heat" (by how hot the bars have got
+#                working: full in ~8 s at 100%, cold ~30 s after; brighter fills too), or "off"
+#   vendor_label engines: "ticker" (default: NVDA, AMD, INTC, QCOM, MSFT) or "short" (NV, RAD)
+#   per_gpu      true: one of this meter per graphics adapter with dedicated memory (expr, max, color filled in)
+#   min_memory_mb per_gpu: the least dedicated memory an adapter needs for one (default 1024; built-in graphics
+#                often report a small reserved slice, which would sit near full)
+#   label_inside pie: label inside the pie: "always", "auto" (only when crowded), "never" (default)
+#   pressure     pie: how full its first slice gets before the resource is tight; the rim's glow swells from there
+#                (default 0.8). Below a third full a pie has no glow; it fades in by two thirds.
+#   time_axis    history: "log" (default: newest samples full width, older ones ever more
+#                compressed, TMOG-style) or "linear"
+#   history_seconds  history: how far back the graph reaches (default 300)
+#   engine_hold_seconds  engines: an idle GPU's bars fall off after this long (default 15;
+#                0 = never); the most recently active GPU always stays
+#   interval_ms  this meter's own update rate (floor: the system timer resolution, >= 16 ms)
+[counters]
+gpu       = { path = '\GPU Engine(*)\Utilization Percentage', agg = "engine" }
+mem_avail = '\Memory\Available Bytes'
+modified  = '\Memory\Modified Page List Bytes'
+standby_n = '\Memory\Standby Cache Normal Priority Bytes'
+standby_r = '\Memory\Standby Cache Reserve Bytes'
+standby_c = '\Memory\Standby Cache Core Bytes'
+vram      = { path = '\GPU Adapter Memory(*)\Dedicated Usage', agg = "sum" }
+commit    = '\Memory\% Committed Bytes In Use'
+disk_read  = '\PhysicalDisk(_Total)\Disk Read Bytes/sec'
+disk_write = '\PhysicalDisk(_Total)\Disk Write Bytes/sec'
+net_rx    = { path = '\Network Interface(*)\Bytes Received/sec', agg = "sum" }
+net_tx    = { path = '\Network Interface(*)\Bytes Sent/sec', agg = "sum" }
+
+[[meter]]
+label       = "CPU"
+group       = "cpu"
+style       = "cores"
+glow        = "heat"       # threads heat up as they work and glow hotter; "level" glows by load now; "off"
+interval_ms = 200
+value       = false        # tooltips show each thread's user/kernel %
+# bar_width = 3.6          # DIPs per thread bar (default by thread count)
+colors      = ["#66BB6A", "#E040FB"]   # user, kernel
+
+[[meter]]
+label  = "RAM"            # in the tooltip; caption = false keeps it off the taskbar
+caption = false
+snug   = true             # right against CPU: no separator, no spacing
+group  = "memory"
+style  = "pie"
+# Like Task Manager's memory composition: in use, modified (waiting to be written), standby (cache).
+expr   = ["ram_total - mem_avail - modified", "modified", "standby_n + standby_r + standby_c"]
+names  = ["in use", "modified", "standby"]
+colors = ["#AED581", "#B0FFB74D", "#50AED581"]
+max    = "ram_total"
+unit   = "bytes"
+value  = false
+# Windows starts trimming working sets and paging harder once in-use memory passes ~80% of RAM.
+pressure = 0.8
+# label_inside = "auto"   # put the label inside the pie when crowded ("always", "never" = default)
+
+[[meter]]
+label = "SWAP"           # hidden while there's no pagefile
+group = "memory"
+style = "pie"
+expr  = "swap_used"
+max   = "swap_total"
+color = "#FFB74D"
+unit  = "bytes"
+
+[[meter]]
+label = "COMMIT"         # only when commit gets high: allocations fail at 100%
+group = "memory"
+show_above = 80
+expr  = "commit"
+color = "#FF8A65"
+max   = 100
+unit  = "%"
+
+[[meter]]
+label = "GPU"            # a bar per engine that has done work lately; hover for names
+group = "gpu"
+style = "engines"
+glow  = "heat"
+# vendor_label = "short" # NV, RAD instead of NVDA, AMD
+color = "#BA68C8"        # for GPUs of a maker PimpMyShell doesn't know
+value = false
+# Each GPU is labelled by its maker in place of this label - NVDA, AMD, INTC, QCOM, MSFT - its bars lit
+# in the maker's colors, with a glow of them around that brightens as it works. vendors = false: plain.
+# vendors = false
+# or the busiest engine as a sparkline:
+# expr = "min(gpu, 100)"
+# max  = 100
+# unit = "%"
+
+[[meter]]
+label = "VRAM"
+caption = false
+group = "gpu"
+style = "pie"
+# A pie for every graphics adapter with memory of its own (dedicated memory above 0), each reading that
+# adapter's memory against its size, in its maker's color. Without per_gpu, give expr/max/color yourself,
+# e.g. expr = "vram", max = "vram_total" for all of them in one.
+per_gpu = true
+# A game's video memory budget is about 90% of the card's; past it, Windows moves textures out to system RAM (stutter).
+pressure = 0.85
+unit  = "bytes"
+value = false
+
+[[meter]]
+label     = "DISK"
+group     = "io"
+style     = "bars"
+expr      = ["disk_write", "disk_read"]   # up (writes), then down (reads)
+names     = ["write", "read"]
+colors    = ["#FFD54F", "#FFA726"]
+max       = 1073741824   # 1 GB/s
+unit      = "bytes/s"
+bar_width = 10           # twice the CPU bars
+value     = false
+
+[[meter]]
+label     = "NET"
+group     = "io"
+style     = "bars"
+expr      = ["net_tx", "net_rx"]   # up, then down
+names     = ["up", "down"]
+colors    = ["#F06292", "#4DB6AC"]
+max       = 1073741824
+unit      = "bytes/s"
+bar_width = 10
+value     = false

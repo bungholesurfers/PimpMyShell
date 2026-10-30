@@ -1,0 +1,13 @@
+# Build output (cargo, cargo xtask installer).
+/target
+
+# Raw PGO training output; only the merged pgo/pms.profdata is kept.
+*.profraw
+
+# What PimpMyShell and its tools leave beside things: logs, the settings window's first backup of a hand-written config.
+*.log
+*.toml.bak
+
+# The release key's secret half never goes in the repository (pms-release keygen won't write it in one anyway).
+*.key
+*signing-key*

@@ -1,0 +1,58 @@
+# Builds PimpMyShell on every push to main and every pull request: clippy (warnings are errors), the tests, and a
+# plain release build, whose exes are kept as the run's artifact for trying out. Releases, built with fat LTO or PGO
+# and packaged, are release.yml's.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'update/stable.txt'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'update/stable.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rust-toolchain.toml names the compiler and its components; `rustup install` installs them.
+      - name: Toolchain
+        run: |
+          rustup install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The whole workspace, xtask (the build tasks) and the dev tools (pms-art, pms-recon) included.
+      - name: Clippy
+        run: cargo clippy --release --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --release --workspace
+
+      - name: Build
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pms-${{ github.sha }}
+          path: |
+            target/release/pmsd.exe
+            target/release/pms.exe
+            target/release/pms-gui.exe
+            target/release/pms_tap.dll
+            pms.example.toml
+          if-no-files-found: error

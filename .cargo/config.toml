@@ -1,0 +1,3 @@
+# `cargo xtask <task>`: PimpMyShell's build tasks (xtask/). `cargo xtask help` lists them.
+[alias]
+xtask = "run --quiet --release -p xtask --"

@@ -1,0 +1,16 @@
+[package]
+name = "pms-xaml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generated windows-rs projection for the slice of Windows.UI.Xaml we need (windows-rs dropped it)"
+
+[dependencies]
+windows-core = "0.62.2"
+windows-collections = "0.3"
+windows-future = "0.3"
+windows-numerics = "0.3"
+windows = { version = "0.62.2", features = ["ApplicationModel", "ApplicationModel_DataTransfer", "Devices_Input", "Foundation", "Media", "Media_Casting", "Media_PlayTo", "System", "UI_Composition", "UI_Core", "UI_Text", "UI_Input", "UI_WindowManagement", "Storage_Streams"] }
+
+[build-dependencies]
+windows-bindgen = "=0.65.0"

@@ -1,0 +1,10 @@
+[package]
+name = "pms-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Widgets PimpMyShell's windows share (the settings, the art customizer)"
+publish = false
+
+[dependencies]
+eframe = "0.31"

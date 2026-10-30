@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["pms-recon", "pms-tap", "pms-xaml", "pms", "pms-gui", "pms-art", "pms-res", "pms-ui", "xtask"]
+
+# One version for every crate - PimpMyShell's, which each exe and the TAP carry in their version resource, the
+# installer is named for, and the release's tag must match (cargo xtask, release.yml).
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Everyday release builds are for working on PimpMyShell: no LTO at all (not even Cargo's default thin-local one), 16
+# codegen units and incremental compilation, for the quickest rebuilds. Releases can take the PGO build (cargo xtask
+# pgo, pgo-build), which brings fat LTO over one unit and no incremental compilation along with it.
+[profile.release]
+debug = true
+lto = "off"
+codegen-units = 16
+incremental = true

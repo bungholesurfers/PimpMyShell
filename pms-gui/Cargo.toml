@@ -1,0 +1,13 @@
+[package]
+name = "pms-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pms = { path = "../pms" }
+eframe = "0.31"
+pms-ui = { path = "../pms-ui" }
+
+[build-dependencies]
+pms-res = { path = "../pms-res" }

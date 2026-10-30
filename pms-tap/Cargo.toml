@@ -1,0 +1,40 @@
+[package]
+name = "pms-tap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "UI_Core",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_WinRT",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "UI_Composition",
+    "Storage_Streams",
+] }
+png = "0.18.1"
+pms-xaml = { version = "0.1.0", path = "../pms-xaml" }
+windows-numerics = "0.3"
+windows-future = "0.3"
+
+[lints.rust]
+# Set by `cargo xtask pgo-instrument`: an instrumented build, whose TAP can be asked to write its profile (explorer,
+# which it lives in, never exits to have it written).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(pms_pgo)"] }
+
+[build-dependencies]
+pms-res = { path = "../pms-res" }

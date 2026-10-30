@@ -1,0 +1,100 @@
+# Builds a PimpMyShell release: the exes and the TAP - optimised with the PGO profile kept in pgo/ when there is one
+# (recorded on a PC with `cargo xtask pgo`, since the training runs on a real taskbar), else with fat LTO alone -
+# packaged by Inno Setup. A tag v* makes a draft GitHub release of it; run by hand, it leaves the files as the run's
+# artifact. The files are not code-signed (Windows' Authenticode); the updater's own signature is the manifest's,
+# below.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rust-toolchain.toml pins the compiler: a PGO profile only fits the one that recorded it.
+      - name: Toolchain
+        run: |
+          rustup install
+          rustup show active-toolchain
+
+      - name: Version
+        id: version
+        run: |
+          # The workspace's version ([workspace.package], the only top-level `version =` line in Cargo.toml).
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "value=$v" >> $env:GITHUB_OUTPUT
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "the tag $env:GITHUB_REF_NAME does not match the version in Cargo.toml, $v"
+          }
+
+      - name: Inno Setup
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      # Fat LTO over one codegen unit, optimised with the kept profile when there is one; no training here.
+      - name: Build
+        run: |
+          if (Test-Path pgo\pms.profdata) {
+            cargo xtask pgo-build
+          } else {
+            Write-Warning 'no pgo\pms.profdata: built with fat LTO but no profile (cargo xtask pgo records one)'
+            $env:CARGO_PROFILE_RELEASE_LTO = 'fat'; $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '1'; $env:CARGO_PROFILE_RELEASE_INCREMENTAL = 'false'
+            cargo xtask build
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'the build failed' }
+
+      - name: Package
+        run: cargo xtask installer --no-build
+
+      # The installer, the exes zipped for those who would rather not install, and the updater's manifest of the
+      # installer, signed with the release key (pms/src/signing.rs). Without the secret PMS_UPDATE_KEY the release
+      # has no manifest, and no copy of PimpMyShell updates to it by itself.
+      - name: Collect
+        env:
+          PMS_UPDATE_KEY: ${{ secrets.PMS_UPDATE_KEY }}
+        run: |
+          $v = '${{ steps.version.outputs.value }}'
+          New-Item -ItemType Directory -Force target\out | Out-Null
+          Copy-Item "target\installer\pms-setup-$v.exe" target\out
+          $portable = 'target\release\pmsd.exe', 'target\release\pms.exe', 'target\release\pms-gui.exe', 'target\release\pms_tap.dll', 'pms.example.toml', 'LICENSE'
+          Compress-Archive -Path $portable -DestinationPath "target\out\pms-portable-$v.zip" -Force
+          if ($env:PMS_UPDATE_KEY) {
+            .\target\release\pms-release.exe manifest "target\out\pms-setup-$v.exe" $v target\out
+            if ($LASTEXITCODE -ne 0) { throw 'the update manifest failed' }
+          } else {
+            Write-Warning 'PMS_UPDATE_KEY is not set: this release has no update manifest, so nothing updates to it by itself'
+          }
+          $sums = Get-ChildItem target\out | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName).Hash.ToLower(), $_.Name }
+          $sums | Set-Content target\out\SHA256SUMS.txt -Encoding ascii
+          $sums
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pms-${{ steps.version.outputs.value }}
+          path: target/out/*
+          if-no-files-found: error
+
+      - name: Draft the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The body is .github/release-notes.md, its placeholders filled in - the download links up top - with GitHub's
+        # generated list of changes after it.
+        run: |
+          $v = '${{ steps.version.outputs.value }}'
+          $signed = 'Not code-signed yet: SmartScreen may warn about the download. Choose More info > Run anyway.'
+          $notes = (Get-Content .github\release-notes.md -Raw).Replace('{{REPO}}', $env:GITHUB_REPOSITORY).Replace('{{TAG}}', $env:GITHUB_REF_NAME).Replace('{{VERSION}}', $v).Replace('{{SIGNED}}', $signed)
+          $notes | Set-Content target\release-notes.md -Encoding utf8
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem target\out).FullName --draft --title "PimpMyShell $v" --notes-file target\release-notes.md --generate-notes

@@ -1,0 +1,16 @@
+{
+  "crab_size": 256.0,
+  "crab_y": -3.0312576,
+  "bill_tilt": -12.937496,
+  "bill_size": 184.96875,
+  "bill_y": 192.21875,
+  "bill_color": "#85BB65",
+  "glass": "#010101",
+  "face_text": "$MSFT",
+  "face_color": "#FFA400",
+  "wizard_bg": "#FFFFFF",
+  "dollar_color": "#85BB65",
+  "dollar_strength": 0.15375035,
+  "dollar_size": 22.0,
+  "dollar_tilt": -15.0
+}

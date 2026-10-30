@@ -1,0 +1,58 @@
+[package]
+name = "pms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pms-tap = { path = "../pms-tap" }
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "ApplicationModel",
+    "Data_Xml_Dom",
+    "Management_Deployment",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Notifications",
+    "Win32_System_Ole",
+    "Foundation",
+    "Foundation_Collections",
+    "UI_Notifications",
+    "UI_Notifications_Management",
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_EventLog",
+    "Win32_System_Performance",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Storage_Streams",
+] }
+png = "0.18.1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+# The updater (update.rs), as Nagare has it: HTTPS through rustls with Mozilla's roots bundled, the manifest's
+# Ed25519 signature, the installer's SHA-256. Pinned.
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize"] }
+sha2 = "=0.11.0"
+getrandom = "=0.4.3"
+toml = "1.1.8"
+
+[build-dependencies]
+pms-res = { path = "../pms-res" }

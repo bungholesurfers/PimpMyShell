@@ -1,0 +1,6 @@
+# The compiler PimpMyShell is built with, here and in the release workflow. A PGO profile (pgo\pms.profdata) only fits
+# the compiler that recorded it, so a change here wants `cargo xtask pgo` run again with the new one.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "llvm-tools"]
+profile = "minimal"

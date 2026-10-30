@@ -1,0 +1,9 @@
+[package]
+name = "pms-res"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build-time helper: puts PimpMyShell's icon and version information into its executables"
+publish = false
+
+[dependencies]
