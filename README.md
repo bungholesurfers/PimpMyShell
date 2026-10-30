@@ -1,5 +1,7 @@
 # PimpMyShell (P.M.S.)
 
+![Upgrayedd, with his UPGRAYEDD license plate: "two D's, for a double dose of this pimping"](upgrayedd.png)
+
 **Exclusively for Windows 11.**
 
 PimpMyShell dresses up the Windows 11 taskbar from the inside. It hooks the taskbar's own XAML in explorer.exe and
