@@ -12,5 +12,5 @@ To roll a release out:
 2. Publish the release, and try it.
 3. When you're happy with it, put its tag here (`v0.1.1`, say) and push.
 
-Setting an older tag holds updates back. It never moves anyone backwards: PimpMyShell only installs a version newer
-than its own.
+Setting an older tag holds updates back. Updates by themselves never move anyone backwards: only a version newer than
+a copy's own is offered. (The settings' *Reinstall stable* can install an older stable, on request.)

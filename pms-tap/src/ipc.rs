@@ -1,4 +1,4 @@
-//! Wire protocol between the `pms` CLI and the TAP inside explorer.
+//! Wire protocol between the `pms` daemon or CLI and the TAP inside explorer.
 //!
 //! One duplex byte pipe; each request and each response is a frame: u32 LE length + UTF-8.
 //! A request is a command line; arguments are whitespace-separated, `"double quotes"` group.

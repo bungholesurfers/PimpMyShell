@@ -24,13 +24,20 @@ use crate::expr::{self, Expr};
 const PDH_FMT_NOCAP100: u32 = 0x8000;
 /// Below this an interval is pointless: about one frame at 60 Hz.
 const FRAME_MS: u64 = 16;
-/// Samples a `bar` without `max` looks back over to scale itself.
+/// Samples a bar, bars, disks or nics meter without `max` looks back over to scale itself.
 const AUTO_WINDOW: usize = 60;
 /// A new sampler's first sample, at the latest.
 const FIRST_SAMPLE: Duration = Duration::from_millis(150);
 const CORE_USER: &str = r"\Processor Information(*)\% User Time";
 const CORE_KERNEL: &str = r"\Processor Information(*)\% Privileged Time";
 const GPU_ENGINES: &str = r"\GPU Engine(*)\Utilization Percentage";
+/// `disks` and `nics` meters: per disk (write, read) and per interface (sent, received).
+const DISK_RATES: [&str; 2] = [r"\PhysicalDisk(*)\Disk Write Bytes/sec", r"\PhysicalDisk(*)\Disk Read Bytes/sec"];
+const NIC_RATES: [&str; 2] = [r"\Network Interface(*)\Bytes Sent/sec", r"\Network Interface(*)\Bytes Received/sec"];
+/// A GPU engine at least this busy (%) is working: the desktop keeps some engines at a trace, which is idle.
+const ENGINE_BUSY: f64 = 0.5;
+/// How often what's known of the disks and interfaces (names, models, the internet route) is looked up again.
+const DEVICE_REFRESH: Duration = Duration::from_secs(30);
 /// How often the list of GPUs present is refreshed (an engine stays while its GPU is there).
 const GPU_REFRESH: Duration = Duration::from_secs(30);
 
@@ -269,7 +276,25 @@ struct Group {
     cycles: Option<Cycles>,
     /// The GPU Engine utilization counter, if an `engines` meter is in this group.
     engines: Option<PDH_HCOUNTER>,
+    /// Per-disk and per-interface rates (DISK_RATES, NIC_RATES), if a `disks` / `nics` meter is in this group.
+    disks: Option<[PDH_HCOUNTER; 2]>,
+    nics: Option<[PDH_HCOUNTER; 2]>,
     meters: Vec<usize>,
+}
+
+/// Per instance, the rates of a pair of counters (`disks`: write, read; `nics`: sent, received).
+type Rates = HashMap<String, [f64; 2]>;
+
+fn rates(pair: [PDH_HCOUNTER; 2]) -> Rates {
+    let mut out: Rates = HashMap::new();
+    for (k, h) in pair.into_iter().enumerate() {
+        for (name, v) in instances(h).unwrap_or_default() {
+            if name != "_Total" {
+                out.entry(name).or_default()[k] += v;
+            }
+        }
+    }
+    out
 }
 
 /// Per-CPU busy fraction from idle cycle counts against the cycle counter. User/privileged time
@@ -286,7 +311,7 @@ struct Cycles {
 impl Group {
     /// Whether the group's query has counters to collect.
     fn reads(&self) -> bool {
-        !self.counters.is_empty() || self.cores.is_some() || self.engines.is_some()
+        !self.counters.is_empty() || self.cores.is_some() || self.engines.is_some() || self.disks.is_some() || self.nics.is_some()
     }
 }
 
@@ -312,18 +337,32 @@ struct Meter {
     shown: Option<bool>,
     absent_since: Option<Instant>,
     threshold: Option<Scale>,
-    /// Engines: every engine seen working (and when), and the ones on screen.
+    /// `show_when`: the level to watch, the level that shows the meter and the one under which it leaves; and
+    /// whether it's showing by it now.
+    gate: Option<(Expr, f64, f64)>,
+    gate_open: bool,
+    /// Engines: every engine seen with any activity, and when it last worked (ones at a trace only: long ago); and
+    /// the ones on screen.
     engines: HashMap<EngineKey, Instant>,
     engines_shown: Vec<EngineKey>,
     /// Engines: each shown GPU's power state, as last sent ("P8"; empty where unknown).
     states_sent: Vec<String>,
-    /// Last `meters tip` sent.
+    /// Last `meters tip` (pie) or `meters bartips` (bars, disks, nics) sent.
     tip: String,
+    /// Disks, nics: which devices show, in what order; and the bars and device tooltips last sent.
+    devices: crate::devices::Tracker,
+    bars_sent: Vec<String>,
+    devtips: Vec<String>,
 }
 
 /// Default colors for meters that don't set their own.
 const PALETTE: &[&str] = &["#4FC3F7", "#BA68C8", "#AED581", "#FFD54F", "#FF8A65", "#4DB6AC", "#F06292", "#9575CD"];
 const CORE_COLORS: [&str; 2] = ["#66BB6A", "#E040FB"];
+/// `disks`: write, read; `nics`: up, down.
+const DISK_COLORS: [&str; 2] = ["#FFD54F", "#FFA726"];
+const NIC_COLORS: [&str; 2] = ["#F06292", "#4DB6AC"];
+const DISK_PARTS: [&str; 2] = ["write", "read"];
+const NIC_PARTS: [&str; 2] = ["up", "down"];
 
 impl Meter {
     fn colors(&self, i: usize) -> Vec<String> {
@@ -345,7 +384,7 @@ pub struct Sampler {
     meters: Vec<Meter>,
     builtins: HashMap<String, f64>,
     topology: Option<Topology>,
-    /// Adapter LUID (as GPU Engine instance names spell it) -> adapter name.
+    /// Adapter LUID (as GPU Engine instance names spell it, lowercased) -> adapter name.
     gpus: HashMap<String, String>,
     gpus_checked: Instant,
     /// Show software adapters (Microsoft Basic Render Driver) too.
@@ -353,6 +392,11 @@ pub struct Sampler {
     /// NVIDIA's management library, for its GPUs' power states.
     nvml: Option<crate::nvml::Nvml>,
     warned: HashSet<String>,
+    /// What's known of the disks and interfaces the counters list, and when it was looked up (again when their
+    /// instances change, or after DEVICE_REFRESH).
+    disks: Vec<crate::devices::Disk>,
+    nics: Vec<crate::devices::Nic>,
+    devices_checked: Option<Instant>,
 }
 
 impl Sampler {
@@ -382,6 +426,9 @@ impl Sampler {
             if let Some(v) = spec.glow.as_deref().filter(|v| !["level", "heat", "off"].contains(v)) {
                 return Err(format!("meter `{}`: glow = \"{v}\": use \"level\", \"heat\" or \"off\"", spec.label));
             }
+            if let Some(v) = spec.kernel.as_deref().filter(|v| !["bottom", "top"].contains(v)) {
+                return Err(format!("meter `{}`: kernel = \"{v}\": use \"bottom\" or \"top\"", spec.label));
+            }
             if let Some(v) = spec.vendor_label.as_deref().filter(|v| !["ticker", "short"].contains(v)) {
                 return Err(format!("meter `{}`: vendor_label = \"{v}\": use \"ticker\" or \"short\"", spec.label));
             }
@@ -389,7 +436,7 @@ impl Sampler {
                 return Err(format!("meter `{}`: label_inside = \"{v}\": use \"always\", \"never\" or \"auto\"", spec.label));
             }
             let exprs = match (&spec.expr, spec.style) {
-                (_, Style::Cores | Style::Engines) => Vec::new(),
+                (_, Style::Cores | Style::Engines | Style::Disks | Style::Nics) => Vec::new(),
                 (Some(e), _) => e.list().iter().map(|s| parse(&spec.label, s)).collect::<Result<_, _>>()?,
                 (None, _) => return Err(format!("meter `{}` needs an `expr`", spec.label)),
             };
@@ -403,6 +450,16 @@ impl Sampler {
                 Some(Max::Number(n)) => Some(Scale::Fixed(*n)),
                 Some(Max::Expr(s)) => Some(Scale::Expr(parse(&spec.label, s)?)),
             };
+            let gate = match &spec.show_when {
+                None => None,
+                Some(w) => {
+                    let until = w.until.unwrap_or(w.at);
+                    if until > w.at {
+                        return Err(format!("meter `{}`: show_when's until ({until}) is above its at ({}); it leaves at or below where it appears", spec.label, w.at));
+                    }
+                    Some((parse(&spec.label, &w.expr)?, w.at, until))
+                }
+            };
             meters.push(Meter {
                 spec: spec.clone(),
                 exprs,
@@ -411,10 +468,15 @@ impl Sampler {
                 shown: None,
                 absent_since: None,
                 threshold,
+                gate,
+                gate_open: false,
                 engines: HashMap::new(),
                 engines_shown: Vec::new(),
                 states_sent: Vec::new(),
                 tip: String::new(),
+                devices: Default::default(),
+                bars_sent: Vec::new(),
+                devtips: Vec::new(),
             });
         }
         let topology = if meters.iter().any(|m| m.spec.style == Style::Cores) { Some(topology()?) } else { None };
@@ -436,7 +498,18 @@ impl Sampler {
             pdh(unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) }, "PdhOpenQuery")?;
             // From here on Drop closes the query, including on the error paths below.
             let mut group =
-                Group { interval: Duration::from_millis(ms), next: now, query, counters: Vec::new(), cores: None, cycles: None, engines: None, meters: members };
+                Group {
+                interval: Duration::from_millis(ms),
+                next: now,
+                query,
+                counters: Vec::new(),
+                cores: None,
+                cycles: None,
+                engines: None,
+                disks: None,
+                nics: None,
+                meters: members,
+            };
             let mut wanted = Vec::new();
             for &i in &group.meters {
                 let m = &meters[i];
@@ -444,7 +517,12 @@ impl Sampler {
                     Scale::Expr(e) => Some(e),
                     _ => None,
                 };
-                for e in m.exprs.iter().chain(max_expr) {
+                let threshold_expr = match &m.threshold {
+                    Some(Scale::Expr(e)) => Some(e),
+                    _ => None,
+                };
+                let gate_expr = m.gate.as_ref().map(|(e, ..)| e);
+                for e in m.exprs.iter().chain(max_expr).chain(threshold_expr).chain(gate_expr) {
                     e.vars(&mut wanted);
                 }
                 if m.spec.style == Style::Engines && group.engines.is_none() {
@@ -461,6 +539,19 @@ impl Sampler {
                     group.cores = Some((add(CORE_USER)?, add(CORE_KERNEL)?));
                     let cpus = topology.as_ref().map_or(&[][..], |t| &t.cpus[..]);
                     group.cycles = Some(Cycles { idle: idle_cycles(cpus), tsc: tsc(), user_share: vec![0.6; cpus.len()] });
+                }
+                let pair = |paths: [&str; 2]| -> Result<[PDH_HCOUNTER; 2], String> {
+                    let mut hs = [PDH_HCOUNTER::default(); 2];
+                    for (h, path) in hs.iter_mut().zip(paths) {
+                        pdh(unsafe { PdhAddEnglishCounterW(query, &HSTRING::from(path), 0, h) }, path)?;
+                    }
+                    Ok(hs)
+                };
+                if m.spec.style == Style::Disks && group.disks.is_none() {
+                    group.disks = Some(pair(DISK_RATES)?);
+                }
+                if m.spec.style == Style::Nics && group.nics.is_none() {
+                    group.nics = Some(pair(NIC_RATES)?);
                 }
             }
             for (name, spec) in &config.counters {
@@ -498,6 +589,9 @@ impl Sampler {
             software_gpus: config.software_gpus,
             nvml: if config.meters.iter().any(|m| m.style == Style::Engines) { crate::nvml::Nvml::open() } else { None },
             warned: HashSet::new(),
+            disks: Vec::new(),
+            nics: Vec::new(),
+            devices_checked: None,
         })
     }
 
@@ -532,6 +626,12 @@ impl Sampler {
             let mut fields = vec![format!("label={}", m.spec.label), format!("wide={}", widest(&m.spec))];
             match m.spec.style {
                 Style::Engines => {}
+                Style::Disks | Style::Nics => {
+                    let defaults = if m.spec.style == Style::Disks { DISK_COLORS } else { NIC_COLORS };
+                    let colors: Vec<String> = (0..2).map(|j| m.spec.colors.get(j).cloned().unwrap_or_else(|| defaults[j].into())).collect();
+                    fields.push("style=devices".into());
+                    fields.push(format!("colors={}", colors.join(",")));
+                }
                 Style::Bars => {
                     let n = m.exprs.len().max(1);
                     let colors: Vec<String> =
@@ -584,11 +684,14 @@ impl Sampler {
             if m.spec.snug == Some(true) {
                 fields.push("snug=1".into());
             }
-            if let Some(v) = &m.spec.vendor_label {
-                fields.push(format!("vendorlabel={v}"));
+            if m.spec.style == Style::Engines {
+                fields.push(format!("vendorlabel={}", m.spec.vendor_label.as_deref().unwrap_or("short")));
             }
             if let Some(g) = &m.spec.glow {
                 fields.push(format!("glow={g}"));
+            }
+            if let Some(k) = &m.spec.kernel {
+                fields.push(format!("kernel={k}"));
             }
             if m.spec.tooltip == Some(false) {
                 fields.push("notip=1".into());
@@ -608,6 +711,8 @@ impl Sampler {
             // The TAP needs to hear about bars and tooltips again.
             m.engines_shown.clear();
             m.tip.clear();
+            m.bars_sent.clear();
+            m.devtips.clear();
             out.push(std::iter::once("meters add".to_string()).chain(fields.iter().map(|f| q(f))).collect::<Vec<_>>().join(" "));
             if m.spec.style == Style::Bars {
                 let names: Vec<String> = (0..m.exprs.len()).map(|j| q(m.spec.names.get(j).map_or(&(j + 1).to_string(), |n| n))).collect();
@@ -675,11 +780,38 @@ impl Sampler {
                 self.gpus = gpu_names(self.software_gpus);
                 self.gpus_checked = Instant::now();
             }
+            let disks = self.groups[gi].disks.map(rates);
+            let nics = self.groups[gi].nics.map(rates);
+            self.know_devices(disks.as_ref(), nics.as_ref(), now);
             for mi in self.groups[gi].meters.clone() {
-                out.extend(self.push_lines(mi, &env, cores.as_deref(), engines.as_ref(), now));
+                out.extend(self.push_lines(mi, &env, cores.as_deref(), engines.as_ref(), [disks.as_ref(), nics.as_ref()], now));
             }
         }
         out
+    }
+
+    /// Look up the disks and interfaces again if the counters list others than we know of, or it's been a while
+    /// (an address, the route to the internet, free space can change).
+    fn know_devices(&mut self, disks: Option<&Rates>, nics: Option<&Rates>, now: Instant) {
+        let stale = self.devices_checked.is_none_or(|t| now.duration_since(t) >= DEVICE_REFRESH);
+        let differ = |known: Vec<&String>, seen: Option<&Rates>| seen.is_some_and(|s| s.len() != known.len() || known.iter().any(|k| !s.contains_key(*k)));
+        let new_disks = differ(self.disks.iter().map(|d| &d.instance).collect(), disks);
+        let new_nics = differ(self.nics.iter().map(|n| &n.instance).collect(), nics);
+        if !(stale || new_disks || new_nics) || (disks.is_none() && nics.is_none()) {
+            return;
+        }
+        let sorted = |r: &Rates| {
+            let mut v: Vec<String> = r.keys().cloned().collect();
+            v.sort();
+            v
+        };
+        if let Some(d) = disks {
+            self.disks = crate::devices::disks(&sorted(d));
+        }
+        if let Some(n) = nics {
+            self.nics = crate::devices::nics(&sorted(n));
+        }
+        self.devices_checked = Some(now);
     }
 
     /// `meters push` for meter `i`, preceded by a `meters presence` change if its data came or
@@ -691,11 +823,13 @@ impl Sampler {
         env: &HashMap<String, f64>,
         cores: Option<&[(f64, f64)]>,
         engines: Option<&HashMap<EngineKey, f64>>,
+        [disk_rates, nic_rates]: [Option<&Rates>; 2],
         now: Instant,
     ) -> Vec<String> {
         let q = crate::quote;
         let gpus = &self.gpus;
         let nvml = self.nvml.as_ref();
+        let (disks, nics) = (&self.disks, &self.nics);
         let m = &mut self.meters[i];
         let mut pre = Vec::new();
         let values: Vec<f64> = m.exprs.iter().map(|e| e.eval(env).unwrap_or(f64::NAN)).collect();
@@ -757,31 +891,125 @@ impl Sampler {
                 }
                 (String::new(), values.iter().map(|v| if scale > 0.0 && v.is_finite() { v / scale } else { 0.0 }).collect())
             }
+            Style::Disks | Style::Nics => {
+                let is_disk = m.spec.style == Style::Disks;
+                let rates = if is_disk { disk_rates } else { nic_rates }.cloned().unwrap_or_default();
+                let parts = |j: usize| m.spec.names.get(j).cloned().unwrap_or_else(|| (if is_disk { DISK_PARTS } else { NIC_PARTS })[j].to_string());
+                // Each device: its label, whether it's the one that always shows, and what its tooltip says beyond
+                // its readings.
+                let about = |inst: &str| -> (String, bool, Vec<String>) {
+                    if is_disk {
+                        match disks.iter().find(|d| d.instance == inst) {
+                            Some(d) => {
+                                let mut lines = vec![d.model.clone()];
+                                lines.extend(d.volumes.iter().filter(|v| v.2 > 0).map(|(l, free, total)| format!("{l} {}", crate::devices::space(*free, *total))));
+                                (d.label.clone(), d.system, lines)
+                            }
+                            None => (inst.to_string(), false, Vec::new()),
+                        }
+                    } else {
+                        match nics.iter().find(|n| n.instance == inst) {
+                            Some(n) => {
+                                let mut lines = vec![if n.description.is_empty() { n.name.clone() } else { format!("{} — {}", n.name, n.description) }];
+                                let v4 = n.addresses.iter().filter(|a| !a.contains(':'));
+                                let v6 = n.addresses.iter().filter(|a| a.contains(':')).take(1);
+                                let link = std::iter::once(crate::devices::link_speed(n.speed)).filter(|s| !s.is_empty());
+                                lines.push(link.chain(v4.chain(v6).cloned()).collect::<Vec<_>>().join(" · "));
+                                (n.label.clone(), n.internet, lines)
+                            }
+                            None => (inst.to_string(), false, Vec::new()),
+                        }
+                    }
+                };
+                let mut readings: Vec<(String, f64)> = rates.iter().map(|(k, r)| (k.clone(), r[0] + r[1])).collect();
+                readings.sort_by(|a, b| a.0.cmp(&b.0));
+                let pinned = readings.iter().map(|(k, _)| k.clone()).find(|k| about(k).1);
+                let hold = Duration::from_secs(m.spec.hold_seconds.unwrap_or(15));
+                let order = m.devices.update(now, &readings, pinned.as_deref(), hold).to_vec();
+                let labels: Vec<String> = order.iter().flat_map(|k| {
+                    let label = about(k).0;
+                    (0..2).map(move |j| (label.clone(), j))
+                }).map(|(label, j)| format!("{label} — {}", parts(j))).collect();
+                if labels != m.bars_sent {
+                    pre.push(format!("meters bars {i} {}", labels.iter().map(|l| q(l)).collect::<Vec<_>>().join(" ")));
+                    m.bars_sent = labels;
+                }
+                let pairs: Vec<[f64; 2]> = order.iter().map(|k| rates.get(k).copied().unwrap_or_default()).collect();
+                let flat: Vec<f64> = pairs.iter().flatten().copied().collect();
+                if !flat.is_empty() {
+                    if m.recent.len() == AUTO_WINDOW {
+                        m.recent.pop_front();
+                    }
+                    m.recent.push_back(flat.iter().copied().fold(0.0, f64::max));
+                }
+                absent = order.is_empty();
+                let scale = max.unwrap_or_else(|| m.recent.iter().copied().fold(0.0, f64::max) * 1.1);
+                let tips: Vec<String> = flat.iter().map(|v| q(&format_value(*v, &m.spec))).collect();
+                let tip = tips.join(" ");
+                if tip != m.tip {
+                    pre.push(format!("meters bartips {i} {tip}"));
+                    m.tip = tip;
+                }
+                // A tooltip per device: what it is, what it's doing, and why it's there.
+                let devtips: Vec<String> = order
+                    .iter()
+                    .zip(&pairs)
+                    .map(|(k, r)| {
+                        let (label, pinned, more) = about(k);
+                        let why = match (pinned, is_disk) {
+                            (true, true) => " · Windows is on it",
+                            (true, false) => " · the route to the internet",
+                            (false, _) => "",
+                        };
+                        let mut lines = vec![format!("{} {label}{why}", m.spec.label)];
+                        lines.push((0..2).map(|j| format!("{} {}", parts(j), format_value(r[j], &m.spec))).collect::<Vec<_>>().join(" · "));
+                        lines.extend(more.into_iter().filter(|l| !l.is_empty()));
+                        if !pinned {
+                            lines.push(if hold.is_zero() { "here since it was busy".into() } else { format!("here while busy; leaves {}s after", hold.as_secs()) });
+                        }
+                        lines.join("\n")
+                    })
+                    .collect();
+                if devtips != m.devtips {
+                    pre.push(format!("meters devtips {i} {}", devtips.iter().map(|t| q(t)).collect::<Vec<_>>().join(" ")));
+                    m.devtips = devtips;
+                }
+                let total: f64 = flat.iter().sum();
+                (format_value(total, &m.spec), flat.iter().map(|v| if scale > 0.0 && v.is_finite() { v / scale } else { 0.0 }).collect())
+            }
             Style::Engines => {
                 let util = engines.cloned().unwrap_or_default();
+                // Busy engines are noted as working now; ones at a trace are noted too, as having worked long ago
+                // (no bar of their own once engines fall off, but a GPU that's never been busy still has one).
+                let long_ago = now.checked_sub(Duration::from_secs(m.spec.hold_seconds.unwrap_or(15) + 1)).unwrap_or(now);
                 for (k, v) in &util {
-                    if *v > 0.0 {
+                    if *v >= ENGINE_BUSY {
                         m.engines.insert(k.clone(), now);
+                    } else if *v > 0.0 {
+                        m.engines.entry(k.clone()).or_insert(long_ago);
                     }
                 }
-                // Whole adapters come and go, never single engines: an adapter shows while any of
-                // its engines worked within `engine_hold_seconds` (0 = for good), and the most
-                // recently active adapter always stays. A shown adapter keeps a bar for every engine
-                // that ever worked (drivers list many that never do). Adapters must also still be
-                // present (the adapter list, not the counter's instances, which idle engines can
-                // drop out of).
-                let hold = m.spec.engine_hold_seconds.unwrap_or(15);
+                // An adapter shows while any of its engines worked within `hold_seconds` (0 = for good), and the
+                // most recently active adapter always stays. A shown adapter keeps a bar for every engine that ever
+                // worked (drivers list many that never do); with `engines_fall_off`, only for those that worked within
+                // the hold too (the latest adapter keeps at least its latest engine). Adapters must also still be
+                // present (the adapter list, not the counter's instances, which idle engines can drop out of).
+                let hold = m.spec.hold_seconds.unwrap_or(15);
+                let recent = |t: &Instant| hold == 0 || now.duration_since(*t) < Duration::from_secs(hold);
                 let mut adapters: HashMap<&str, Instant> = HashMap::new();
                 for (k, t) in &m.engines {
                     let last = adapters.entry(k.0.as_str()).or_insert(*t);
                     *last = (*last).max(*t);
                 }
                 let latest = adapters.iter().max_by_key(|(_, t)| **t).map(|(a, _)| *a);
+                let latest_engine = m.engines.iter().filter(|(k, _)| Some(k.0.as_str()) == latest).max_by_key(|(_, t)| **t).map(|(k, _)| k);
                 let shown = |a: &str| {
-                    let recent = adapters.get(a).is_some_and(|t| hold == 0 || now.duration_since(*t) < Duration::from_secs(hold));
-                    (recent || Some(a) == latest) && (gpus.is_empty() || gpus.contains_key(a))
+                    let busy = adapters.get(a).is_some_and(recent);
+                    (busy || Some(a) == latest) && (gpus.is_empty() || gpus.contains_key(a))
                 };
-                let mut on: Vec<EngineKey> = m.engines.keys().filter(|k| shown(&k.0)).cloned().collect();
+                let fall_off = m.spec.engines_fall_off == Some(true);
+                let mut on: Vec<EngineKey> =
+                    m.engines.iter().filter(|(k, t)| shown(&k.0) && (!fall_off || recent(t) || Some(*k) == latest_engine)).map(|(k, _)| k.clone()).collect();
                 // Adapter, then engine type (same-type engines sit together), then index.
                 on.sort_by(|a, b| (&a.0, a.1, &a.3, a.2).cmp(&(&b.0, b.1, &b.3, b.2)));
                 if on != m.engines_shown {
@@ -789,18 +1017,20 @@ impl Sampler {
                     pre.push(format!("meters bars {i} {}", labels.join(" ")));
                     m.engines_shown = on.clone();
                 }
-                // Each shown GPU's power state, in the order the strip shows them (NVIDIA's only, from NVML).
+                // The shown adapters, in the strip's order.
+                let mut shown_gpus: Vec<&str> = Vec::new();
+                for k in &on {
+                    if shown_gpus.last() != Some(&k.0.as_str()) {
+                        shown_gpus.push(&k.0);
+                    }
+                }
+                // Each shown GPU's power state (NVIDIA's only, from NVML).
+                let mut states = Vec::new();
                 if let Some(nvml) = nvml {
                     let all = nvml.states();
                     let mut seen: HashMap<&str, usize> = HashMap::new();
-                    let mut states = Vec::new();
-                    let mut last: Option<&str> = None;
-                    for k in &on {
-                        if last == Some(k.0.as_str()) {
-                            continue;
-                        }
-                        last = Some(k.0.as_str());
-                        let name = gpus.get(&k.0).map_or("", String::as_str);
+                    for luid in &shown_gpus {
+                        let name = gpus.get(*luid).map_or("", String::as_str);
                         let nth = seen.entry(name).or_default();
                         states.push(all.get(name).and_then(|s| s.get(*nth)).cloned().unwrap_or_default());
                         *nth += 1;
@@ -808,8 +1038,39 @@ impl Sampler {
                     if states != m.states_sent {
                         let words: Vec<String> = states.iter().map(|s| if s.is_empty() { "-".to_string() } else { s.clone() }).collect();
                         pre.push(format!("meters gpustate {i} {}", words.join(" ")));
-                        m.states_sent = states;
+                        m.states_sent = states.clone();
                     }
+                }
+                // A tooltip per GPU: its name and power state, and what its engines are doing (the busiest eight
+                // that are working, shown or not).
+                let devtips: Vec<String> = shown_gpus
+                    .iter()
+                    .enumerate()
+                    .map(|(j, luid)| {
+                        let name = gpus.get(*luid).map_or("GPU", String::as_str);
+                        let mut head = name.to_string();
+                        if let Some(s) = states.get(j).filter(|s| !s.is_empty()) {
+                            head += &format!(" · power state {s}");
+                        }
+                        let mut busy: Vec<(&EngineKey, f64)> = util.iter().filter(|(k, v)| k.0 == *luid && **v >= ENGINE_BUSY).map(|(k, v)| (k, *v)).collect();
+                        busy.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.2.cmp(&b.0.2)));
+                        let kinds = |kind: &str| util.keys().filter(|k| k.0 == *luid && k.3 == kind).count();
+                        let work: Vec<String> = busy
+                            .iter()
+                            .take(8)
+                            .map(|(k, v)| {
+                                let kind = if k.3.is_empty() { "engine".to_string() } else { k.3.replace('_', " ") };
+                                let kind = if kinds(&k.3) > 1 { format!("{kind} {}", k.2) } else { kind };
+                                format!("{kind} {v:.0}%")
+                            })
+                            .collect();
+                        let work = if work.is_empty() { "idle".to_string() } else { work.join(" · ") };
+                        format!("{head}\n{work}")
+                    })
+                    .collect();
+                if devtips != m.devtips {
+                    pre.push(format!("meters devtips {i} {}", devtips.iter().map(|t| q(t)).collect::<Vec<_>>().join(" ")));
+                    m.devtips = devtips;
                 }
                 absent = on.is_empty();
                 let vals: Vec<f64> = on.iter().map(|k| util.get(k).copied().unwrap_or(0.0) / 100.0).collect();
@@ -834,6 +1095,11 @@ impl Sampler {
         };
         if let Some(t) = threshold {
             absent |= level.is_nan() || level < t;
+        }
+        // show_when: in at `at`, out under `until` (a level that can't be read keeps it out).
+        if let Some((e, at, until)) = &m.gate {
+            m.gate_open = gate(m.gate_open, e.eval(env).unwrap_or(f64::NAN), *at, *until);
+            absent |= !m.gate_open;
         }
 
         // Pies explain themselves in the tooltip: named slices, and what they are out of.
@@ -908,6 +1174,12 @@ fn engine_label(k: &EngineKey, gpus: &HashMap<String, String>) -> String {
     let gpu = gpus.get(&k.0).map_or("GPU", String::as_str);
     let kind = k.3.replace('_', " ");
     if kind.is_empty() { format!("{gpu} — engine {}", k.2) } else { format!("{gpu} — {kind} (engine {})", k.2) }
+}
+
+/// `show_when`'s step: whether the meter shows now, given whether it did and the level - in once it reaches `at`,
+/// out once it's under `until` (a level that can't be read, NaN, keeps it out).
+fn gate(open: bool, level: f64, at: f64, until: f64) -> bool {
+    level >= if open { until } else { at }
 }
 
 /// Software adapters - Microsoft Basic Render Driver (WARP), which Windows keeps around and which does CPU work, not
@@ -992,7 +1264,7 @@ fn read(counter: &Counter) -> Result<f64, String> {
     })
 }
 
-/// How long a meter that lost its data keeps showing "none" before it leaves.
+/// How long a meter that lost its data keeps showing (a pie "none", others "–") before it leaves.
 const ABSENT_GRACE: Duration = Duration::from_secs(5);
 
 /// The widest text a meter's value is likely to need, so its cell doesn't jitter as values change.
@@ -1161,6 +1433,19 @@ mod tests {
         assert_eq!(t.cpus.len(), si.dwNumberOfProcessors as usize, "layout {}", t.layout);
         let threads: usize = t.layout.split(['|', '/', ',']).map(|c| c.trim_start_matches('e').parse::<usize>().unwrap()).sum();
         assert_eq!(threads, t.cpus.len());
+    }
+
+    /// show_when: hidden until `at`, then shown until under `until` - a level wavering between the two doesn't
+    /// make the meter blink; one that can't be read hides it.
+    #[test]
+    fn show_when_has_hysteresis() {
+        let mut open = false;
+        let mut seen = Vec::new();
+        for level in [0.5, 0.84, 0.85, 0.83, 0.86, 0.81, 0.8, 0.79, 0.82, 0.84, 0.9, f64::NAN] {
+            open = gate(open, level, 0.85, 0.8);
+            seen.push(open);
+        }
+        assert_eq!(seen, [false, false, true, true, true, true, true, false, false, false, true, false]);
     }
 
     /// The adapters DXGI flags as software (Microsoft Basic Render Driver, on most machines) are left out of GPU

@@ -1,8 +1,9 @@
 //! A toast's colors: its icon's most prominent color glowing softly behind the icon on the card; a faint, wide glow
 //! under the whole toast; and rings in that color rippling out from the icon across the whole taskbar. The last two
-//! are in the background, under the buttons, like the hot-mic alert, for as long as the toast is up.
+//! are in the background, under the buttons, like the hot-mic alert, for as long as the card that brought them is in
+//! front.
 //!
-//!   background Grid (stage.rs order) ... [Alert host] [ripple host] ...
+//!   background Grid (stage.rs order) ... [Alert slot: the alert's, ripple's and button glows' hosts] ...
 //!     |- SpriteVisual: the glow under the toast
 //!     `- ShapeVisual: the rings (rings.rs)
 //!
@@ -228,7 +229,7 @@ impl Ripple {
     }
 }
 
-/// The toast went: the glow under it fades, the rings in flight finish their journey, and no more set out.
+/// The card it greeted left the front (or the toast went): the glow under it fades, the rings in flight finish their journey, and no more set out.
 pub fn stop() {
     RIPPLE.with_borrow_mut(|r| {
         if let Some(r) = r.as_mut()

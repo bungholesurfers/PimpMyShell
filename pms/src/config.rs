@@ -188,6 +188,11 @@ pub enum Style {
     Engines,
     /// A vertical bar per expression (e.g. NET up and down).
     Bars,
+    /// A pair of bars (write, read) per physical disk: the one Windows is on always, first; the others while busy.
+    Disks,
+    /// A pair of bars (up, down) per network interface: the one the internet route takes always, first; the others
+    /// while busy.
+    Nics,
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
@@ -213,53 +218,71 @@ pub enum Max {
     Expr(String),
 }
 
+/// A meter's `show_when`: it appears once `expr` reaches `at`, and leaves once `expr` is back under `until`
+/// (default: `at`), so that a level hovering at `at` doesn't make it blink. E.g. the pagefile, only once RAM runs
+/// short: `{ expr = "1 - mem_avail / ram_total", at = 0.85, until = 0.8 }`.
+#[derive(Deserialize, Serialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ShowWhen {
+    pub expr: String,
+    pub at: f64,
+    pub until: Option<f64>,
+}
+
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MeterSpec {
     pub label: String,
     #[serde(default, skip_serializing_if = "is_history")]
     pub style: Style,
-    /// One expression, or (pie) one per slice. Unused by `cores`.
+    /// One expression, or (pie, bars) one per slice or bar. Unused by cores, engines, disks and nics.
     pub expr: Option<Exprs>,
     pub color: Option<String>,
-    /// Pie slices; `cores`: [user, kernel].
+    /// Pie slices; bars: one per bar; cores: [user, kernel]; disks: [write, read]; nics: [up, down]. Others: the
+    /// first stands in for `color`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub colors: Vec<String>,
-    /// Full scale: a number or an expression (`"vram_total"`). Omitted: history and bar
-    /// auto-scale to recent values, a pie divides its slices by their sum.
+    /// Full scale: a number or an expression (`"vram_total"`). Omitted: history, bar, bars,
+    /// disks and nics auto-scale to recent values; a pie divides its slices by their sum.
     pub max: Option<Max>,
     /// This meter's own sample interval; default: the top-level `interval_ms`.
     pub interval_ms: Option<u64>,
     /// Meters in different groups get a separator between them.
     pub group: Option<String>,
-    /// Show the value text (bar, pie, cores, engines; history always shows it). Default true.
+    /// Show the value text (bar, pie, cores, engines, bars, disks, nics; history always shows it). Default true.
     pub value: Option<bool>,
     /// Hover tooltip. Default true.
     pub tooltip: Option<bool>,
-    /// cores / engines: bar width in DIPs (before any squeezing).
+    /// cores / engines / bars / disks / nics: bar width in DIPs (before any squeezing).
     pub bar_width: Option<f64>,
     /// Only show the meter while its value is at or above this (number or expression).
     pub show_above: Option<Max>,
-    /// Pie: a name per slice, for the tooltip ("in use", "standby", ...).
+    /// Only show the meter while something else says it matters (see ShowWhen).
+    pub show_when: Option<ShowWhen>,
+    /// Pie / bars: a name per slice or bar, for the tooltip ("in use", "standby", ...); disks / nics: each device's
+    /// two bars (default write/read, up/down).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub names: Vec<String>,
-    /// Pie: label inside the pie: "always", "never", or "auto" (default: only when space is short).
+    /// Pie: label inside the pie: "always", "auto" (only when space is short) or "never" (default).
     pub label_inside: Option<String>,
-    /// Engines: label each GPU by its maker (NVDA, AMD, INTC, QCOM, MSFT) in place of the caption, and light its bars
+    /// Engines: label each GPU by its maker (see `vendor_label`) in place of the caption, and light its bars
     /// in the maker's colors with a glow of them around (default true).
     pub vendors: Option<bool>,
     /// false: no label beside the meter (it stays in the tooltip).
     pub caption: Option<bool>,
     /// true: right against the meter before it, no separator or spacing between (whatever the groups).
     pub snug: Option<bool>,
-    /// Engines: "ticker" (default: NVDA, AMD, INTC, QCOM, MSFT) or "short" (NV, RAD; the rest as tickers).
+    /// Engines: "short" (default: NV, RAD; the rest as tickers) or "ticker" (NVDA, AMD, INTC, QCOM, MSFT).
     pub vendor_label: Option<String>,
     /// Cores / engines: how the bars glow. "level" (default): by how busy they are now. "heat": each bar heats up as
     /// it works (to full in ~8 s at 100%) and cools when it stops (~30 s): the hotter, the wider and brighter its
     /// glow, and the brighter its fill; a CPU thread's kernel part glows in kernel's color. "off".
     pub glow: Option<String>,
-    /// One of this meter for every graphics adapter with memory of its own (dedicated memory above 0), each
-    /// reading that adapter's dedicated memory against its size, in its maker's color: `expr`, `max` and `color` are
+    /// Cores: where each thread's kernel time sits in its bar: "bottom" (default; user time stacked above it) or
+    /// "top" (above user time).
+    pub kernel: Option<String>,
+    /// One of this meter for every graphics adapter with at least `min_memory_mb` of dedicated memory (default 1024),
+    /// each reading that adapter's dedicated memory against its size, in its maker's color (if known): `expr`, `max` and `color` are
     /// filled in. Software adapters only with software_gpus.
     pub per_gpu: Option<bool>,
     /// per_gpu: an adapter needs this much dedicated memory (MB) for a meter of its own (default 1024). Graphics
@@ -273,8 +296,12 @@ pub struct MeterSpec {
     pub time_axis: Option<String>,
     /// History: how far back the graph reaches, in seconds (default 300).
     pub history_seconds: Option<u64>,
-    /// Engines: how long an idle GPU stays before its bars fall off (default 15; 0 = for good).
-    pub engine_hold_seconds: Option<u64>,
+    /// Engines, disks, nics: how long an idle GPU (or engine, with engines_fall_off), disk or network interface stays
+    /// before its bars fall off (default 15; 0 = for good).
+    #[serde(alias = "engine_hold_seconds")]
+    pub hold_seconds: Option<u64>,
+    /// Engines: idle engines fall off too, each on its own, not just whole GPUs.
+    pub engines_fall_off: Option<bool>,
     /// "%", "bytes", "bytes/s", "bits/s", or any suffix to print after the number.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub unit: String,
@@ -284,14 +311,14 @@ pub struct MeterSpec {
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Backdrop {
-    /// The dark look (and the only one, without `[backdrop.light]`): the tint over the blurred
-    /// desktop, alpha its opacity (default #7F060606)...
+    /// The dark look: the tint over the blurred desktop, alpha its opacity (default #7F060606)...
     pub tint: Option<String>,
     /// ... grain opacity 0..1 (default 0.01) ...
     pub grain: Option<f32>,
     /// ... and paint for the free space between buttons.
     pub gaps: Option<String>,
-    /// The look while Windows is in light mode (default: tint #C8F3F3F3, grain 0.01).
+    /// The look while Windows is in light mode. Without it: tint #C8F3F3F3 with the grain and gaps above; with it,
+    /// its unset keys are tint #C8F3F3F3, grain 0.01, no gaps.
     pub light: Option<Look>,
 }
 
@@ -327,7 +354,7 @@ impl Default for Hotmic {
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Toasts {
-    /// How long each toast stays (shorter while more are queued).
+    /// How long each toast stays in front (a card that comes forward again with more behind it: at most 4 s).
     pub duration_ms: u32,
     /// Apps that keep their native banners, matched case-insensitively against the app name or
     /// AUMID, e.g. "Teams" for incoming calls.

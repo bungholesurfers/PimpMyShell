@@ -2,15 +2,17 @@
 //!
 //! The stock brush bakes blur, tint and grain into one effect, so nothing can be drawn between
 //! them. Instead we hide its fill and attach our own composition tree to a host element that
-//! sits right above `BackgroundFill` (and so below every button):
+//! sits right above `BackgroundFill` (and so below every button), and the grain to a second host
+//! above the stage, so it lies over the meters too (stage.rs has the order):
 //!
-//!   host Grid (XAML, inserted after BackgroundFill)
+//!   host Grid (XAML, stage Slot::Backdrop, right after BackgroundFill)
 //!     `- root ContainerVisual  (ElementCompositionPreview::SetElementChildVisual)
 //!         |- backdrop  SpriteVisual  HostBackdropBrush (DWM's already-blurred backdrop)
 //!         |- tint      SpriteVisual  color brush          <- `tint`
 //!         |- layer     SpriteVisual  color brush          <- `layer`, `pulse`: our stuff goes here
-//!         |- gaps      ContainerVisual over free space    <- `gaps` (follows layout.rs)
-//!         `- grain     ContainerVisual of noise tiles     <- `grain`
+//!         `- gaps      ContainerVisual over free space    <- `gaps` (follows layout.rs)
+//!   grain host Grid (XAML, stage Slot::Grain, above the stage)
+//!     `- grain     ContainerVisual of noise tiles         <- `grain`
 //!
 //! Everything here runs on the XAML UI thread, so state lives in a thread_local.
 

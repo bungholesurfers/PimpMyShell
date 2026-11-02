@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod daemon;
+mod devices;
 mod expr;
 mod hotmic;
 pub mod meters;

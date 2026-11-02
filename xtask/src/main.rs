@@ -21,7 +21,7 @@ cargo xtask <task>:
                        and with --install install it silently over the installed copy
   pgo [SECONDS]        the whole PGO pass: pgo-instrument, pgo-train, pgo-merge, pgo-build (a few minutes)
   pgo-instrument       the instrumented build, into target/pgo-instrumented
-  pgo-train [SECONDS]  runs it on this taskbar for SECONDS (default 60): meters, the hot-mic alert, toasts.
+  pgo-train [SECONDS]  runs it on this taskbar for SECONDS (default 60): meters, toasts, and (40 or more) the hot-mic alert.
                        A running daemon is stopped first and started again after.
   pgo-merge            merge what it recorded into pgo/pms.profdata (needs: rustup component add llvm-tools)
   pgo-build            the optimised release build from pgo/pms.profdata: target/release
@@ -243,7 +243,7 @@ fn pgo_train(seconds: u64) -> Result {
         return Err("couldn't inject the instrumented TAP into explorer".into());
     }
     println!("injected the instrumented TAP (it stays in explorer, working as usual, until explorer restarts)");
-    // The bundled example exercises nearly everything: every meter style, the backdrop, the hot mic, toasts.
+    // The bundled example exercises nearly everything: most meter styles (not bar or bars), the backdrop, the hot mic, toasts.
     let config = std::env::temp_dir().join("pms-pgo.toml");
     std::fs::copy(root().join("pms.example.toml"), &config).map_err(|e| e.to_string())?;
     let mut d = Command::new(&daemon).arg(&config).spawn().map_err(|e| format!("{}: {e}", daemon.display()))?;

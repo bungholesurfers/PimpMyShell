@@ -2,8 +2,9 @@
 //!
 //! Meters live on the stage, below the taskbar's own layers, where the pointer never reaches
 //! them. So hover zones (transparent rectangles) sit in the top layer, in the Grid that holds the
-//! TaskbarFrame and the tray, laid over each meter (meters.rs places them). A zone may be split
-//! into bars (per CPU, per GPU engine): the tooltip says which one the pointer is over. The
+//! TaskbarFrame and the tray, laid over each meter and the space around it (meters.rs places
+//! them; a GPU, disk or network meter gets one per GPU or device). A zone may be split into bars
+//! (per CPU, per GPU engine): the tooltip says which one the pointer is over. The
 //! tooltip is a windowed Popup, so it can stand above the taskbar; it follows the pointer and
 //! closes as soon as the pointer leaves the zone. UI thread only.
 
@@ -26,12 +27,15 @@ const BORDER: Color = Color { A: 0x40, R: 0xFF, G: 0xFF, B: 0xFF };
 const TEXT: Color = Color { A: 0xFF, R: 0xFF, G: 0xFF, B: 0xFF };
 const OFFSET: Point = Point { X: 14.0, Y: 10.0 };
 
-/// A zone as meters.rs describes it: which meter, where (taskbar-window DIPs), and the bars'
-/// [start, end) x ranges relative to the zone's left edge.
+/// A zone as meters.rs describes it: which meter, where (taskbar-window DIPs), the bars' [start, end) x ranges
+/// relative to the zone's left edge and the meter's index of the first of them, and which of the meter's GPUs or
+/// devices it covers (if it covers just one).
 pub struct ZoneSpec {
     pub meter: usize,
     pub rect: Rect,
     pub bars: Vec<(f64, f64)>,
+    pub bar0: usize,
+    pub device: Option<usize>,
 }
 
 struct Zone {
@@ -39,6 +43,8 @@ struct Zone {
     meter: usize,
     left: f64,
     bars: Vec<(f64, f64)>,
+    bar0: usize,
+    device: Option<usize>,
 }
 
 struct Tips {
@@ -127,7 +133,7 @@ pub fn set_zones(specs: Vec<ZoneSpec>) {
                 }))
                 .map_err(w)?;
                 children.Append(&el).map_err(w)?;
-                t.zones.push(Zone { rect, meter: usize::MAX, left: 0.0, bars: Vec::new() });
+                t.zones.push(Zone { rect, meter: usize::MAX, left: 0.0, bars: Vec::new(), bar0: 0, device: None });
             }
             for (i, z) in t.zones.iter_mut().enumerate() {
                 let el = ui(&z.rect)?;
@@ -137,7 +143,7 @@ pub fn set_zones(specs: Vec<ZoneSpec>) {
                         Canvas::SetTop(&el, (s.rect.Y - origin.Y) as f64).map_err(w)?;
                         z.rect.SetWidth(s.rect.Width as f64).map_err(w)?;
                         z.rect.SetHeight(s.rect.Height as f64).map_err(w)?;
-                        (z.meter, z.left, z.bars) = (s.meter, s.rect.X as f64, s.bars.clone());
+                        (z.meter, z.left, z.bars, z.bar0, z.device) = (s.meter, s.rect.X as f64, s.bars.clone(), s.bar0, s.device);
                     }
                     None => {
                         z.rect.SetWidth(0.0).map_err(w)?;
@@ -178,13 +184,14 @@ fn hover(zone: usize, p: Point) {
                 .min_by(|a, b| dist(x, *a.1).total_cmp(&dist(x, *b.1)))
                 .map(|(i, _)| i)
                 .unwrap_or(0)
+                + z.bar0
         });
         t.hover = Some((zone, bar, p));
-        Some((z.meter, bar))
+        Some((z.meter, bar, z.device))
     });
-    if let Some((meter, bar)) = target {
+    if let Some((meter, bar, device)) = target {
         crate::meters::highlight(Some((meter, bar)));
-        show(crate::meters::tip_text(meter, bar));
+        show(crate::meters::tip_text(meter, bar, device));
     }
 }
 
@@ -207,14 +214,15 @@ pub fn refresh(meter: usize) {
     let target = TIPS.with_borrow(|s| {
         let t = s.as_ref()?;
         let (zone, bar, _) = t.hover?;
-        (t.zones.get(zone)?.meter == meter).then_some(bar)
+        let z = t.zones.get(zone)?;
+        (z.meter == meter).then_some((bar, z.device))
     });
-    if let Some(bar) = target {
-        show(crate::meters::tip_text(meter, bar));
+    if let Some((bar, device)) = target {
+        show(crate::meters::tip_text(meter, bar, device));
     }
 }
 
-/// Open (or update) the tooltip just above and right of the pointer.
+/// Open (or update) the tooltip just above the pointer, to its right (left, near the screen's right edge).
 fn show(text: Option<String>) {
     TIPS.with_borrow(|s| {
         let Some(t) = s else { return };
@@ -225,7 +233,10 @@ fn show(text: Option<String>) {
             let child: FrameworkElement = t.popup.Child().map_err(w)?.cast().map_err(w)?;
             child.Measure(Size { Width: f32::INFINITY, Height: f32::INFINITY }).map_err(w)?;
             let size = child.DesiredSize().map_err(w)?;
-            t.popup.SetHorizontalOffset((p.X + OFFSET.X) as f64).map_err(w)?;
+            // Right of the pointer, unless that would run off the screen's (the taskbar's) right edge: then left of it.
+            let room = t.popup.XamlRoot().and_then(|r| r.Size()).map_or(f32::MAX, |s| s.Width);
+            let x = if p.X + OFFSET.X + size.Width + 4.0 > room { (p.X - OFFSET.X - size.Width).max(0.0) } else { p.X + OFFSET.X };
+            t.popup.SetHorizontalOffset(x as f64).map_err(w)?;
             t.popup.SetVerticalOffset((p.Y - OFFSET.Y - size.Height) as f64 - 18.0).map_err(w)?;
             t.popup.SetIsOpen(true).map_err(w)
         })();

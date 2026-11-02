@@ -1,4 +1,4 @@
-//! Read or set the main display's scaling (100%, 125%, 150%, ...), live, the way Settings does.
+//! Read or set the first active display's scaling (100%, 125%, 150%, ...), live, the way Settings does.
 //!
 //!   cargo run --release --example set_scale -- [percent]
 //!

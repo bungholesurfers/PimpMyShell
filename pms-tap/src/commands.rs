@@ -23,19 +23,40 @@ const HELP: &str = r#"commands:
                                     means its Children. index defaults to the end.
   remove <parent> <index>           remove the collection's (or panel's) child at index
   detach                            unsubscribe and go inert (`pms inject` does this for you)
-  status                            `tap=<copy id> taskbar=<BackgroundFill handle|none> backdrop=..
-                                    alert=.. meters=N toast=..`; the daemon re-applies when tap/taskbar change
-  reset                             remove everything PimpMyShell added (backdrop, alert, meters)
+  status                            `tap=<copy id> build=<DLL hash> taskbar=<BackgroundFill handle|none>
+                                    backdrop=.. alert=.. meters=N toast=..`; the daemon re-applies when
+                                    tap/taskbar change, and swaps in its own TAP when build differs
+  reset                             remove everything PimpMyShell added (backdrop, alert, meters,
+                                    toasts, tooltips, ripple, button glows); stop layout tracking
+  batch "<cmd>" "<cmd>" ..          run them all in one UI-thread job (one layout pass)
+  theme light|dark                  the shell's mode; our ink follows it
+  pace <fps>                        frame rate of the long-running animations; 0 = smooth
+  dwm hostbackdrop on|off           the taskbar windows' DWM host backdrop brush
 
-  alert <#AARRGGBB> [ms] [low] [high] | alert off
+  alert broad <#AARRGGBB> [ms] [low] [high]
                                     wash the whole taskbar (below meters and buttons) in a color
-                                    breathing between low and high opacity; ms 0 = steady
+                                    breathing between low and high opacity; ms 0 = steady.
+                                    (`alert <#AARRGGBB> ..` without `broad` works too.)
+  alert local                       shrink the wash into a pill around the mic label
+  alert level <0..1> [tide 0..1]    mic loudness: flicker (and tide) strength
+  alert muted 0|1 | alert off | alert status
 
-  toast show ms=<n> [title= body= app= attribution= icon= logo= circle=1 image= b=<label>..]
+  buttonglow start <#color> <hover> <press> <open> <hover_ms> <press_ms> <hover_radius> <press_radius>
+  buttonglow apps <hover> <press> <hover_ms> <press_ms> <hover_radius> <press_radius>
+  buttonglow off                    glows behind Start and the app buttons (opacities 0..1, DIPs)
+
+  toast show [id=<n>] ms=<n> [title= body= app= attribution= icon= logo= circle=1 image=
+             b=<label>.. progress=<0..1>]
                                     slide the tray away and show a notification card in its
-                                    place for ms (the countdown bar). Normally driven by the daemon.
+                                    place, counting down over ms; while cards show, a new one goes
+                                    on top of them (a deck). Normally driven by the daemon.
+  toast front id=<n> ms=<n>         the card that came forward (its predecessor was clicked or
+                                    swiped away)
+                                    counts down over ms
+  toast drop id=<n> [ms=<n>]        take a card away; the next front one counts down over ms
   toast hide | status
-  toast events                      clicks since last asked: open | action <i> | close
+  toast events                      clicks and swipes since last asked, one per line:
+                                    <id> open | <id> action <i> | <id> close | <id> swipe
 
   backdrop on|off|status            swap the stock acrylic for PimpMyShell's composition backdrop
   backdrop tint <#AARRGGBB>         tint over the blurred backdrop (alpha = opacity)
@@ -46,9 +67,12 @@ const HELP: &str = r#"commands:
   backdrop gaps <#AARRGGBB> | gaps off
                                     paint the free space between buttons; follows layout live
 
-  meters add <label> <#color> <max|auto>   add a meter cell (sparkline + value)
-  meters push <v0> <text0> [<v1> <text1> ..] push one sample per meter, in order
-  meters clear | status             (normally driven by `pms meters <config.toml>`)
+  meters add label=.. style=history|bar|pie|cores|engines|bars|devices color=#.. [colors=#..,#..]
+             [max=N] [wide=..] ..   add a meter cell (all its key=value fields: pms-tap/src/meters.rs)
+  meters push <i> <text> [<v> ..]   one sample for meter i
+  meters sep | presence <i> on|off | height compact|tall|full | mic <apps>|off | micmute 0|1
+  meters bars <i> <name>.. | gpustate <i> .. | tip|bartips|devtips <i> <text>..   (tooltips)
+  meters clear|off | status         (normally driven by the daemon, from pms.toml)
 
   layout                            button bounds + free intervals (DIPs, taskbar-relative);
                                     starts live tracking. `layout stop` ends it.
@@ -92,7 +116,7 @@ fn dispatch(args: &[String]) -> R<String> {
             }
             Ok(format!("pgo-dump: {}", unsafe { __llvm_profile_write_file() }))
         }
-        // buttonglow start ..| off: the Start button's glow (glow.rs).
+        // buttonglow start ..| apps ..| off: glows behind Start and the app buttons (glow.rs).
         "buttonglow" => {
             let rest = rest.to_vec();
             ui(move |ctx| crate::glow::command(ctx, &rest))
@@ -342,5 +366,11 @@ fn status() -> R<String> {
         run_on_ui(|_| (crate::backdrop::is_on(), crate::alert::is_on(), crate::meters::count(), crate::toast::is_shown()))?;
     let on = |b: bool| if b { "on" } else { "off" };
     let toast = if toast { "shown" } else { "hidden" };
-    Ok(format!("tap={} taskbar={taskbar} backdrop={} alert={} meters={meters} toast={toast}", *crate::TAP_ID, on(backdrop), on(alert)))
+    Ok(format!(
+        "tap={} build={} taskbar={taskbar} backdrop={} alert={} meters={meters} toast={toast}",
+        *crate::TAP_ID,
+        *crate::BUILD,
+        on(backdrop),
+        on(alert)
+    ))
 }

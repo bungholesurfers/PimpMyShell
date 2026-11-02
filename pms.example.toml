@@ -44,7 +44,7 @@ tint  = "#7F060606"   # #AARRGGBB over the blurred desktop; alpha = opacity
 grain = 0.01          # 0 = no grain
 # gaps = "#18FFFFFF"  # paint the free space between buttons
 
-# The look in light mode (without this table: tint #C8F3F3F3, grain 0.01).
+# The look in light mode (without this table: tint #C8F3F3F3, with [backdrop]'s grain and gaps).
 [backdrop.light]
 tint  = "#C8F3F3F3"
 grain = 0.01
@@ -59,11 +59,12 @@ broad_ms  = 5000      # whole-taskbar warning first, then it settles around the 
 ignore    = []        # e.g. ["obs64.exe"]: substrings of the app's consent-store key
 
 # [toasts]: show notifications inside the taskbar (the tray slides away meanwhile) instead of
-# as popups. Native banners are switched off per app while the daemon runs and restored when it
-# stops. Clicking a toast or its buttons acts like clicking the real one. Do not disturb and
-# full-screen apps still hold toasts back.
+# as popups - modern toasts and old-style tray balloons alike. Native banners are switched off per app (every app
+# that can notify, ahead of its first toast) while the daemon runs and restored when it stops. Clicking a toast or
+# its buttons acts like clicking the real one. New toasts stack on top of the ones showing; flick a card off to the
+# right to dismiss it. Do not disturb and full-screen apps still hold toasts back.
 [toasts]
-duration_ms = 7000
+duration_ms = 7000    # each toast in front (one that comes forward again with more behind it: at most 4 s)
 ignore      = []      # apps that keep native banners (name or AUMID substring), e.g. ["Teams"]
 
 # [start_glow]: a glow behind the Start button - none at rest, `hover` (its opacity) while the pointer
@@ -103,21 +104,28 @@ press_radius = 130
 #   style        "history" (sparkline, default), "bar" (gauge with a peak marker),
 #                "pie" (slices), "cores" (a user/kernel bar per CPU thread, grouped by topology),
 #                "engines" (a bar per GPU engine that has shown activity),
-#                "bars" (a vertical bar per expression; names = [...] label them in tooltips)
+#                "bars" (a vertical bar per expression; names = [...] label them in tooltips),
+#                "disks" (write and read bars per disk), "nics" (up and down bars per network interface):
+#                the disk Windows is on, and the interface the route to the internet takes, always show,
+#                first; the others while busy, busiest first. No expr: they read their own counters.
 #   expr         expression (+ - * / ( ) min max abs); for a pie, a list: one per slice
 #   max          full scale: number or expression; omitted = auto-scale (pie: slices' sum)
-#   color        #RRGGBB / #AARRGGBB; colors = [...] for pie slices or cores [user, kernel]
+#   color        #RRGGBB / #AARRGGBB; colors = [...] for pie slices, cores [user, kernel], disks [write, read],
+#                nics [up, down]
 #   group        meters in different groups get a separator between them
-#   value        false: no value text (bar, pie, cores, engines); the tooltip still has it
+#   value        false: no value text (bar, pie, cores, engines, bars, disks, nics); the tooltip still has it
 #   tooltip      false: no hover tooltip
 #   show_above   only show while the value is at least this (number or expression)
-#   names        pie / bars: a name per slice or bar, for the tooltip
-#   bar_width    cores / engines / bars: DIPs per bar
+#   show_when    only show while another level says it matters: { expr = "...", at = <n>, until = <n> } shows
+#                the meter once expr reaches `at`, and hides it once expr is back under `until` (default: at)
+#   names        pie / bars: a name per slice or bar, for the tooltip; disks / nics: each device's two bars
+#   bar_width    cores / engines / bars / disks / nics: DIPs per bar
 #   caption      false: no label beside the meter on the taskbar (the tooltip still has it)
 #   snug         true: right against the meter before it, no separator or spacing
 #   glow         cores / engines: "level" (default: by load now), "heat" (by how hot the bars have got
 #                working: full in ~8 s at 100%, cold ~30 s after; brighter fills too), or "off"
-#   vendor_label engines: "ticker" (default: NVDA, AMD, INTC, QCOM, MSFT) or "short" (NV, RAD)
+#   kernel       cores: "bottom" (default: each thread's kernel time at the bottom of its bar, user time above) or "top"
+#   vendor_label engines: "short" (default: NV, RAD; the rest as tickers) or "ticker" (NVDA, AMD, INTC, QCOM, MSFT)
 #   per_gpu      true: one of this meter per graphics adapter with dedicated memory (expr, max, color filled in)
 #   min_memory_mb per_gpu: the least dedicated memory an adapter needs for one (default 1024; built-in graphics
 #                often report a small reserved slice, which would sit near full)
@@ -127,8 +135,9 @@ press_radius = 130
 #   time_axis    history: "log" (default: newest samples full width, older ones ever more
 #                compressed, TMOG-style) or "linear"
 #   history_seconds  history: how far back the graph reaches (default 300)
-#   engine_hold_seconds  engines: an idle GPU's bars fall off after this long (default 15;
-#                0 = never); the most recently active GPU always stays
+#   hold_seconds engines / disks / nics: an idle GPU's, disk's or interface's bars fall off after this long
+#                (default 15; 0 = never); the most recently active GPU always stays
+#   engines_fall_off  engines: idle engines fall off too, each on its own (default false: whole GPUs only)
 #   interval_ms  this meter's own update rate (floor: the system timer resolution, >= 16 ms)
 [counters]
 gpu       = { path = '\GPU Engine(*)\Utilization Percentage', agg = "engine" }
@@ -153,6 +162,7 @@ interval_ms = 200
 value       = false        # tooltips show each thread's user/kernel %
 # bar_width = 3.6          # DIPs per thread bar (default by thread count)
 colors      = ["#66BB6A", "#E040FB"]   # user, kernel
+kernel      = "bottom"     # kernel time at the bottom of each bar, user time stacked above it; "top": the other way
 
 [[meter]]
 label  = "RAM"            # in the tooltip; caption = false keeps it off the taskbar
@@ -172,13 +182,17 @@ pressure = 0.8
 # label_inside = "auto"   # put the label inside the pie when crowded ("always", "never" = default)
 
 [[meter]]
-label = "SWAP"           # hidden while there's no pagefile
+label = "SWAP"           # the pagefile, only when it matters (and never without one)
 group = "memory"
 style = "pie"
 expr  = "swap_used"
 max   = "swap_total"
 color = "#FFB74D"
 unit  = "bytes"
+# Windows always keeps some pages in the pagefile, which says nothing on its own: it starts to matter once
+# physical memory runs short. So: shown once 85% of RAM is in use (available memory - free plus the standby
+# cache - down to 15%), until that's back under 80%.
+show_when = { expr = "1 - mem_avail / ram_total", at = 0.85, until = 0.8 }
 
 [[meter]]
 label = "COMMIT"         # only when commit gets high: allocations fail at 100%
@@ -194,10 +208,11 @@ label = "GPU"            # a bar per engine that has done work lately; hover for
 group = "gpu"
 style = "engines"
 glow  = "heat"
-# vendor_label = "short" # NV, RAD instead of NVDA, AMD
+# vendor_label = "ticker" # NVDA, AMD instead of NV, RAD
 color = "#BA68C8"        # for GPUs of a maker PimpMyShell doesn't know
 value = false
-# Each GPU is labelled by its maker in place of this label - NVDA, AMD, INTC, QCOM, MSFT - its bars lit
+engines_fall_off = true  # idle engines fall off too, each on its own, hold_seconds after they stop (default 15)
+# Each GPU is labelled by its maker in place of this label - NV, RAD, INTC, QCOM, MSFT - its bars lit
 # in the maker's colors, with a glow of them around that brightens as it works. vendors = false: plain.
 # vendors = false
 # or the busiest engine as a sparkline:
@@ -210,7 +225,7 @@ label = "VRAM"
 caption = false
 group = "gpu"
 style = "pie"
-# A pie for every graphics adapter with memory of its own (dedicated memory above 0), each reading that
+# A pie for every graphics adapter with at least min_memory_mb (1024) of dedicated memory, each reading that
 # adapter's memory against its size, in its maker's color. Without per_gpu, give expr/max/color yourself,
 # e.g. expr = "vram", max = "vram_total" for all of them in one.
 per_gpu = true
@@ -220,25 +235,32 @@ unit  = "bytes"
 value = false
 
 [[meter]]
-label     = "DISK"
+label     = "DISK"           # in tooltips; each disk is labelled by its first drive letter (C:) on the taskbar
 group     = "io"
-style     = "bars"
-expr      = ["disk_write", "disk_read"]   # up (writes), then down (reads)
+style     = "disks"          # write and read bars per disk: the one Windows is on always, first; the others
+                             # while they're busy, busiest first, falling off hold_seconds after they go idle
 names     = ["write", "read"]
 colors    = ["#FFD54F", "#FFA726"]
-max       = 1073741824   # 1 GB/s
+max       = 1073741824       # 1 GB/s
 unit      = "bytes/s"
-bar_width = 10           # twice the CPU bars
+bar_width = 10               # twice the CPU bars (up to 16 threads)
 value     = false
+# hold_seconds = 15
+# or all disks together, as two bars:
+# style = "bars"
+# expr  = ["disk_write", "disk_read"]
 
 [[meter]]
-label     = "NET"
+label     = "NET"            # in tooltips; each interface is labelled by its kind (ETH, WiFi, CELL, VPN, BT)
 group     = "io"
-style     = "bars"
-expr      = ["net_tx", "net_rx"]   # up, then down
+style     = "nics"           # up and down bars per network interface: the one the route to the internet takes
+                             # always, first; the others while they're busy
 names     = ["up", "down"]
 colors    = ["#F06292", "#4DB6AC"]
 max       = 1073741824
 unit      = "bytes/s"
 bar_width = 10
 value     = false
+# or all interfaces together:
+# style = "bars"
+# expr  = ["net_tx", "net_rx"]

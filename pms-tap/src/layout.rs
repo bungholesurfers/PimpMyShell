@@ -3,7 +3,8 @@
 //! "Occupants" are the direct children of the taskbar's button repeater and of the system tray
 //! grid. On every XAML `LayoutUpdated` we measure them (in DIPs, relative to the island root,
 //! i.e. the taskbar window), derive the free horizontal intervals, and publish a snapshot when
-//! anything moved. Consumers on the UI thread (the backdrop's `gaps`) are notified directly.
+//! anything moved. Consumers on the UI thread (the backdrop's `gaps`, meters, toasts, button
+//! glows) are notified directly.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -1,6 +1,6 @@
 //! Software update, as Nagare does it: whether a newer PimpMyShell is out, and, for a copy the installer installed,
 //! fetching that version's installer and running it silently - which stops the daemon, installs over it and starts it
-//! again.
+//! again if it was running.
 //!
 //! What is stable enough to update to is the tag in the repository's `update/stable.txt`; on the latest channel, the
 //! newest release published instead, its tag read off where GitHub's latest-release link redirects. Each release
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{signing, version};
 
-/// Where the releases will live. (Not published yet.)
+/// Where the releases live.
 pub const REPO: &str = "bungholesurfers/PimpMyShell";
 pub const RELEASES_PAGE: &str = "https://github.com/bungholesurfers/PimpMyShell/releases/latest";
 const STABLE_URL: &str = "https://raw.githubusercontent.com/bungholesurfers/PimpMyShell/main/update/stable.txt";
@@ -34,7 +34,7 @@ const MAX_INSTALLER: u64 = 256 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
     UpToDate { stable: String },
-    /// A newer version is out, but this copy wasn't installed by the installer (a development build).
+    /// A newer version is out, but this copy wasn't installed by the installer (a portable or development copy).
     Available { version: String },
     /// Downloaded and checked, waiting to be run; `sha256` is the manifest's, checked again just before it runs.
     Ready { version: String, path: PathBuf, sha256: String },
@@ -141,7 +141,8 @@ fn clear(dir: &Path) {
 
 /// The daemon's checks: the first a run makes waits FIRST after it starts (a random time in it, so that sign-in
 /// isn't slowed and many PCs don't ask GitHub at once), the next waits EVERY after one that worked, RETRY after one
-/// that failed. The last check's time is kept in `checked.txt`, so that signing in again doesn't check again.
+/// that failed. The last check's time is kept in `update-checked.txt` (in %LOCALAPPDATA%\PimpMyShell), so that
+/// signing in again doesn't check again.
 pub const FIRST: (u64, u64) = (60, 30 * 60);
 pub const EVERY: (u64, u64) = (24 * 3600, 48 * 3600);
 pub const RETRY: (u64, u64) = (2 * 3600, 6 * 3600);
@@ -264,7 +265,7 @@ impl Drop for DownloadLock {
 }
 
 /// Runs the downloaded installer of `version` silently, on its own: it stops the daemon, installs, and starts it
-/// again. Its log goes beside it, and `tried` names the version first. The file is hashed once more first, against
+/// again if it was running. Its log goes beside it, and `tried` names the version first. The file is hashed once more first, against
 /// the signed manifest's `sha256`: it sat in %TEMP% since the download, and is run only as it was checked. The
 /// updater's own test variable isn't handed on.
 pub fn install(path: &Path, version: &str, sha256: &str) -> Result<(), String> {

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
-use pms::config::{self, Agg, AppGlow, Backdrop, Config, CounterSpec, Exprs, Hotmic, Look, Max, MeterSpec, StartGlow, Style, Toasts};
+use pms::config::{self, Agg, AppGlow, Backdrop, Config, CounterSpec, Exprs, Hotmic, Look, Max, MeterSpec, ShowWhen, StartGlow, Style, Toasts};
 use pms::update::Status;
 
 const SAVE_AFTER: Duration = Duration::from_millis(500);
@@ -634,7 +634,7 @@ impl Gui {
         });
         match state {
             Update::Idle if !installed => {
-                ui.label(RichText::new("This copy isn't the installed one (a development build): it can check for a release, not install it.").color(DIM));
+                ui.label(RichText::new("This copy isn't the installed one (a portable or development copy): it can check for a release, not install it.").color(DIM));
             }
             Update::Idle => {}
             Update::Checking => {
@@ -675,7 +675,7 @@ impl Gui {
                 ui.label(RichText::new(format!("PimpMyShell {version}{how} is downloaded, and its signature checks out.")).color(OK));
                 ui.horizontal(|ui| {
                     let install = ui.button(format!("Install {version} and restart"));
-                    if install.on_hover_text("the installer runs silently: the taskbar goes back to stock for a moment, then PimpMyShell starts again").clicked() {
+                    if install.on_hover_text("the installer runs silently: the taskbar goes back to stock for a moment, then PimpMyShell starts again if it was running").clicked() {
                         match pms::update::install(&path, &version, &sha256) {
                             Ok(()) => std::process::exit(0),
                             Err(e) => self.message = (e, true),
@@ -861,12 +861,18 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, interval: u64) {
                     (Style::Bars, "bars", "a vertical bar per expr"),
                     (Style::Cores, "cores", "a bar per CPU thread, paired by core"),
                     (Style::Engines, "engines", "a bar per GPU engine, grouped by GPU"),
+                    (Style::Disks, "disks", "write and read bars per disk: the one Windows is on always, the others while busy"),
+                    (Style::Nics, "nics", "up and down bars per network interface: the one the internet route takes always, the others while busy"),
                 ] {
                     ui.selectable_value(v, s, name).on_hover_text(help);
                 }
             });
         });
-        if !matches!(style, Style::Cores | Style::Engines) {
+        if matches!(style, Style::Disks | Style::Nics) {
+            let help = if style == Style::Disks { "what to call each disk's two bars (write, read) in tooltips" } else { "what to call each interface's two bars (up, down) in tooltips" };
+            row(ui, "names", help, &mut m.names, Vec::new(), |ui, v| string_list(ui, "names", v, "name"));
+        }
+        if !matches!(style, Style::Cores | Style::Engines | Style::Disks | Style::Nics) {
             let many = matches!(style, Style::Pie | Style::Bars);
             let help = "+ - * / ( ) min max abs, over counter names and the builtins; a pie or bars takes one per slice or bar";
             row(ui, "expr", help, &mut m.expr, expr, |ui, v| {
@@ -887,8 +893,13 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, interval: u64) {
                 row(ui, "names", "one per slice or bar, for the tooltip", &mut m.names, Vec::new(), |ui, v| string_list(ui, "names", v, "name"));
             }
         }
-        if matches!(style, Style::Cores | Style::Pie | Style::Bars) {
-            let help = if style == Style::Cores { "user time, then kernel time" } else { "one per slice or bar" };
+        if matches!(style, Style::Cores | Style::Pie | Style::Bars | Style::Disks | Style::Nics) {
+            let help = match style {
+                Style::Cores => "user time, then kernel time",
+                Style::Disks => "write, then read",
+                Style::Nics => "up, then down",
+                _ => "one per slice or bar",
+            };
             row(ui, "colors", help, &mut m.colors, colors, color_list);
         } else {
             opt_row(ui, "color", "the meter's color", &mut m.color, "#4FC3F7".into(), color);
@@ -921,7 +932,12 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, interval: u64) {
                 choice(ui, "glow", v, &[("level", "by how busy now"), ("heat", "by how hot they've got"), ("off", "no glow")])
             });
         }
-        if matches!(style, Style::Cores | Style::Engines | Style::Bars) {
+        if style == Style::Cores {
+            opt_row(ui, "kernel", "where each thread's kernel time sits in its bar: at the bottom, user time above it; or on top of user time", &mut m.kernel, "bottom".into(), |ui, v| {
+                choice(ui, "kernel", v, &[("bottom", "under user time"), ("top", "above user time")])
+            });
+        }
+        if matches!(style, Style::Cores | Style::Engines | Style::Bars | Style::Disks | Style::Nics) {
             row(ui, "bar_width", "DIPs per bar before squeezing; unset fits the count", &mut m.bar_width, None, |ui, v| {
                 let mut on = v.is_some();
                 if ui.checkbox(&mut on, "").changed() {
@@ -940,13 +956,20 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, interval: u64) {
             opt_row(ui, "vendors", help, &mut m.vendors, true, |ui, v| {
                 ui.checkbox(v, "");
             });
-            opt_row(ui, "vendor_label", "ticker: NVDA, AMD, INTC, QCOM, MSFT; short: NV, RAD (the rest as tickers)", &mut m.vendor_label, "ticker".into(), |ui, v| {
+            opt_row(ui, "vendor_label", "short: NV, RAD (the rest as tickers); ticker: NVDA, AMD, INTC, QCOM, MSFT", &mut m.vendor_label, "short".into(), |ui, v| {
                 choice(ui, "vendor_label", v, &[("ticker", "stock tickers"), ("short", "NV, RAD")])
             });
-            opt_row(ui, "engine_hold_seconds", "an idle GPU's bars fall off after this long (the GPU that worked last stays); 0 = never", &mut m.engine_hold_seconds, 15, |ui, v| number(ui, v, 0..=3600, " s"));
+            opt_row(ui, "hold_seconds", "an idle GPU's bars fall off after this long (the GPU that worked last stays); 0 = never", &mut m.hold_seconds, 15, |ui, v| number(ui, v, 0..=3600, " s"));
+            opt_row(ui, "engines_fall_off", "idle engines fall off too, each on its own (after hold_seconds), not just whole GPUs", &mut m.engines_fall_off, false, |ui, v| {
+                ui.checkbox(v, "");
+            });
+        }
+        if matches!(style, Style::Disks | Style::Nics) {
+            let help = if style == Style::Disks { "an idle disk's bars fall off after this long (the one Windows is on stays); 0 = never" } else { "an idle interface's bars fall off after this long (the one the internet route takes stays); 0 = never" };
+            opt_row(ui, "hold_seconds", help, &mut m.hold_seconds, 15, |ui, v| number(ui, v, 0..=3600, " s"));
         }
         if style == Style::Pie {
-            opt_row(ui, "per_gpu", "one of this pie per graphics adapter with memory of its own (dedicated memory above 0), each reading that adapter's memory against its size, in its maker's color: expr, max and color are filled in", &mut m.per_gpu, false, |ui, v| {
+            opt_row(ui, "per_gpu", "one of this pie per graphics adapter with at least min_memory_mb (default 1024) of dedicated memory, each reading that adapter's memory against its size, in its maker's color: expr, max and color are filled in", &mut m.per_gpu, false, |ui, v| {
                 ui.checkbox(v, "");
             });
             opt_row(ui, "label_inside", "the label inside the pie: never, auto (when space runs short), always", &mut m.label_inside, "never".into(), |ui, v| {
@@ -964,7 +987,26 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, interval: u64) {
             opt_row(ui, "history_seconds", "how far back the graph reaches", &mut m.history_seconds, 300, |ui, v| number(ui, v, 10..=86_400, " s"));
         }
         row(ui, "show_above", "hidden until its value reaches this (a number or an expression)", &mut m.show_above, None, |ui, v| max_editor(ui, "show_above", v));
+        row(ui, "show_when", "hidden until another level says it matters: it shows once the expression reaches `at`, and leaves once it's back under `until` (say, the pagefile only once RAM runs short)", &mut m.show_when, None, show_when_editor);
     });
+}
+
+/// `show_when`: off, or an expression with the level it shows at and the one it leaves under.
+fn show_when_editor(ui: &mut egui::Ui, value: &mut Option<ShowWhen>) {
+    let mut on = value.is_some();
+    if ui.checkbox(&mut on, "").changed() {
+        *value = on.then(|| ShowWhen { expr: "1 - mem_avail / ram_total".into(), at: 0.85, until: Some(0.8) });
+    }
+    if let Some(w) = value {
+        text(ui, &mut w.expr, "e.g. 1 - mem_avail / ram_total", 200.0);
+        ui.label("at");
+        ui.add(egui::DragValue::new(&mut w.at).speed(0.01));
+        ui.label("until");
+        let mut until = w.until.unwrap_or(w.at);
+        if ui.add(egui::DragValue::new(&mut until).speed(0.01)).changed() {
+            w.until = Some(until);
+        }
+    }
 }
 
 /// tint, grain and gaps, for the dark look (`[backdrop]`) or the light one (`[backdrop.light]`).
@@ -1024,7 +1066,7 @@ fn toasts(ui: &mut egui::Ui, t: &mut Option<Toasts>) {
     let Some(t) = t else { return };
     let d = Toasts::default();
     section(ui, "[toasts]", |ui| {
-        row(ui, "duration_ms", "how long each toast stays (less while more are waiting)", &mut t.duration_ms, d.duration_ms, |ui, v| number(ui, v, 1000..=60_000, " ms"));
+        row(ui, "duration_ms", "how long each toast stays in front (one that comes forward again with more behind it: at most 4 s)", &mut t.duration_ms, d.duration_ms, |ui, v| number(ui, v, 1000..=60_000, " ms"));
         row(ui, "ignore", "apps that keep their stock popups: name or AUMID", &mut t.ignore, Vec::new(), |ui, v| string_list(ui, "toast-ignore", v, "e.g. Teams"));
     });
 }
@@ -1071,7 +1113,7 @@ fn app_glow(ui: &mut egui::Ui, g: &mut Option<AppGlow>) {
     });
 }
 
-/// A 0..ull knob (pms-ui).
+/// A 0..`full` knob (pms-ui).
 fn knob(ui: &mut egui::Ui, value: &mut f32, full: f32) {
     pms_ui::knob(ui, value, 0.0, full);
 }

@@ -2,7 +2,7 @@
 //!
 //! - The logo: a crab (Scout's "Red Crab", public domain, from Openclipart: art/openclipart-192996) with a dollar
 //!   bill in front of it. Into assets/icon: pms.ico (16 to 256 pixels) and a PNG of each size; the build puts the
-//!   .ico into every exe (pms-res), the tray and the notifications show it.
+//!   .ico into every shipped exe (pms-res), the tray and the notifications show it.
 //! - The installer's box: a glassy cube, words on one face and the logo on the other. And the installer's pictures:
 //!   the box on dollar signs tiled over the dark, and in the pages' corner. Into installer/art.
 //!

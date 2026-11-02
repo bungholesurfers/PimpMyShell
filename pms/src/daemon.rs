@@ -1,11 +1,12 @@
 //! `pms daemon`: keep the taskbar looking the way `pms.toml` says, for as long as it
-//! runs. Once per meter interval (or when the microphone state changes) it:
+//! runs. Its loop wakes for meters, toasts and microphone changes, and:
 //!
-//!   1. asks the TAP for `status`. No TAP (explorer restarted, first run) -> inject one, once the
-//!      taskbar's XAML island exists. A TAP copy or taskbar tree it hasn't configured yet, or one
-//!      that drifted (someone ran `reset`) -> `reset` and apply the whole config again.
+//!   1. once a second, asks the TAP for `status`. No TAP (explorer restarted, first run) -> inject
+//!      one, once the taskbar's XAML island exists. A TAP of another build (from before an update)
+//!      -> swap ours in (up to MAX_SWAPS times). A TAP copy or taskbar tree it hasn't configured
+//!      yet, or one that drifted (someone ran `reset`) -> `reset` and apply the whole config again.
 //!   2. shows or hides the hot-mic alert,
-//!   3. samples the perf counters and pushes the meters.
+//!   3. samples the perf counters that are due and pushes the meters.
 //!
 //! The config file is reloaded when it changes. `pms daemon stop` (or Ctrl+C, or the tray
 //! icon's Exit) restores the stock taskbar and exits; the TAP stays loaded, inert until the next
@@ -45,12 +46,18 @@ const LEVEL_EVERY: Duration = Duration::from_millis(66);
 /// How long an app that let go of the mic stays in the label.
 const CLOSED_FOR: Duration = Duration::from_secs(10);
 const TOAST_POLL: Duration = Duration::from_millis(500);
-/// Per-toast time while more are waiting.
+/// A card's time once it comes forward again with more behind it.
 const QUEUED_TOAST_MS: u32 = 4000;
+/// The most cards on screen at once (newest in front); older ones are let go (they stay in the notification center).
+const DECK_MAX: usize = 8;
+/// How long clicks on a card that has left are still taken (one may be in the TAP's queue as it goes).
+const LATE_CLICKS: Duration = Duration::from_secs(2);
 /// Windows' own "long" toast duration.
 const LONG_TOAST_MS: u32 = 25_000;
 /// How often to ask the TAP for clicks while a toast is up.
 const EVENT_POLL: Duration = Duration::from_millis(120);
+/// How often to look for apps installed since (their banners go off ahead of their first toast).
+const NOTIFIER_SCAN: Duration = Duration::from_secs(600);
 
 static STOP: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -85,7 +92,7 @@ struct Daemon {
     /// `tap=.. taskbar=..` of the TAP state our config was last applied to.
     applied: Option<String>,
     retry_apply: Instant,
-    /// Apps holding the mic (minus ignored ones), and whether the TAP shows the alert.
+    /// Apps holding the mic (minus ignored ones).
     hot: Vec<String>,
     hot_since: Option<Instant>,
     /// Apps that let go of the mic, and when (shown "stopped N sec. ago" for `CLOSED_FOR`).
@@ -120,10 +127,20 @@ struct Daemon {
     updates: Updates,
     /// Since when the taskbar hasn't had our config (no TAP, or a TAP that can't see the taskbar's tree).
     unhooked_since: Option<Instant>,
-    /// The toast feed was stopped because the taskbar wasn't ours to show toasts on: native banners are back until
-    /// it is.
+    /// The toast feed waits for the next `apply` to (re)start it: at startup, after a resume or a TAP swap, or once it
+    /// was stopped because the taskbar wasn't ours to show toasts on. Native banners are back meanwhile.
     toasts_parked: bool,
+    /// Our TAP's build (`pms_tap::build_of` the pms_tap.dll beside us), which the TAP in explorer must match.
+    tap_build: Option<String>,
+    /// TAPs of another build we've tried to swap ours in for, in a row.
+    swaps: u32,
+    /// The TAP in explorer is of another build and wouldn't be swapped: it gets the rest of the config, but not the
+    /// toasts (its protocol may differ); native banners stay until explorer restarts.
+    stale_tap: bool,
 }
+
+/// How many times in a row a TAP of another build gets swapped for ours before we stop trying.
+const MAX_SWAPS: u32 = 2;
 
 /// How long the taskbar may go without our config (explorer restarting, say) before notification banners go back to
 /// Windows: toasts the taskbar can't show must not vanish. Short, but past a re-apply's blink.
@@ -163,12 +180,56 @@ const UPDATE_TIDY_AFTER: Duration = Duration::from_secs(60);
 struct ToastFeed {
     listener: Listener,
     banners: Banners,
+    /// Toasts waiting for the taskbar (it's being set up).
     queue: VecDeque<Incoming>,
+    /// The cards on screen, oldest first; the last is in front, counting down to `showing_until`.
+    deck: Vec<Incoming>,
     showing_until: Option<Instant>,
-    /// The toast on screen (or just taken down), whose clicks we still owe an activation.
-    current: Option<Incoming>,
+    /// Cards that left lately, with when, whose clicks we may still owe an activation.
+    gone: VecDeque<(Incoming, Instant)>,
+    /// The TAP said it shows no toast: once its last clicks are in, the deck is empty.
+    tap_empty: bool,
     next_events: Instant,
     next_poll: Instant,
+    /// Apps that could notify, being listed on a worker thread (`toasts::notifiers`).
+    scan: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    next_scan: Instant,
+}
+
+impl ToastFeed {
+    /// Clicks may still come: a card shows, or one left only just now.
+    fn wants_events(&self, now: Instant) -> bool {
+        !self.deck.is_empty() || self.gone.iter().any(|(_, at)| now.duration_since(*at) < LATE_CLICKS)
+    }
+
+    /// The card `id` the TAP took away (it was clicked or swiped): out of the deck, or from those just gone.
+    fn take(&mut self, id: u32) -> Option<Incoming> {
+        if let Some(i) = self.deck.iter().position(|n| n.id == id) {
+            return Some(self.deck.remove(i));
+        }
+        let i = self.gone.iter().position(|(n, _)| n.id == id)?;
+        self.gone.remove(i).map(|(n, _)| n)
+    }
+}
+
+/// How long a card that comes forward stays: shorter while more wait behind it, Windows' long time for the kinds
+/// it keeps up (reminders, calls, ...).
+fn front_ms(cfg: &crate::config::Toasts, n: &Incoming, deck: usize) -> u32 {
+    match (n.long, deck > 1) {
+        (true, _) => cfg.duration_ms.max(LONG_TOAST_MS),
+        (false, true) => cfg.duration_ms.min(QUEUED_TOAST_MS),
+        (false, false) => cfg.duration_ms,
+    }
+}
+
+/// List the apps that could notify, off the main loop.
+fn scan_notifiers() -> std::sync::mpsc::Receiver<Vec<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+        let _ = tx.send(toasts::notifiers());
+    });
+    rx
 }
 
 /// Start the feed if the config asks for one; otherwise undo banner changes a previous run
@@ -189,7 +250,20 @@ fn toast_feed(config: &Config) -> Option<ToastFeed> {
     let mut banners = Banners::load();
     banners.restore();
     banners.suppress_known(|aumid| t.ignores("", aumid));
-    Some(ToastFeed { listener, banners, queue: VecDeque::new(), showing_until: None, current: None, next_events: Instant::now(), next_poll: Instant::now() })
+    let now = Instant::now();
+    Some(ToastFeed {
+        listener,
+        banners,
+        queue: VecDeque::new(),
+        deck: Vec::new(),
+        showing_until: None,
+        gone: VecDeque::new(),
+        tap_empty: false,
+        next_events: now,
+        next_poll: now,
+        scan: Some(scan_notifiers()),
+        next_scan: now + NOTIFIER_SCAN,
+    })
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -226,9 +300,9 @@ impl Daemon {
                         feed.banners.restore();
                     }
                     // Started now only while the taskbar has our config; otherwise `apply` starts it.
-                    self.toasts = if self.active() && self.applied.is_some() { toast_feed(&self.config) } else { None };
+                    self.toasts = if self.active() && self.applied.is_some() && !self.stale_tap { toast_feed(&self.config) } else { None };
                     if self.toasts.is_none() && self.config.toasts.is_some() {
-                        self.toasts_parked = self.active();
+                        self.toasts_parked = self.active() && !self.stale_tap;
                     }
                 }
                 // Apply only what changed, so editing (say, from the GUI) doesn't flash the whole
@@ -279,6 +353,12 @@ impl Daemon {
     }
 
     fn inject(&mut self) {
+        self.inject_tap(false);
+    }
+
+    /// Inject our TAP (detaching any other). `swap`: in place of a working one of another build; that, done, doesn't
+    /// count toward the watchdog's re-injection limit (a swap that fails still counts as a failed injection).
+    fn inject_tap(&mut self, swap: bool) {
         if self.last_inject.is_some_and(|t| t.elapsed() < INJECT_BACKOFF) {
             return;
         }
@@ -293,7 +373,7 @@ impl Daemon {
                 self.failures = 0;
                 self.applied = None;
                 self.retry_apply = Instant::now();
-                if let Some(why) = taskbar_pid().and_then(|pid| self.watchdog.injected(pid)) {
+                if let Some(why) = taskbar_pid().and_then(|pid| self.watchdog.injected(pid, !swap)) {
                     self.bench(why);
                 }
             }
@@ -363,6 +443,7 @@ impl Daemon {
         self.applied = None;
         self.retry_apply = Instant::now();
         self.last_inject = None;
+        self.swaps = 0;
         self.failures = 0;
         self.sync_tray();
     }
@@ -447,7 +528,8 @@ impl Daemon {
                         format!("PimpMyShell {version} is out"),
                         "This copy isn't the installed one, so it can't update itself: the PimpMyShell icon's menu opens the new version's page.".to_string(),
                     )),
-                    update::Status::Stuck { version } if manual => Some((
+                    // Only a check by itself finds this (one asked for downloads it again).
+                    update::Status::Stuck { version } => Some((
                         version.clone(),
                         format!("PimpMyShell {version} didn't install"),
                         "Its installer ran before, but this is still the older version. Check again from the settings, or get it from the releases page.".to_string(),
@@ -534,6 +616,32 @@ impl Daemon {
         false
     }
 
+    /// The TAP in explorer is build `theirs`, not ours: swap ours in (true: wait for it). After MAX_SWAPS tries,
+    /// make do with theirs (false: go on applying), minus the toasts.
+    fn swap_tap(&mut self, theirs: &str, ours: &str) -> bool {
+        if self.swaps < MAX_SWAPS {
+            if self.last_inject.is_some_and(|t| t.elapsed() < INJECT_BACKOFF) {
+                return true;
+            }
+            self.swaps += 1;
+            log(format!("explorer has a TAP of another build ({theirs}; ours is {ours}), likely from before an update: swapping ours in"));
+            self.inject_tap(true);
+            return true;
+        }
+        if !self.stale_tap {
+            self.stale_tap = true;
+            self.toasts_parked = false;
+            if let Some(mut f) = self.toasts.take() {
+                f.banners.restore();
+            }
+            log(format!(
+                "the TAP in explorer ({theirs}) wouldn't be swapped for ours ({ours}): it keeps the rest of the config, but notification \
+                 banners stay with Windows until explorer restarts"
+            ));
+        }
+        false
+    }
+
     /// Make sure a TAP is there and shows our config.
     fn ensure(&mut self) {
         let status = match send("status") {
@@ -546,9 +654,25 @@ impl Daemon {
         };
         self.failures = 0;
         self.watch_explorer();
-        // Clicked away (or gone with a reset): move on to the next one.
-        if let Some(f) = self.toasts.as_mut().filter(|_| field(&status, "toast") == Some("hidden")) {
-            f.showing_until = None;
+        // After an update explorer still has the TAP it loaded before, which may not speak our protocol (toasts
+        // would fail while native banners are off): swap ours in.
+        if let Some(ours) = self.tap_build.clone() {
+            let theirs = field(&status, "build").unwrap_or("none (older)").to_string();
+            if theirs != ours {
+                if self.swap_tap(&theirs, &ours) {
+                    return;
+                }
+            } else {
+                self.swaps = 0;
+                if std::mem::take(&mut self.stale_tap) {
+                    // Ours at last (explorer restarted): toasts again, from the next apply.
+                    self.toasts_parked = true;
+                }
+            }
+        }
+        // Every card clicked or swiped away (or gone with a reset): the deck empties once their clicks are in.
+        if let Some(f) = self.toasts.as_mut().filter(|f| !f.deck.is_empty() && field(&status, "toast") == Some("hidden")) {
+            f.tap_empty = true;
         }
         let key = format!("tap={} taskbar={}", field(&status, "tap").unwrap_or("?"), field(&status, "taskbar").unwrap_or("none"));
         if field(&status, "taskbar") == Some("none") {
@@ -601,13 +725,16 @@ impl Daemon {
         self.sent_tide = -1.0;
         self.alert_shown = false;
         if let Some(f) = self.toasts.as_mut() {
+            // The reset took the cards down.
             f.showing_until = None;
+            f.deck.clear();
+            f.tap_empty = false;
         }
         log(format!("applied config to {key}"));
         self.last_note.clear();
         self.applied = Some(key);
         self.unhooked_since = None;
-        if std::mem::take(&mut self.toasts_parked) {
+        if !self.stale_tap && std::mem::take(&mut self.toasts_parked) {
             self.toasts = toast_feed(&self.config);
             if self.toasts.is_some() {
                 log("the taskbar is ours again: notification banners go to it again");
@@ -854,6 +981,20 @@ impl Daemon {
     fn pump_toasts(&mut self) {
         let (Some(cfg), Some(f)) = (self.config.toasts.as_ref(), self.toasts.as_mut()) else { return };
         let now = Instant::now();
+        // Apps that haven't notified yet: banners off ahead of their first toast.
+        if let Some(rx) = &f.scan {
+            match rx.try_recv() {
+                Ok(list) => {
+                    f.banners.suppress_ahead(&list, |aumid| cfg.ignores("", aumid));
+                    f.scan = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => f.scan = None,
+            }
+        } else if now >= f.next_scan {
+            f.next_scan = now + NOTIFIER_SCAN;
+            f.scan = Some(scan_notifiers());
+        }
         if now >= f.next_poll {
             f.next_poll = now + TOAST_POLL;
             match f.listener.poll() {
@@ -877,20 +1018,23 @@ impl Daemon {
                 Err(e) => log(format!("reading notifications: {e}")),
             }
         }
-        // Clicks on the card: activate like Windows would, off the loop (an app may take a while to start).
-        if f.current.is_some() && now >= f.next_events {
+        // Clicks and swipes on the cards (`<id> open|action <i>|close|swipe`): activate like Windows would, off the
+        // loop (an app may take a while to start). The TAP has already taken the card away.
+        if f.tap_empty || (f.wants_events(now) && now >= f.next_events) {
             f.next_events = now + EVENT_POLL;
+            let front = f.deck.last().map(|n| n.id);
             let events = send("toast events").unwrap_or_default();
             for ev in events.lines() {
-                let Some(t) = f.current.take() else { break };
-                let picked = match ev.split_once(' ') {
-                    _ if ev == "open" => Some((t.launch.0.clone(), t.launch.1)),
+                let Some((id, what)) = ev.split_once(' ') else { continue };
+                let Some(t) = id.parse().ok().and_then(|id| f.take(id)) else { continue };
+                let picked = match what.split_once(' ') {
+                    _ if what == "open" => Some((t.launch.0.clone(), t.launch.1)),
                     Some(("action", i)) => i.parse::<usize>().ok().and_then(|i| t.actions.get(i)).map(|a| (a.args.clone(), a.kind)),
                     _ => None,
                 };
-                f.showing_until = None;
                 let Some((args, kind)) = picked else {
-                    log(format!("toast from {} closed; it stays in the notification center", t.app));
+                    let how = if what == "swipe" { "swiped away" } else { "closed" };
+                    log(format!("toast from {} {how}; it stays in the notification center", t.app));
                     continue;
                 };
                 f.listener.remove(t.id);
@@ -902,33 +1046,58 @@ impl Daemon {
                     }
                 });
             }
-            if f.showing_until.is_none() {
-                // Gone (expired, reset) and its last clicks collected.
-                f.current = None;
+            if std::mem::take(&mut f.tap_empty) {
+                // The TAP shows none (all clicked away, or a reset): neither do we.
+                f.showing_until = None;
+                for n in std::mem::take(&mut f.deck) {
+                    f.gone.push_back((n, now));
+                }
+            } else if f.deck.last().map(|n| n.id) != front {
+                // The front card was clicked or swiped away: the next one has come forward, and counts down.
+                f.showing_until = None;
+                if let Some(n) = f.deck.last() {
+                    let ms = front_ms(cfg, n, f.deck.len());
+                    match send(&format!("toast front id={} ms={ms}", n.id)) {
+                        Ok(r) if !r.starts_with("error") => f.showing_until = Some(now + Duration::from_millis(ms as u64)),
+                        Ok(e) | Err(e) => log(format!("toast front: {e}")),
+                    }
+                }
             }
         }
+        f.gone.retain(|(_, at)| now.duration_since(*at) < LATE_CLICKS);
+        // The front card's time is up: it goes, and the one behind it comes forward.
         if f.showing_until.is_some_and(|t| now >= t) {
             f.showing_until = None;
-            if f.queue.is_empty()
-                && let Err(e) = send("toast hide") {
-                    log(format!("toast hide: {e}"));
+            if let Some(n) = f.deck.pop() {
+                let next = f.deck.last().map(|m| front_ms(cfg, m, f.deck.len()));
+                let cmd = format!("toast drop id={}{}", n.id, next.map(|ms| format!(" ms={ms}")).unwrap_or_default());
+                if let Err(e) = send(&cmd) {
+                    log(format!("toast drop: {e}"));
                 }
+                f.showing_until = next.map(|ms| now + Duration::from_millis(ms as u64));
+                f.gone.push_back((n, now));
+            }
         }
-        if f.showing_until.is_some() || self.applied.is_none() {
+        if self.applied.is_none() {
             return;
         }
-        let Some(n) = f.queue.pop_front() else { return };
-        let ms = match (n.long, f.queue.is_empty()) {
-            (true, _) => cfg.duration_ms.max(LONG_TOAST_MS),
-            (false, true) => cfg.duration_ms,
-            (false, false) => cfg.duration_ms.min(QUEUED_TOAST_MS),
-        };
-        match send(&n.command(ms)) {
-            Ok(r) if !r.starts_with("error") => {
-                f.showing_until = Some(now + Duration::from_millis(ms as u64));
-                f.current = Some(n);
+        // New toasts go on top, in front of the ones still showing.
+        while let Some(n) = f.queue.pop_front() {
+            let ms = if n.long { cfg.duration_ms.max(LONG_TOAST_MS) } else { cfg.duration_ms };
+            match send(&n.command(ms)) {
+                Ok(r) if !r.starts_with("error") => {
+                    f.showing_until = Some(now + Duration::from_millis(ms as u64));
+                    f.deck.push(n);
+                    if f.deck.len() > DECK_MAX {
+                        let old = f.deck.remove(0);
+                        if let Err(e) = send(&format!("toast drop id={}", old.id)) {
+                            log(format!("toast drop: {e}"));
+                        }
+                        f.gone.push_back((old, now));
+                    }
+                }
+                Ok(e) | Err(e) => log(format!("showing toast from {}: {e}", n.app)),
             }
-            Ok(e) | Err(e) => log(format!("showing toast from {}: {e}", n.app)),
         }
     }
 
@@ -1017,6 +1186,9 @@ pub fn run(path: &Path) -> Result<(), String> {
         },
         unhooked_since: None,
         toasts_parked: false,
+        tap_build: std::env::current_exe().ok().and_then(|e| pms_tap::build_of(&e.with_file_name("pms_tap.dll"))),
+        swaps: 0,
+        stale_tap: false,
     };
     // The feed (which turns native banners off) starts once the taskbar has our config (`apply`): toasts that came
     // before then would have nowhere to show. A previous run's leftovers go back meanwhile.
@@ -1078,7 +1250,7 @@ pub fn run(path: &Path) -> Result<(), String> {
         if let Some(f) = &d.toasts {
             deadline = deadline.min(f.next_poll);
             deadline = f.showing_until.map_or(deadline, |t| deadline.min(t));
-            if f.current.is_some() {
+            if f.wants_events(Instant::now()) {
                 deadline = deadline.min(f.next_events);
             }
         }

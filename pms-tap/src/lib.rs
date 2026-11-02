@@ -3,7 +3,7 @@
 //! site, from which we subscribe to the visual tree of every XAML island in the process.
 //!
 //! We mirror the tree (dumped to `%LOCALAPPDATA%\PimpMyShell\tree.txt` on change) and serve
-//! commands from the `pms` CLI over a named pipe (see `commands`).
+//! commands from the `pms` daemon and CLI over a named pipe (see `server`, `commands`).
 
 #![allow(non_snake_case)]
 
@@ -23,6 +23,7 @@ mod ripple;
 mod server;
 mod stage;
 mod toast;
+mod thumb;
 mod tooltip;
 pub mod vendors;
 pub mod xamlom;
@@ -203,6 +204,33 @@ pub(crate) fn run_on_ui<R: Send + 'static>(f: impl FnOnce(&Ctx) -> R + Send + 's
     ctx.dispatcher.RunAsync(CoreDispatcherPriority::Normal, &handler).map_err(|e| format!("RunAsync: {e}"))?;
     rx.recv_timeout(Duration::from_secs(5)).map_err(|_| "UI thread didn't run the command within 5s".to_string())?
 }
+
+/// A build's fingerprint: FNV-1a (64-bit) of its TAP DLL's bytes, in hex. The daemon compares the one the TAP in explorer
+/// reports (`status` ... `build=`) with its own `pms_tap.dll`'s: an update replaces the files, but explorer keeps the
+/// TAP it loaded, which may not speak the new daemon's protocol.
+pub fn build_of(dll: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(dll).ok()?;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3));
+    Some(format!("{hash:016x}"))
+}
+
+/// This TAP's build (`build_of` its own DLL file, a copy of the `pms_tap.dll` it was injected from).
+pub(crate) static BUILD: LazyLock<String> = LazyLock::new(|| {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW, GetModuleHandleExW,
+    };
+    let path = unsafe {
+        let mut module = HMODULE::default();
+        let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+        GetModuleHandleExW(flags, PCWSTR(&BUILD as *const _ as *const u16), &mut module).ok().map(|()| {
+            let mut buf = [0u16; 1024];
+            let n = GetModuleFileNameW(Some(module), &mut buf) as usize;
+            PathBuf::from(String::from_utf16_lossy(&buf[..n]))
+        })
+    };
+    path.as_deref().and_then(build_of).unwrap_or_else(|| "unknown".into())
+});
 
 /// Identifies this loaded copy, so a client can tell a re-injected TAP from the one it configured.
 pub(crate) static TAP_ID: LazyLock<String> = LazyLock::new(|| {

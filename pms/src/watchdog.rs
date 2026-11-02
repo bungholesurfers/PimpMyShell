@@ -70,7 +70,7 @@ pub struct Watchdog {
     /// Crashes of explorers we had hooked, lately.
     crashes: Vec<Instant>,
     inject_failures: u32,
-    /// Injections into the same explorer: (pid, how many).
+    /// Injections into the same explorer, not counting swaps for another build: (pid, how many).
     reinjects: (u32, u32),
     /// A crashed shell Windows hasn't brought back yet: when we'll start it.
     restart_at: Option<Instant>,
@@ -120,10 +120,13 @@ impl Watchdog {
         self.reinjects = (0, 0);
     }
 
-    /// We injected a TAP into explorer `pid`. Returns why we give up, if this is one replacement too many.
-    pub fn injected(&mut self, pid: u32) -> Option<String> {
+    /// We injected a TAP into explorer `pid`. Returns why we give up, if this is one replacement too many. `counts`:
+    /// false for a deliberate swap (a working TAP of another build, after an update), which says nothing of trouble.
+    pub fn injected(&mut self, pid: u32, counts: bool) -> Option<String> {
         self.inject_failures = 0;
-        self.reinjects = if self.reinjects.0 == pid { (pid, self.reinjects.1 + 1) } else { (pid, 1) };
+        if counts {
+            self.reinjects = if self.reinjects.0 == pid { (pid, self.reinjects.1 + 1) } else { (pid, 1) };
+        }
         if self.hooked.as_ref().is_none_or(|h| h.pid != pid) {
             self.watch(pid, "explorer.exe");
         }
@@ -147,7 +150,7 @@ impl Watchdog {
     }
 
     fn bench(&mut self, why: String) -> String {
-        log(format!("watchdog: {why}; leaving explorer alone until PimpMyShell restarts"));
+        log(format!("watchdog: {why}; leaving explorer alone until PimpMyShell restarts (or the tray's Retry)"));
         self.benched = Some(why.clone());
         why
     }

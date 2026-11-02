@@ -150,7 +150,7 @@ pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
     }
 }
 
-/// The host in the background slot, made on first use.
+/// The host in the taskbar background's Alert slot (stage.rs), made on first use.
 fn hosts(ctx: &Ctx) -> R<()> {
     if GLOWS.with_borrow(Option::is_some) {
         return Ok(());

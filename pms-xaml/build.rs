@@ -35,6 +35,8 @@ const TYPES: &[&str] = &[
     "Windows.UI.Xaml.Input.TappedRoutedEventArgs",
     "Windows.UI.Xaml.Input.PointerEventHandler",
     "Windows.UI.Xaml.Input.PointerRoutedEventArgs",
+    // Swiping a toast away: capturing the pointer while it drags.
+    "Windows.UI.Xaml.Input.Pointer",
     "Windows.UI.Xaml.Controls.ColumnDefinition",
     "Windows.UI.Xaml.Controls.ColumnDefinitionCollection",
     "Windows.UI.Xaml.GridLength",
@@ -55,7 +57,8 @@ const TYPES: &[&str] = &[
     "Windows.UI.Xaml.Media.CompositionTarget",
     "Windows.UI.Xaml.Controls.Primitives.Popup",
     "Windows.UI.Xaml.XamlRoot",
-    // The Start button's hover and press, for its glow (glow.rs).
+    // Start's and the app buttons' hover and press (and Start's checked state: its menu open), for their glows
+    // (glow.rs).
     "Windows.UI.Xaml.Controls.Primitives.ButtonBase",
     "Windows.UI.Xaml.Controls.ContentControl",
     "Windows.UI.Xaml.Controls.Control",

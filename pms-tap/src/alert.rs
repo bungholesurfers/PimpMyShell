@@ -1,17 +1,24 @@
-//! The hot-mic alert, in its own slot above the backdrop and below the stage (so it works over
-//! both the stock acrylic and ours, and never covers meters or buttons).
+//! The hot-mic alert, in the Alert slot above the backdrop and below the stage (so it works over
+//! both the stock acrylic and ours, and never covers meters or buttons; the toast ripple and the
+//! button glows share the slot).
 //!
 //!   alert broad <#color> <period_ms> <low> <high>
 //!       the whole taskbar breathes in the color, sonar rings echo from its center
 //!   alert local
 //!       the wash shrinks into a pill around the mic label (meters.rs) and the rings echo from
 //!       there instead: "still on, but I'll keep to my corner"
+//!   alert level <flicker 0..1> [tide 0..1]
+//!       how loud the mic is (the daemon sends it): the flicker's strength and the tide's height
+//!   alert muted 0|1
 //!   alert off
 //!
 //!   host Grid (Alert slot)
-//!     `- ShapeVisual
-//!         |- wash: rounded rect, fill alpha breathing between low and high
-//!         `- rings: 3 white ellipse strokes of different weights, growing and fading, staggered
+//!     `- ContainerVisual
+//!         |- ShapeVisual: wash, rounded rect, fill alpha breathing between low and high
+//!         |- SpriteVisual: tide, the color rising from the bottom edge as loud as the mic is
+//!         |- ShapeVisual: flicker, a brighter wash, opacity = level x noise
+//!         `- ShapeVisual: rings, 3 near (white, different weights) + 2 far (local: white blushing
+//!            pink), growing and fading, staggered
 //!
 //! UI thread only.
 
@@ -201,8 +208,8 @@ fn build(host: &UIElement, color: Color) -> R<Alert> {
     // Far rings (local phase): fewer, slower, crossing the whole taskbar, white blushing to pink.
     let far = Emitter::new(&compositor, &list, &FAR_RINGS)?;
 
-    // The tide: red rising from the bottom edge as high as the mic is loud (log scale, so
-    // near-silence still shows a little). Sized in apply(); its height is Scale.Y = p.Tide.
+    // The tide: the alert's color rising from the bottom edge as high as the mic is loud (the
+    // daemon sends it in decibels, so near-silence still shows a little). Sized in apply(); its height is Scale.Y = p.Tide.
     let tide = compositor.CreateSpriteVisual().map_err(w)?;
     let gradient = compositor.CreateLinearGradientBrush().map_err(w)?;
     gradient.SetStartPoint(Vector2 { X: 0.0, Y: 1.0 }).map_err(w)?;

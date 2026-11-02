@@ -36,13 +36,14 @@ OutputBaseFilename=pms-setup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern dynamic
-; pms-art draws these (cargo xtask art): the box as Setup's icon, the box on the dark of the sea for the welcome and
+; pms-art draws these (cargo xtask art): the box as Setup's icon, the box on dollar signs tiled over the dark for the welcome and
 ; finish pages, the box in the other pages' corner - each at the sizes display scales want.
 SetupIconFile=art\setup.ico
 WizardImageFile=art\wizard-*.png
 WizardSmallImageFile=art\corner-*.png
 AppPublisher=PimpMyShell
-AppComments=Exclusively for Windows 11; The daemon is stopped by the code below (which also restores the stock taskbar), not by the Restart Manager.
+AppComments=Exclusively for Windows 11.
+; The daemon is stopped by the code below (which also restores the stock taskbar), not by the Restart Manager.
 CloseApplications=no
 
 [Tasks]
@@ -62,7 +63,7 @@ Name: "{autoprograms}\PimpMyShell"; Filename: "{app}\pms-gui.exe"; Comment: "Pim
 Name: "{autodesktop}\PimpMyShell"; Filename: "{app}\pms-gui.exe"; Tasks: desktopicon
 
 [Registry]
-; The same value the settings' "Start at logon" writes; the uninstaller removes it whichever wrote it (see below).
+; The same value (PimpMyShell) the settings' and tray's "start at sign-in" writes; the uninstaller removes it whichever wrote it (see below).
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PimpMyShell"; \
   ValueData: """{app}\pmsd.exe"""; Flags: uninsdeletevalue; Tasks: autostart
 

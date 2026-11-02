@@ -1,6 +1,6 @@
 //! The daemon's notification-area icon, in the manner of Nagare's: the logo (the crab and its dollar), and a menu.
 //!
-//!   PimpMyShell - running | paused | not hooked (why)
+//!   PimpMyShell X.Y.Z | Paused: the stock taskbar | Not hooked: (why)
 //!   Settings             (also a left click)
 //!   Pause                the stock taskbar until resumed
 //!   Hook explorer again  only after the watchdog gave up (watchdog.rs)

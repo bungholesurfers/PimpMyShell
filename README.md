@@ -26,18 +26,22 @@ the SHA-256 of each file in `SHA256SUMS.txt`.
 ## What you get
 
 - **Meters** by the tray, from any Windows performance counter, with math over them:
-  - CPU: a bar per thread, grouped by core, split into user and kernel time.
-  - GPU: a bar per engine for every GPU, labelled and colored by maker (NVDA, AMD, INTC, QCOM, MSFT), with NVIDIA's
+  - CPU: a bar per thread, grouped by core, split into kernel time (at the bottom) and user time above it.
+  - GPU: a bar per engine for every GPU, labelled and colored by maker (NV, RAD, INTC, QCOM, MSFT), with NVIDIA's
     power state (P0, P8...) when its driver is there.
-  - Memory: RAM as a pie (in use, modified, standby), and a VRAM pie per graphics card.
-  - Disk and network, as bars or sparklines.
+  - Memory: RAM as a pie (in use, modified, standby), a VRAM pie per graphics card, and the pagefile only once RAM
+    runs short.
+  - Disk and network: write/read and up/down bars per disk and per interface. The disk Windows is on and the
+    interface your internet goes through always show, first; the others join while busy, then fall off.
   - Your own: point a meter at any perf-counter path and write an expression, like `min(gpu, 100)` or
-    `vram / vram_total`. Styles: sparkline, gauge, pie, cores, engines, bars.
-  - Bars can glow by how busy they are, or by how hot they've got. Hover any meter for a tooltip.
+    `vram / vram_total`. Styles: history (a sparkline), bar (a gauge), pie, cores, engines, bars, disks, nics.
+  - Bars can glow by how busy they are, or by how hot they've got. Hover any meter, or any GPU, disk or interface
+    in one, for a tooltip that says what it is and what it's doing.
 - **Hot mic.** While an app has the microphone open, the whole taskbar warns you. Then it settles into a label naming
   the apps, with sonar rings and the mic's loudness rising in the background.
 - **Toasts in the taskbar.** Notifications show inside the taskbar instead of popping up. Their buttons work. The
-  card glows in the app icon's color, rings ripple across the taskbar, and the clock stays in sight.
+  card glows in the app icon's color, rings ripple across the taskbar, and the clock stays in sight. New ones stack
+  on top of the ones still showing, and you can flick a card off to the right to dismiss it.
 - **Your own backdrop.** Blur, tint and grain, with knobs. One look for dark mode, one for light, following Windows.
 - **Glowing buttons.** Start and every app button glow when you point at them, brighter when pressed. Each app glows
   in its icon's color.
@@ -60,9 +64,9 @@ The tray icon's menu:
 | --- | --- |
 | Settings | opens the settings (a left click does too) |
 | Pause (stock taskbar) | puts the stock taskbar and native notifications back until you resume |
-| Hook explorer again | shows up only after the watchdog backed off (below) |
+| Hook explorer again | in Pause's place, only after the watchdog backed off (below) |
 | Start at sign-in | the HKCU Run value, on or off |
-| Check for updates | checks now; once a new version is downloaded and checked, *Install PimpMyShell X…* (asks first) |
+| Check for updates | checks now; once a new version is downloaded and checked, *Install PimpMyShell X…* (asks first); a portable copy offers *PimpMyShell X is out: open its page* |
 | Open log | `daemon.log` in Notepad |
 | Exit | stops the daemon, which puts the stock taskbar back |
 
@@ -83,11 +87,13 @@ What it touches, all under your own user (no admin, no services, no drivers):
 - **`HKCU\Software\Classes\AppUserModelId\PimpMyShell`**: the name and logo PimpMyShell's own notifications go out
   under (the watchdog's warning, say).
 - **`HKCU\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\<app>`**, value `ShowBanner`: with in-taskbar
-  toasts on, each app's native popup is switched off as PimpMyShell meets it. The original value is written down in
+  toasts on, the native popup of every app that can notify is switched off. The original value is written down in
   `banners.txt` *before* it's changed, and put back when the daemon stops, pauses, or turns toasts off. If the daemon
-  crashed, the next start puts them back first.
-- **`HKCU\Control Panel\NotifyIconSettings`**: on its very first start, the tray icon is promoted out of the overflow,
-  once. Hide it again and it stays hidden.
+  crashed, the next start puts them back first. For an app that had never notified there was no key: PimpMyShell
+  creates it, and deletes it again only if it's still exactly as left (no values, no subkeys). Once the app has
+  notified, Windows has filled the key in and it stays, as it would have anyway.
+- **`HKCU\Control Panel\NotifyIconSettings`**: on the first start of each copy (each exe path), the tray icon is
+  promoted out of the overflow, once (`tray-pinned.txt` remembers). Hide it again and it stays hidden.
 - **`%LOCALAPPDATA%\PimpMyShell`**: `pms.toml`, the logs (`daemon.log` and `tap.log`, each rotated at 1 MB with two
   older generations kept, `daemon.1.log` and `daemon.2.log`; about 3 MB each at most), `banners.txt`, `tree.txt` (a
   dump of the taskbar's visual tree), `update-checked.txt` (when updates were last checked), `pms-128.png`,
@@ -106,7 +112,8 @@ same from a console.
 **Uninstalling:** Settings > Apps > PimpMyShell. The uninstaller stops the daemon (stock taskbar and banners back),
 removes the Run value and its Task Manager startup mark, the notification registration, `%TEMP%\pms-update`, and the
 logs, `tree.txt` and `update-checked.txt` (each by its exact name). It keeps `pms.toml` (your config) and
-`banners.txt` in `%LOCALAPPDATA%\PimpMyShell`. Delete that folder by hand if you want it gone. A TAP copy stays loaded, inert, in the running explorer until explorer restarts or you sign out.
+`banners.txt` in `%LOCALAPPDATA%\PimpMyShell`, along with small leftovers (`pms-128.png`, `tray-pinned.txt`, the
+`pms_tap-*.dll` copies). Delete that folder by hand if you want it gone. A TAP copy stays loaded, inert, in the running explorer until explorer restarts or you sign out.
 
 ## How it diddles Explorer
 
@@ -218,7 +225,8 @@ BackgroundFill, [Backdrop host], [Alert host], [Stage canvas], [Grain host], Bac
 
 Because the pointer never reaches the stage, meter tooltips use transparent hover zones placed in the top-level Grid
 (the one holding `TaskbarFrame` and `SystemTrayFrame`), and a windowed `Popup` that can stand above the taskbar.
-Toast cards go in that Grid too, over the tray. The tray fades away while one shows.
+Toast cards go in that Grid too, over the tray (the cards behind the front one peek out at its left). The tray fades
+away while they show.
 
 Where things fit comes from **layout tracking**: on every `LayoutUpdated` the TAP measures the children of
 `TaskbarFrameRepeater` and `SystemTrayFrameGrid` and works out the free stretches. The meter strip fits itself into
@@ -253,11 +261,16 @@ REPL against the same pipe, and `pms help` lists the commands, including raw tre
 registry event and the tray's event, waking for whichever is due: meter intervals, mic levels, toast polls. Once a
 second it reconciles:
 
-1. **`status`.** The TAP answers `tap=<copy id> taskbar=<BackgroundFill handle> backdrop=.. alert=.. meters=N
-   toast=..`. The UI-thread hop doubles as a liveness check.
+1. **`status`.** The TAP answers `tap=<copy id> build=<hash> taskbar=<BackgroundFill handle> backdrop=.. alert=..
+   meters=N toast=..`. The UI-thread hop doubles as a liveness check.
    - No pipe at all (first run, explorer restarted): **inject**, once the taskbar's island exists, at most every
      5 seconds.
    - Three failed exchanges with a TAP that's there: replace it.
+   - A TAP of another build (`build` is a hash of the TAP DLL's bytes; the daemon hashes the `pms_tap.dll` beside it):
+     **swap ours in**. After an update explorer still has the TAP it loaded before, which may not speak the new
+     daemon's protocol, so toasts would fail while their native banners are off. Swapping doesn't count against
+     the hook, and every update takes effect without restarting explorer. If two swaps in a row don't take, that TAP
+     keeps the rest of the config but not the toasts: native banners stay on until explorer restarts.
    - A TAP copy or taskbar tree it hasn't configured, or one that drifted from the config (someone ran `reset`):
      **`reset`**, then apply the whole config again.
 2. **Config hot reload.** When `pms.toml`'s modified time changes, it's loaded and validated. Only the sections that
@@ -283,8 +296,21 @@ inert, until the next daemon.
   counters only move in whole timer ticks, so they just decide the user/kernel split. Grouping comes from the CPU topology
   Windows reports.
 - **GPUs.** DXGI enumerates the adapters (software ones like WARP left out unless asked). `per_gpu = true` turns one
-  meter into a pie per adapter with dedicated memory, reading `\GPU Adapter Memory(luid_..._phys_*)\Dedicated Usage`
-  against the adapter's size. The maker comes from the adapter's name.
+  meter into a pie per adapter with at least `min_memory_mb` (1024) of dedicated memory, reading `\GPU Adapter Memory(luid_..._phys_*)\Dedicated Usage`
+  against the adapter's size. The maker comes from the adapter's name. An engine counts as working from 0.5% (the
+  desktop keeps some at a trace); with `engines_fall_off`, idle engines leave one by one, not only whole GPUs.
+- **Disks and network interfaces.** `\PhysicalDisk(*)` and `\Network Interface(*)` per instance. A disk's instance
+  is its number and drive letters (`0 C: D:`); the one holding the Windows folder is the system disk. Its model and
+  bus come from `IOCTL_STORAGE_QUERY_PROPERTY` (no access to the disk itself needed). An interface's instance is
+  its adapter's description with `(` `)` `#` `/` `\` respelled, matched against `GetAdaptersAddresses` for its name,
+  kind, link speed and addresses. The internet one is where `GetBestInterfaceEx` routes 1.1.1.1 (IPv6: Cloudflare's
+  2606:4700:4700::1111), which asks the routing table and sends nothing. That one and the system disk always show,
+  first. The rest show while busy (2 KB/s or more), busiest first, and leave `hold_seconds` after going idle. The
+  order is worked out again only when one comes or goes, so bars don't swap under the pointer.
+- **Tooltips.** A hover zone covers each meter at the taskbar's full height and reaches into the spacing around it.
+  GPU and device meters get one per GPU or device. The daemon writes those tooltips: a GPU's name, power state and
+  busy engines; a disk's role, rates, model and free space; an interface's role, rates, adapter, link speed and
+  addresses.
 - **NVML.** If NVIDIA's driver is installed, `nvml.dll` is loaded at runtime for each GPU's performance state. No
   NVIDIA, no NVML, no problem.
 
@@ -307,11 +333,31 @@ and feeds them to the alert. Apps that mute themselves (Discord, Teams) still re
   (images, buttons, launch arguments) is read from the notification platform's `wpndatabase.db` by the same id,
   read-only.
 - **Native banners out of the way.** `ShowBanner=0` under an app's `Notifications\Settings\<AUMID>` key takes effect
-  live: the notification still reaches the center (and the listener), but the popup is gone. The daemon sets it per
-  app as it meets them and restores it all as described above. An app's very first notification predates its key, so
-  that one still pops up natively.
-- **Clicks** on the card are queued in the TAP; the daemon collects them and activates the app the way Windows would:
-  its `INotificationActivationCallback` COM activator, a protocol URI, or launching the app.
+  live: the notification still reaches the center (and the listener), but the popup is gone. Set ahead of an app's
+  first notification, it holds that one back too. So the daemon sets it for every app that has notified, and also for
+  every app that could: the Start menu's apps (packaged ones, and shortcuts carrying an app id, like Telegram's or
+  Discord's) plus the ids registered under `Classes\AppUserModelId` (Firefox's, Windows' own senders). It looks
+  again every 10 minutes for newly installed apps. Restoring is as described above.
+- **Every kind goes through one platform.** Modern toasts (WinRT, Windows App SDK, browsers' web push), Windows'
+  own system toasts, and the old tray balloons (`Shell_NotifyIcon` with `NIF_INFO`, and `IUserNotification`),
+  which Explorer turns into toasts. All of them show up in the listener and go to the taskbar. Try them all with
+  `cargo run -p pms --example toast_lab -- register` once, then `-- everything` (or `all`, `shell`, or kinds by
+  name; `--gap 4` first to space them out); `notif_probe` shows what the listener and the database hold.
+- **Two exceptions.** A tray icon's balloons get an id Explorer makes up (`NotifyIconGeneratedAumid_<hash>`) at
+  its first balloon, so each tray icon's first balloon still pops natively. And a toast an app sends silently
+  (`SuppressPopup`, straight to the center) looks like any other to the listener, so it shows in the taskbar.
+- **A deck.** A toast that comes while others show goes on top. The ones behind step back: shorter, fainter, their
+  insides hidden, and clipped to a sliver that peeks out at the front card's left (the cards are translucent, so
+  anything more would show through). When the front card goes, the next comes forward, with at most 4 s while more
+  wait behind it. Up to 8 cards; older ones are let go (they're still in the notification center).
+- **Swiping.** Drag the front card: it follows the pointer, fading as it goes right, and gives a little to the left.
+  What's under it shows as it goes: the card behind comes forward, whole wherever the front card has moved off it,
+  or, with none behind, the tray fades back in.
+  Let go past 40% of its width, or flick it right, and it flies off at the speed it was thrown, slowing as it goes;
+  that dismisses it, like its x. Otherwise it springs back (a composition spring, carrying the release speed).
+- **Clicks and swipes** on a card are queued in the TAP with the card's id; the daemon collects them. A click on the card
+  or a button activates the app the way Windows would: its `INotificationActivationCallback` COM activator, a protocol
+  URI, or launching the app; a swipe or the x just dismisses it. The card leaves at once; the next one's countdown starts when the daemon says (`toast front`).
 - Do not disturb and full-screen apps still hold toasts back (`SHQueryUserNotificationState`).
 
 ### The watchdog
@@ -325,8 +371,8 @@ people do that on purpose. A **crash** is another matter. The daemon holds a han
    - `pms_tap*`, or XAML / composition modules the TAP drives (`Windows.UI.Xaml.dll`, `dcomp.dll`,
      `CoreMessaging.dll`, ...): bench at once.
    - Anything else: once is explorer's own business. Twice within 10 minutes: bench.
-3. Hooking that keeps failing benches too: 3 failed injections in a row, or a TAP replaced more than 3 times in the
-   same explorer.
+3. Hooking that keeps failing benches too: 3 failed injections in a row, or a TAP that had to be replaced 3 times in
+   the same explorer (not counting swaps for a new build).
 4. Windows normally restarts a crashed shell. If it hasn't within 12 seconds, the daemon starts explorer.exe, but only
    after a crash, never after it was ended.
 
@@ -343,7 +389,7 @@ Nothing installs without you saying so.
   of the last check is kept, so signing in again doesn't check again. *Check for updates* in the tray menu and the
   settings' *software update* checks right away.
 - **Telling you.** A new version is downloaded and checked, then a notification says it's ready and the tray menu
-  offers *Install PimpMyShell X…*, which asks first. The settings show it too, with *Install X and restart*.
+  offers *Install PimpMyShell X…*, which asks first. A check from the settings ends the same way, with *Install X and restart*.
 - **What's new.** The *stable* channel (`update_channel = "stable"`, the default) reads a tag from `update/stable.txt`
   on the repo's main branch. The *latest* channel takes the newest release, its tag read off where GitHub's
   `/releases/latest` redirects (a HEAD request). Only a version newer than the running one counts, except for the
@@ -362,8 +408,9 @@ Nothing installs without you saying so.
   is checked the same way: no other host, no user, no port. TLS against Mozilla's roots, bundled. Timeouts and a size
   cap on every response.
 - **Install.** The Inno Setup installer runs `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`. It stops the daemon, installs
-  over it, and starts it again. The version goes into `tried.txt` first: if the install didn't take, the next check
-  by itself says so instead of looping (one you ask for tries again).
+  over it, and starts it again if it was running. The new daemon swaps its TAP in for the old one (see the reconcile
+  loop above). The version goes into `tried.txt` first: if the install didn't take, the next check by itself says so
+  (once a run) instead of looping; one you ask for downloads it again.
 - Only an installed copy (running from `%LOCALAPPDATA%\Programs\PimpMyShell`) updates itself. A portable or dev build
   just says whether a newer release is out.
 
@@ -384,7 +431,8 @@ cargo xtask pgo [SECS]   profile-guided build: instrument, train on this very ta
 cargo xtask help         the full list, including the separate pgo-* steps
 ```
 
-Everyday builds skip LTO entirely, so a change rebuilds in seconds. Only the PGO build takes fat LTO.
+Everyday builds skip LTO entirely, so a change rebuilds in seconds. Only release builds take fat LTO (the PGO build, or the release
+workflow's when there's no profile).
 
 The installer needs **Inno Setup 6**: `winget install --id JRSoftware.InnoSetup --scope user`. VERSION is the
 workspace's version, in the root `Cargo.toml` (`[workspace.package]`), which every crate takes.

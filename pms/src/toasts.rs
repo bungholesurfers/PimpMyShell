@@ -6,16 +6,24 @@
 //! so we poll. It only exposes text, so the full toast XML (images, buttons, launch arguments)
 //! comes from the notification platform's own database, `wpndatabase.db`, by the same id.
 //!
+//! Kinds: modern toasts, Windows' system toasts and the legacy tray balloons (`Shell_NotifyIcon`
+//! `NIF_INFO`, `IUserNotification`, which Explorer turns into toasts filed under a made-up
+//! `NotifyIconGeneratedAumid_<hash>`) all reach the listener alike.
+//!
 //! Banners: each app's `HKCU\...\Notifications\Settings\<AUMID>` takes `ShowBanner=0` live,
-//! which keeps the notification (center, listener) but drops the popup. We set it per app as we
-//! meet them, write down what we changed in `banners.txt` *before* changing it, and put it all
-//! back on `restore` (daemon stop, `[toasts]` removed, or the next start after a crash). An
-//! app's very first notification predates its registry key, so that one still pops natively.
+//! which keeps the notification (center, listener) but drops the popup - also when set before the
+//! app's first notification, on a key we create. We set it for apps that have notified and, ahead
+//! of time, for every app that could (`notifiers`), write down what we changed in `banners.txt`
+//! *before* changing it, and put it all back on `restore` (daemon stop, `[toasts]` removed, or the
+//! next start after a crash). An app missed ahead of time (installed since the last scan, or with
+//! neither a Start entry nor a registered id, like a tray icon's first balloon, whose id doesn't
+//! exist until then) still pops natively once.
 //!
 //! Activation mirrors what Windows does for a click: the app's COM activator
 //! (`INotificationActivationCallback`, registered as `CustomActivator` or in a packaged app's
-//! manifest) gets the launch/button arguments; protocol actions open their URI; apps without an
-//! activator are launched, or failing that the notification center opens.
+//! manifest) gets the launch/button arguments; protocol actions open their URI; packaged apps
+//! without an activator are launched with the arguments; for other apps without one the
+//! notification center opens.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -89,7 +97,7 @@ pub struct Incoming {
     pub actions: Vec<Action>,
     /// 0..1, or negative for indeterminate.
     pub progress: Option<f64>,
-    /// `duration="long"`, or a scenario Windows keeps on screen (reminder, alarm, call).
+    /// `duration="long"`, or a scenario Windows keeps on screen (reminder, alarm, incomingCall, urgent).
     pub long: bool,
     /// Packaged apps resolve ms-appx/ms-appdata URIs and activators through their package.
     package: Option<Package>,
@@ -107,6 +115,7 @@ impl Incoming {
         let q = crate::quote;
         let path = |p: &Option<PathBuf>| p.as_ref().map_or(String::new(), |p| p.display().to_string());
         let mut fields = vec![
+            format!("id={}", self.id),
             format!("ms={ms}"),
             format!("app={}", self.app),
             format!("attribution={}", self.attribution),
@@ -567,26 +576,76 @@ fn show_banner(aumid: &str) -> Option<u32> {
     (err == ERROR_SUCCESS).then_some(v)
 }
 
-/// Apps whose banners we turned off, with each one's original `ShowBanner` (None = unset).
+/// Whether the app's `Notifications\Settings` key exists (Windows creates it at the app's first notification).
+fn has_key(aumid: &str) -> bool {
+    let mut key = HKEY::default();
+    let ok = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &subkey(aumid), None, KEY_READ, &mut key) } == ERROR_SUCCESS;
+    if ok {
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+    }
+    ok
+}
+
+/// What an app's `ShowBanner` was before we set it to 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Orig {
+    /// The key existed without the value.
+    Unset,
+    Value(u32),
+    /// There was no key at all: the app had never notified. We created it.
+    NoKey,
+}
+
+impl Orig {
+    /// `banners.txt` column: "-", "+" or the number. (0.1.0 reads "+" as "-": it deletes the value, keeps the key.)
+    fn text(self) -> String {
+        match self {
+            Orig::Unset => "-".into(),
+            Orig::NoKey => "+".into(),
+            Orig::Value(v) => v.to_string(),
+        }
+    }
+
+    fn parse(s: &str) -> Orig {
+        match s {
+            "+" => Orig::NoKey,
+            _ => s.parse().map_or(Orig::Unset, Orig::Value),
+        }
+    }
+}
+
+/// An id that names one app's own settings key: Windows' app ids are short, without spaces or
+/// backslashes (a backslash would make it a nested key, and an empty one the Settings key itself).
+/// Start menu entries that aren't apps (paths of files and documents, links) don't qualify.
+fn is_app_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && !id.contains(['\\', '/', ' ', '\t']) && !id.contains("://") && !id.starts_with('{')
+}
+
+/// Apps whose banners we turned off, with what each one's `ShowBanner` was before.
 pub struct Banners {
-    managed: Vec<(String, Option<u32>)>,
+    managed: Vec<(String, Orig)>,
 }
 
 impl Banners {
     /// Picks up what a previous run (possibly crashed) left suppressed.
     pub fn load() -> Banners {
         let text = std::fs::read_to_string(state_file()).unwrap_or_default();
-        let managed = text
-            .lines()
-            .filter_map(|l| l.split_once('\t'))
-            .map(|(aumid, orig)| (aumid.to_string(), orig.parse().ok()))
-            .collect();
+        Banners::parse(&text)
+    }
+
+    fn parse(text: &str) -> Banners {
+        let managed = text.lines().filter_map(|l| l.split_once('\t')).map(|(aumid, orig)| (aumid.to_string(), Orig::parse(orig))).collect();
         Banners { managed }
     }
 
+    fn text(&self) -> String {
+        self.managed.iter().map(|(a, o)| format!("{a}\t{}\n", o.text())).collect()
+    }
+
     fn save(&self) {
-        let text: String = self.managed.iter().map(|(a, o)| format!("{a}\t{}\n", o.map_or("-".into(), |v| v.to_string()))).collect();
-        if let Err(err) = std::fs::write(state_file(), text) {
+        if let Err(err) = std::fs::write(state_file(), self.text()) {
             crate::log(format!("writing {}: {err}", state_file().display()));
         }
     }
@@ -602,19 +661,36 @@ impl Banners {
 
     /// Turn this app's native banner off (no-op if we already did, or the user did).
     pub fn suppress(&mut self, aumid: &str) {
-        if self.is_managed(aumid) {
+        self.suppress_all([aumid]);
+    }
+
+    /// Turn these apps' native banners off: each one written down in `banners.txt` (one write for all of
+    /// them) before its setting changes.
+    pub fn suppress_all<'a>(&mut self, aumids: impl IntoIterator<Item = &'a str>) {
+        let mut new = Vec::new();
+        for aumid in aumids {
+            if aumid.is_empty() || self.is_managed(aumid) || new.iter().any(|(a, _)| a == aumid) {
+                continue;
+            }
+            let orig = match show_banner(aumid) {
+                Some(0) => continue, // the user's own choice
+                Some(v) => Orig::Value(v),
+                None if has_key(aumid) => Orig::Unset,
+                None => Orig::NoKey,
+            };
+            new.push((aumid.to_string(), orig));
+        }
+        if new.is_empty() {
             return;
         }
-        let orig = show_banner(aumid);
-        if orig == Some(0) {
-            return;
-        }
-        self.managed.push((aumid.to_string(), orig));
+        self.managed.extend(new.iter().cloned());
         self.save();
         let zero = 0u32.to_le_bytes();
-        let err = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, &subkey(aumid), w!("ShowBanner"), REG_DWORD.0, Some(zero.as_ptr() as _), 4) };
-        if err != ERROR_SUCCESS {
-            crate::log(format!("suppressing banners for {aumid}: {}", err.to_hresult().message()));
+        for (aumid, _) in &new {
+            let err = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, &subkey(aumid), w!("ShowBanner"), REG_DWORD.0, Some(zero.as_ptr() as _), 4) };
+            if err != ERROR_SUCCESS {
+                crate::log(format!("suppressing banners for {aumid}: {}", err.to_hresult().message()));
+            }
         }
     }
 
@@ -628,27 +704,117 @@ impl Banners {
                 let _ = RegCloseKey(root);
             }
         }
-        for aumid in apps.iter().filter(|a| !keep(a)) {
-            self.suppress(aumid);
+        self.suppress_all(apps.iter().map(String::as_str).filter(|a| !keep(a)));
+    }
+
+    /// Apps that may notify but never have (`notifiers`): their banners off ahead of their first toast,
+    /// which would otherwise pop natively.
+    pub fn suppress_ahead(&mut self, notifiers: &[String], keep: impl Fn(&str) -> bool) {
+        let before = self.managed.len();
+        self.suppress_all(notifiers.iter().map(String::as_str).filter(|a| is_app_id(a) && !keep(a)));
+        let added = self.managed.len() - before;
+        if added > 0 {
+            crate::log(format!("notification banners of {added} more app(s) go to the taskbar, ahead of their first toast"));
         }
     }
 
     /// Put every banner setting we touched back the way we found it.
     pub fn restore(&mut self) {
         for (aumid, orig) in self.managed.drain(..) {
+            if aumid.is_empty() {
+                continue;
+            }
             let err = match orig {
-                None => unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, &subkey(&aumid), w!("ShowBanner")) },
-                Some(v) => {
+                Orig::Unset => unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, &subkey(&aumid), w!("ShowBanner")) },
+                Orig::NoKey => {
+                    let err = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, &subkey(&aumid), w!("ShowBanner")) };
+                    remove_if_empty(&aumid);
+                    err
+                }
+                Orig::Value(v) => {
                     let b = v.to_le_bytes();
                     unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, &subkey(&aumid), w!("ShowBanner"), REG_DWORD.0, Some(b.as_ptr() as _), 4) }
                 }
             };
-            if err != ERROR_SUCCESS {
+            if err != ERROR_SUCCESS && err != windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
                 crate::log(format!("restoring banners for {aumid}: {}", err.to_hresult().message()));
             }
         }
         let _ = std::fs::remove_file(state_file());
     }
+}
+
+/// A settings key we created ahead of an app's first notification goes again - but only while it's
+/// exactly as we left it: no values, no subkeys. Once the app has notified, Windows has filled it in
+/// and it stays, as it would have without us.
+fn remove_if_empty(aumid: &str) {
+    if !is_app_id(aumid) {
+        return;
+    }
+    let mut key = HKEY::default();
+    if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &subkey(aumid), None, KEY_READ, &mut key) } != ERROR_SUCCESS {
+        return;
+    }
+    let (mut subkeys, mut values) = (0u32, 0u32);
+    let err = unsafe { RegQueryInfoKeyW(key, None, None, None, Some(&mut subkeys), None, None, Some(&mut values), None, None, None, None) };
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    if err == ERROR_SUCCESS && subkeys == 0 && values == 0 {
+        // RegDeleteKey removes this one key and refuses a key with subkeys.
+        let err = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, &subkey(aumid)) };
+        if err != ERROR_SUCCESS {
+            crate::log(format!("removing the empty settings key of {aumid}: {}", err.to_hresult().message()));
+        }
+    }
+}
+
+/// Every app that could send a toast: the Start menu's apps (packaged apps, and shortcuts that carry an app
+/// id - Telegram, Discord, Chrome) and the ids registered for toasts under `Classes\AppUserModelId` (Firefox's
+/// `FirefoxToast-…`, Windows' own senders). Takes a moment (~0.2 s): call it off the main loop.
+pub fn notifiers() -> Vec<String> {
+    use windows::Win32::UI::Shell::{BHID_EnumItems, FOLDERID_AppsFolder, IEnumShellItems, IShellItem, KF_FLAG_DEFAULT, SHGetKnownFolderItem, SIGDN_PARENTRELATIVEPARSING};
+    let mut out = Vec::new();
+    let mut start = || -> windows_core::Result<()> {
+        let folder: IShellItem = unsafe { SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None) }?;
+        let items: IEnumShellItems = unsafe { folder.BindToHandler(None, &BHID_EnumItems) }?;
+        loop {
+            let mut got = [None];
+            if unsafe { items.Next(&mut got, None) }.is_err() {
+                break;
+            }
+            let Some(item) = got[0].take() else { break };
+            if let Ok(id) = unsafe { item.GetDisplayName(SIGDN_PARENTRELATIVEPARSING) } {
+                out.push(unsafe { id.to_string() }.unwrap_or_default());
+                unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(id.0 as _)) };
+            }
+        }
+        Ok(())
+    };
+    if let Err(err) = start() {
+        crate::log(format!("listing the Start menu's apps: {err}"));
+    }
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let mut key = HKEY::default();
+        if unsafe { RegOpenKeyExW(root, w!(r"Software\Classes\AppUserModelId"), None, KEY_READ, &mut key) } != ERROR_SUCCESS {
+            continue;
+        }
+        let mut buf = [0u16; 512];
+        for i in 0.. {
+            let mut len = buf.len() as u32;
+            if unsafe { RegEnumKeyExW(key, i, Some(windows_core::PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None) } != ERROR_SUCCESS {
+                break;
+            }
+            out.push(String::from_utf16_lossy(&buf[..len as usize]));
+        }
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+    }
+    out.retain(|id| is_app_id(id));
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// AUMIDs may contain backslashes, so app keys nest; an app key is one with a notification history.
@@ -673,5 +839,35 @@ fn collect_apps(key: HKEY, prefix: &str, out: &mut Vec<String>) {
         unsafe {
             let _ = RegCloseKey(sub);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_ids() {
+        for ok in ["Telegram.TelegramDesktop", "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "FirefoxToast-308046B0AF4A39CB", "Chrome"] {
+            assert!(is_app_id(ok), "{ok}");
+        }
+        for not in [
+            "",
+            r"{6D809377-6AF0-444B-8957-A3773F02200E}\7-Zip\7zFM.exe",
+            r"C:\Users\User\AppData\Local\Programs\Nagare\nagare.exe",
+            "https://gitforwindows.org/faq",
+            "a b",
+            &"x".repeat(129),
+        ] {
+            assert!(!is_app_id(not), "{not}");
+        }
+    }
+
+    #[test]
+    fn banners_file_round_trips() {
+        let text = "A\t-\nB\t+\nC\t1\n";
+        let b = Banners::parse(text);
+        assert_eq!(b.managed, vec![("A".into(), Orig::Unset), ("B".into(), Orig::NoKey), ("C".into(), Orig::Value(1))]);
+        assert_eq!(b.text(), text);
     }
 }

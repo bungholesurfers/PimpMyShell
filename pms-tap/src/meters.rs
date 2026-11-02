@@ -3,11 +3,13 @@
 //! UI thread only.
 //!
 //!   meters height compact|tall|full      cell height: 75%, 87.5% (default), 100% of the taskbar
-//!   meters add key=value..               label= style=history|bar|pie|cores color= colors=a,b
-//!                                        max= (history) topo= (cores) wide=<widest value text>
+//!   meters add key=value..               label= style=history|bar|pie|cores|engines|bars|devices
+//!                                        color= colors=a,b max= (history) topo= (cores, engines,
+//!                                        devices) wide=<widest value text>
 //!   meters sep                           group separator before the next meter
 //!   meters push <i> <text> <values..>    history: value [max] | bar: fraction
-//!                                        pie: fraction per slice | cores: user,kernel pairs
+//!                                        pie: fraction per slice | cores: user kernel per thread
+//!                                        engines/bars/devices: fraction per bar
 //!   meters presence <i> on|off           show, or slowly shrink away (N/A meters)
 //!   meters mic <apps>|off                the "MICROPHONE IN USE BY" label
 //!
@@ -15,7 +17,8 @@
 //! thread count, prefixed `e` for an efficiency core.
 //!
 //! Fitting: when the strip doesn't fit its free interval it squeezes in stages, each only as far
-//! as needed: spacing, then graphic widths (sparklines, gauges, core bars), then horizontal text
+//! as needed: spacing, then labels into the pies that allow it (`inside=auto`), then graphic
+//! widths (sparklines, gauges, core bars), then horizontal text
 //! scale (only where the text is what makes a cell wide), and finally hides meters from the end.
 //! Cells are rebuilt only when the fit changes; presence changes animate in place, and the other
 //! cells glide to their new spots.
@@ -75,7 +78,8 @@ enum Style {
     Bar,
     Pie,
     Cores,
-    /// One bar per GPU engine that has shown activity (`meters bars` names them).
+    /// Named bars (`meters bars` names them): a GPU's engines (`engines`), plain bars (`bars`), or a pair per disk or
+    /// network interface (`devices`).
     Engines,
 }
 
@@ -126,8 +130,15 @@ struct Spec {
     short_vendors: bool,
     /// How the bars glow.
     glow: GlowMode,
+    /// Cores: kernel time at the bottom of each bar, user time stacked above it (else user first).
+    kernel_low: bool,
     /// GPU engines: each GPU labelled by its maker in place of the caption, its bars in the maker's colors.
     vendors: bool,
+    /// Disks, network interfaces: a group of bars per device (bars named "<device> — <part>"), each labelled by its
+    /// device in place of the caption, its bars in the meter's colors by part.
+    devices: bool,
+    /// Engines, devices: a tooltip per GPU or device, from the daemon (`meters devtips`), in the strip's order.
+    devtips: Vec<String>,
     /// ... and per GPU (topology node), its label, the label's natural width, and its maker if known.
     gpus: Vec<(String, f64, Option<Vendor>)>,
     /// ... and its power state, under the label ("P8"; empty where unknown: only NVIDIA's are known).
@@ -181,9 +192,10 @@ enum Parts {
     /// `buckets[k]`: how many samples back bar k (counted from the right) reaches.
     History { bars: Vec<SpriteVisual>, xs: Vec<(f64, f64)>, buckets: Vec<usize>, h: f64 },
     Bar { fill: Rectangle, peak: Rectangle, span: f64 },
-    /// `glow`: the rim's, and the (opacity, blur radius) it was last given.
+    /// `glow`: the rim's, and the (opacity, reach) it was last given.
     Pie { wedges: Vec<Path>, d: f64, glow: Option<Glow>, lit: Cell<(f32, f32)> },
-    Cores { bars: Vec<CoreBar>, states: Vec<Option<TextBlock>> },
+    /// `nodes`: each topology node's (GPU's, device's) x range in the cell: its label and bars.
+    Cores { bars: Vec<CoreBar>, states: Vec<Option<TextBlock>>, nodes: Vec<(f64, f64)> },
 }
 
 struct CoreBar {
@@ -203,6 +215,8 @@ struct CoreBar {
     span: (f64, f64),
     bottom: f64,
     height: f64,
+    /// Its topology node (NUMA node; GPU; device).
+    node: usize,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -430,6 +444,14 @@ pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
             crate::tooltip::refresh(i);
             Ok(String::new())
         }
+        // devtips <i> <text>..: a tooltip per GPU or device of an engines/devices meter, in the strip's order.
+        Some("devtips") => {
+            let i: usize = arg(1).ok_or("missing <i>")?.parse().map_err(|e| format!("bad index: {e}"))?;
+            let tips = args[2..].to_vec();
+            with_strip(|s| s.meters.get_mut(i).map(|m| m.spec.devtips = tips)).flatten().ok_or_else(|| format!("no meter #{i}"))?;
+            crate::tooltip::refresh(i);
+            Ok(String::new())
+        }
         Some("tip") => {
             let i: usize = arg(1).ok_or("missing <i>")?.parse().map_err(|e| format!("bad index: {e}"))?;
             let tip = args[2..].join(" ");
@@ -526,7 +548,7 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
         "bar" => Style::Bar,
         "pie" => Style::Pie,
         "cores" => Style::Cores,
-        "engines" | "bars" => Style::Engines,
+        "engines" | "bars" | "devices" => Style::Engines,
         other => return Err(format!("unknown style `{other}`")),
     };
     let colors = get("colors").split(',').chain([get("color")]).filter(|c| !c.is_empty()).map(parse_color).collect::<R<Vec<_>>>()?;
@@ -539,10 +561,11 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
     }
     // A GPU engines meter labels each GPU by its maker instead of having a caption of its own.
     let vendors = get("style") == "engines" && get("novendors") != "1";
+    let devices = get("style") == "devices";
     let label = if vendors { String::new() } else { get("label").to_string() };
     let wide = if get("wide").is_empty() { "100%" } else { get("wide") };
-    // nocaption=1: the label only in the tooltip.
-    let caption = get("nocaption") != "1";
+    // nocaption=1: the label only in the tooltip. Devices are labelled each by its own name instead.
+    let caption = get("nocaption") != "1" && !devices;
     let caption_w = if caption { measure(&text_block(&label, CAPTION.0, CAPTION.1, TEXT)?)? } else { 0.0 };
     let font = if get("font").is_empty() { "Cascadia Mono, Consolas".to_string() } else { get("font").to_string() };
     let value_w = measure(&value_block(wide, &font)?)?;
@@ -577,7 +600,10 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
             "off" => GlowMode::Off,
             _ => GlowMode::Level,
         },
+        kernel_low: get("kernel") != "top",
         vendors,
+        devices,
+        devtips: Vec::new(),
         gpus: Vec::new(),
         gpu_states: Vec::new(),
         log_time: get("time") != "linear",
@@ -710,10 +736,10 @@ const GPU_GLOW_FROM: f64 = 0.2;
 const GPU_GLOW_FULL: f64 = 0.8;
 const CPU_GLOW_FROM: f64 = 0.3;
 const CPU_GLOW_FULL: f64 = 0.85;
-/// By heat: seconds to (nearly) full heat at full load, and back to (nearly) cold idle; the heat at which the glow
-/// starts (it peaks at full heat); how much heat brightens a fill, and how far toward white.
 /// Glows and heated fills change in this many steps from nothing to full.
 const GLOW_STEPS: f32 = 24.0;
+/// By heat: seconds to (nearly) full heat at full load, and back to (nearly) cold idle; the heat at which the glow
+/// starts (it peaks at full heat); how much heat brightens a fill, and how far toward white.
 const HEAT_RISE: f32 = 8.0;
 const HEAT_FALL: f32 = 30.0;
 const HEAT_GLOW_FROM: f64 = 0.15;
@@ -754,7 +780,9 @@ impl Strip {
         let mut total = 0.0;
         for (k, &i) in shown.iter().enumerate() {
             let sep = k > 0 && self.meters[i].spec.sep;
-            total += if sep { sep_width(fit) } else if k > 0 { snap(fit.spacing) } else { 0.0 };
+            // As sync_seps lays them out: a snug meter sits right against the one before it.
+            let spacing = k > 0 && !self.meters[i].spec.snug;
+            total += if sep { sep_width(fit) } else if spacing { snap(fit.spacing) } else { 0.0 };
             total += cell_width(&self.meters[i].spec, fit);
         }
         if let Some(m) = &self.mic {
@@ -943,8 +971,8 @@ fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
         }
         Style::Cores | Style::Engines => {
             let x0 = TEXT_PAD + text_w(m, fit) + 4.0;
-            let (bars, states) = core_bars(&root, m, x0, h, fit, pad_y)?;
-            (Parts::Cores { bars, states }, TEXT_PAD, fit.text, 0.0)
+            let (bars, states, nodes) = core_bars(&root, m, x0, h, fit, pad_y)?;
+            (Parts::Cores { bars, states, nodes }, TEXT_PAD, fit.text, 0.0)
         }
     };
     if inside(m, fit) {
@@ -970,23 +998,29 @@ fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
     Ok(MeterCell { root, glow, value, parts, sep: None, gliding: Cell::new(false), shown_text: RefCell::new(String::new()) })
 }
 
-/// The bars, and each GPU's power-state text (where it has one), to update as it changes.
-fn core_bars(canvas: &Canvas, m: &Spec, x0: f64, h: f64, fit: &Fit, pad_y: f64) -> R<(Vec<CoreBar>, Vec<Option<TextBlock>>)> {
+/// The bars, each GPU's power-state text (where it has one) to update as it changes, and where each topology node
+/// (GPU, device) is: its label and bars, from left to right.
+#[allow(clippy::type_complexity)]
+fn core_bars(canvas: &Canvas, m: &Spec, x0: f64, h: f64, fit: &Fit, pad_y: f64) -> R<(Vec<CoreBar>, Vec<Option<TextBlock>>, Vec<(f64, f64)>)> {
     // Start on a pixel; the geometry is whole pixels from there.
     let x0 = snap(x0);
     let (bar, [tg, cg, lg, ng]) = core_geometry(threads(&m.topo), m.barw, fit.graph);
     if m.topo.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
     let full = h - 4.0 - 2.0 * pad_y;
     let bottom = 2.0 + pad_y + full;
     let mut x = x0;
-    // Columns first (x, height, which node), then their tracks, then the bar layer above the tracks.
-    let mut columns: Vec<(f64, f64, usize)> = Vec::new();
+    // Columns first (x, height, which node, which bar of it); then one bar layer holding each column's track, kernel
+    // and user sprites.
+    let mut columns: Vec<(f64, f64, usize, usize)> = Vec::new();
     let mut states = Vec::new();
+    let mut nodes = Vec::new();
     for (ni, node) in m.topo.split('|').enumerate() {
         x += if ni > 0 { ng } else { 0.0 };
-        // A GPU's maker, left of its bars.
+        let start = x;
+        let mut nth = 0;
+        // A GPU's maker (a device's name), left of its bars.
         if let Some((ticker, natural, v)) = m.gpus.get(ni) {
             let label = text_block(ticker, VENDOR_FONT.0, VENDOR_FONT.1, v.map_or(TEXT_DIM, |v| Color { A: 0xE0, ..v.bar }))?;
             // With its power state known, the maker sits higher, the state small beneath it.
@@ -1013,45 +1047,56 @@ fn core_bars(canvas: &Canvas, m: &Spec, x0: f64, h: f64, fit: &Fit, pad_y: f64) 
                 let height = if core.starts_with('e') { full * 0.78 } else { full };
                 for t in 0..n {
                     x += if t > 0 { tg } else { 0.0 };
-                    columns.push((x, height, ni));
+                    columns.push((x, height, ni, nth));
+                    nth += 1;
                     x += bar;
                 }
             }
         }
+        nodes.push((start, x));
     }
     // Track, kernel and user all on one layer, so they snap to the same pixels.
     let width = canvas.Width().map_err(w)?;
     let layer = bar_layer(canvas, width, h)?;
     let mut bars = Vec::new();
-    for &(x, height, ni) in &columns {
+    for &(x, height, ni, nth) in &columns {
         let span = (snap(x), snap(x + bar).max(snap(x) + 1.0 / PX.get()));
         let track = bar_sprite(&layer, TRACK)?;
         set_bar(&track, span, bottom, height, 1.0)?;
         // Cores: user and kernel colors. Engines/bars: one color per bar, cycling.
         let (uc, kc) = match (m.style, m.gpus.get(ni).and_then(|g| g.2)) {
             (Style::Engines, Some(v)) => (v.bar, v.bar),
+            // A device's bars by part (disk: write, read).
+            (Style::Engines, None) if m.devices => (m.colors[nth % m.colors.len()], m.colors[0]),
             (Style::Engines, None) => (m.colors[bars.len() % m.colors.len()], m.colors[0]),
             _ => (m.colors[0], m.colors[1]),
         };
-        // Kernel behind user: by level, as tall as both; by heat, just its own part above user's.
-        let kernel = bar_sprite(&layer, kc)?;
-        let user = bar_sprite(&layer, uc)?;
+        // The upper part behind the lower one: by level, as tall as both; by heat, just its own part above the
+        // lower one. Kernel is the upper part unless kernel_low (CPU threads only; engines have just one part).
+        let kernel_low = m.kernel_low && m.style == Style::Cores;
+        let (kernel, user) = if kernel_low {
+            let user = bar_sprite(&layer, uc)?;
+            (bar_sprite(&layer, kc)?, user)
+        } else {
+            (bar_sprite(&layer, kc)?, bar_sprite(&layer, uc)?)
+        };
+        let back = if kernel_low { &user } else { &kernel };
         // The glows, soft and without offset, so they show around the bar, not over it. A GPU's in its maker's
         // glow color; a CPU thread's in user's color (by level, set as the meter runs) and by heat kernel's too.
         let maker = m.gpus.get(ni).and_then(|g| g.2);
         let c = layer.Compositor().map_err(w)?;
         let glows = match (m.glow, m.style, maker) {
             (GlowMode::Off, _, _) | (_, Style::Engines, None) | (_, Style::History | Style::Bar | Style::Pie, _) => Vec::new(),
-            (GlowMode::Level, Style::Engines, Some(v)) => vec![BarGlow::new(&c, &kernel, v.glow)?],
-            (GlowMode::Level, _, _) => vec![BarGlow::new(&c, &kernel, m.colors[0])?],
+            (GlowMode::Level, Style::Engines, Some(v)) => vec![BarGlow::new(&c, back, v.glow)?],
+            (GlowMode::Level, _, _) => vec![BarGlow::new(&c, back, m.colors[0])?],
             (GlowMode::Heat, Style::Engines, Some(v)) => vec![BarGlow::new(&c, &user, v.glow)?],
             (GlowMode::Heat, _, _) => vec![BarGlow::new(&c, &user, m.colors[0])?, BarGlow::new(&c, &kernel, m.colors[1])?],
         };
         let brush = |s: &SpriteVisual| s.Brush().ok().and_then(|b| b.cast::<CompositionColorBrush>().ok());
         let brushes = brush(&user).zip(brush(&kernel));
-        bars.push(CoreBar { user, kernel, track, glows, colors: (uc, kc), brushes, lit_fill: Cell::new(-1.0), span, bottom, height });
+        bars.push(CoreBar { user, kernel, track, glows, colors: (uc, kc), brushes, lit_fill: Cell::new(-1.0), span, bottom, height, node: ni });
     }
-    Ok((bars, states))
+    Ok((bars, states, nodes))
 }
 
 /// How a meter's bars glow: by how busy they are now; by how hot they've got (busy for a while); or not.
@@ -1314,11 +1359,13 @@ fn draw(m: &Meter) -> R<()> {
             let (mut user, mut kernel) = (0.0, 0.0);
             for (j, b) in bars.iter().enumerate() {
                 let (u, k) = if engines { (v(j), 0.0) } else { (v(2 * j), v(2 * j + 1)) };
-                set_bar(&b.user, b.span, b.bottom, b.height, u)?;
+                // The lower part from the bottom; the upper one above it (by level, as tall as both, behind).
+                let ((low, l), high) = if m.spec.kernel_low && !engines { ((&b.kernel, k), &b.user) } else { ((&b.user, u), &b.kernel) };
+                set_bar(low, b.span, b.bottom, b.height, l)?;
                 if heat {
-                    set_segment(&b.kernel, b.span, b.bottom, b.height, u, (u + k).min(1.0))?;
+                    set_segment(high, b.span, b.bottom, b.height, l, (u + k).min(1.0))?;
                 } else {
-                    set_bar(&b.kernel, b.span, b.bottom, b.height, (u + k).min(1.0))?;
+                    set_bar(high, b.span, b.bottom, b.height, (u + k).min(1.0))?;
                 }
                 (user, kernel) = (user + u, kernel + k);
                 if heat {
@@ -1519,7 +1566,7 @@ fn leave(i: usize) {
 }
 
 /// Run on the XAML UI thread (composition callbacks may arrive elsewhere).
-fn on_ui(f: impl FnOnce() + Send + 'static) {
+pub(crate) fn on_ui(f: impl FnOnce() + Send + 'static) {
     let Some(ctx) = CTX.get() else { return };
     let job = std::sync::Mutex::new(Some(f));
     let handler = DispatchedHandler::new(move || {
@@ -1571,7 +1618,7 @@ fn mic(ctx: &Ctx, args: &[String]) -> R<String> {
 }
 
 /// The mic label changed (its names, "stopped N sec. ago" counting, mute): when the strip's layout stays as it is -
-/// nearly always - only the label's cell is built again, so the meters beside it don't flicker or lose their heat;
+/// nearly always - only the label's cell is built again, so the meters beside it aren't rebuilt (no flicker);
 /// otherwise the whole strip is refitted.
 fn remic() {
     let snap = lock(&SNAPSHOT).clone();
@@ -1692,22 +1739,41 @@ fn position(snapshot: &Snapshot) {
             if !s.panel_glides {
                 glide_on_move(&panel)?;
             }
-            // Glide when neighbours come and go; attached once cells have a position, so they
-            // don't slide in from the left edge when (re)built.
-            // Hover zones over every shown meter (bars too, for per-CPU / per-engine tooltips).
+            // Hover zones over every shown meter, the taskbar's full height and into the spacing either side, so the
+            // pointer needn't find the meter itself; bars too, for per-CPU tooltips. A GPU or device meter has a
+            // zone per GPU or device instead, from halfway to the one before it to halfway to the next.
             let mut zones = Vec::new();
+            let reach = snap(fit.spacing) / 2.0 + 1.0;
+            let full_h = snapshot.height;
             for i in s.shown(&fit) {
                 let m = &s.meters[i];
                 let Some(c) = m.cell.as_ref().filter(|_| m.spec.tooltip) else { continue };
-                let rect = bounds(&ui(&c.root)?, c.root.Width().map_err(w)?, c.root.Height().map_err(w)?)?;
-                let bars = match &c.parts {
-                    Parts::Cores { bars, .. } => bars.iter().map(|b| b.span).collect(),
-                    _ => Vec::new(),
-                };
-                zones.push(crate::tooltip::ZoneSpec { meter: i, rect, bars });
+                let cell_w = c.root.Width().map_err(w)?;
+                let cell = bounds(&ui(&c.root)?, cell_w, c.root.Height().map_err(w)?)?;
+                let zone = |left: f64, right: f64| Rect { X: cell.X + left as f32, Y: 0.0, Width: (right - left) as f32, Height: full_h };
+                match &c.parts {
+                    Parts::Cores { bars, nodes, .. } if m.spec.style == Style::Engines && !nodes.is_empty() => {
+                        for (d, &(a, b)) in nodes.iter().enumerate() {
+                            let left = if d == 0 { -reach } else { (nodes[d - 1].1 + a) / 2.0 };
+                            let right = if d + 1 == nodes.len() { cell_w + reach } else { (b + nodes[d + 1].0) / 2.0 };
+                            let bar0 = bars.iter().position(|bar| bar.node == d).unwrap_or(0);
+                            let spans = bars.iter().filter(|bar| bar.node == d).map(|bar| (bar.span.0 - left, bar.span.1 - left)).collect();
+                            zones.push(crate::tooltip::ZoneSpec { meter: i, rect: zone(left, right), bars: spans, bar0, device: Some(d) });
+                        }
+                    }
+                    parts => {
+                        let spans = match parts {
+                            Parts::Cores { bars, .. } => bars.iter().map(|b| (b.span.0 + reach, b.span.1 + reach)).collect(),
+                            _ => Vec::new(),
+                        };
+                        zones.push(crate::tooltip::ZoneSpec { meter: i, rect: zone(-reach, cell_w + reach), bars: spans, bar0: 0, device: None });
+                    }
+                }
             }
             crate::tooltip::set_zones(zones);
             s.panel_glides = true;
+            // Glide when neighbours come and go; attached once cells have a position, so they
+            // don't slide in from the left edge when (re)built.
             for c in s.meters.iter().filter_map(|m| m.cell.as_ref()).filter(|c| !c.gliding.get()) {
                 if c.root.ActualWidth().map_err(w)? > 0.0 {
                     glide_on_move(&ui(&c.root)?)?;
@@ -1748,12 +1814,15 @@ fn request_frame() {
     }
 }
 
-/// Tooltip text for meter `i`, or for one of its bars (CPU, GPU engine).
-pub fn tip_text(i: usize, bar: Option<usize>) -> Option<String> {
+/// Tooltip text for meter `i`, for one of its GPUs or devices (the daemon's), or for one of its bars (CPU, GPU engine).
+pub fn tip_text(i: usize, bar: Option<usize>, device: Option<usize>) -> Option<String> {
     STRIP.with_borrow(|s| {
         let m = s.as_ref()?.meters.get(i)?;
         if !m.spec.tooltip {
             return None;
+        }
+        if let Some(tip) = device.and_then(|d| m.spec.devtips.get(d)) {
+            return Some(tip.clone());
         }
         let pct = |v: f64| format!("{:.0}%", v.clamp(0.0, 1.0) * 100.0);
         let v = |k: usize| m.values.get(k).copied().unwrap_or(0.0);
@@ -1889,12 +1958,15 @@ fn land_bars(i: usize) {
         // sit together like a core's threads, types a core apart, adapters further apart (the
         // daemon sends them sorted that way). Plain bars (NET up/down) are one tight group.
         let plain = !labels.iter().any(|l| l.contains(" — "));
+        // A device's bars (a disk's write and read) sit tight together, like one core's threads.
+        let devices = m.spec.devices;
         let topo = if plain {
             labels.len().to_string()
         } else {
             let split = |s: &str| {
                 let (gpu, rest) = s.split_once(" — ").unwrap_or(("", s));
-                (gpu.to_string(), rest.split(" (engine").next().unwrap_or(rest).to_string())
+                let kind = if devices { "" } else { rest.split(" (engine").next().unwrap_or(rest) };
+                (gpu.to_string(), kind.to_string())
             };
             let mut topo = String::new();
             let mut run = 0;
@@ -1915,7 +1987,7 @@ fn land_bars(i: usize) {
             topo
         };
         m.values.clear();
-        if m.spec.vendors && !plain {
+        if (m.spec.vendors || devices) && !plain {
             // One label per GPU, in the topology's order (the daemon sends adapters together).
             let mut gpus: Vec<String> = Vec::new();
             for l in &labels {
@@ -1930,8 +2002,13 @@ fn land_bars(i: usize) {
                 .iter()
                 .enumerate()
                 .map(|(j, g)| {
-                    let v = vendor(g);
-                    let ticker = v.as_ref().map_or("GPU", |v| if m.spec.short_vendors { v.short } else { v.ticker }).to_string();
+                    // A GPU is labelled by its maker; a device by the name the daemon gave it (C:, WiFi).
+                    let v = if devices { None } else { vendor(g) };
+                    let ticker = match &v {
+                        _ if devices => g.clone(),
+                        Some(v) => (if m.spec.short_vendors { v.short } else { v.ticker }).to_string(),
+                        None => "GPU".to_string(),
+                    };
                     let w = text_block(&ticker, VENDOR_FONT.0, VENDOR_FONT.1, TEXT).and_then(|t| measure(&t)).unwrap_or(24.0);
                     let stated = m.spec.gpu_states.get(j).is_some_and(|s| !s.is_empty());
                     (ticker, if stated { w.max(state_w) } else { w }, v)
@@ -2095,7 +2172,7 @@ fn pie_glow(glow: &Glow, lit: &Cell<(f32, f32)>, f: f64, pressure: f64) -> R<()>
         return Ok(());
     }
     let (mid, outer) = (glow.edge + 0.3 * reach / glow.half, glow.edge + reach / glow.half);
-    // A pie just (re)built takes it at once: strips rebuild whenever the mic label changes.
+    // A pie just (re)built takes it at once (no animation up from a dark rim).
     if was.0 < 0.0 {
         glow.sprite.SetOpacity(opacity).map_err(w)?;
         glow.mid.SetOffset(mid).map_err(w)?;

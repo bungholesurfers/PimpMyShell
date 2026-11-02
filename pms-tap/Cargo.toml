@@ -22,8 +22,11 @@ windows = { version = "0.62.2", features = [
     "Win32_System_WinRT",
     "Win32_UI_Shell",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Imaging",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
     "UI_Composition",
+    "UI_Input",
     "Storage_Streams",
 ] }
 png = "0.18.1"
