@@ -31,7 +31,8 @@ theme = "auto"
 # software_gpus = true
 
 # Software update. update_check: whether the daemon checks GitHub for a newer version by itself, every
-# day or two, and downloads it - it installs only once you say so (unset: the daemon asks, once).
+# day or two, and downloads it - it installs only once you say so (unset: the daemon asks a minute in,
+# and checks nothing until answered; OK, or closing the question, is yes).
 # update_channel: "stable" (the version the repository's update/stable.txt names) or "latest" (the
 # newest release published). Only installers signed with PimpMyShell's release key are ever run.
 # update_check   = true
@@ -64,6 +65,7 @@ ignore    = []        # e.g. ["obs64.exe"]: substrings of the app's consent-stor
 # its buttons acts like clicking the real one. New toasts stack on top of the ones showing; flick a card off to the
 # right to dismiss it. Do not disturb and full-screen apps still hold toasts back.
 [toasts]
+# enabled   = false   # off, its settings kept (what the notice about notification access's "Keep Windows' notifications" sets)
 duration_ms = 7000    # each toast in front (one that comes forward again with more behind it: at most 4 s)
 ignore      = []      # apps that keep native banners (name or AUMID substring), e.g. ["Teams"]
 

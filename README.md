@@ -71,7 +71,14 @@ The tray icon's menu:
 | Exit | stops the daemon, which puts the stock taskbar back |
 
 Toasts need notification access. Windows asks the first time; it lives under Settings > Privacy & security >
-Notifications.
+Notifications. While it's off, notifications stay Windows', and a card of PimpMyShell's own in the taskbar says so
+every 5 minutes; click it for the fix. They come to the taskbar within seconds of turning it on. Or click *Keep
+Windows' notifications* there: the taskbar's toasts go off (`enabled = false` under `[toasts]`; the settings' Toasts
+page turns them on again), and so does the reminder.
+
+The same kind of card tells you of the few other troubles that need you: a `pms.toml` that didn't load (click it for
+the line and what's wrong with it, and a button that opens the file), or toasts that couldn't start. With toasts off
+in the config, or a stock taskbar, a Windows notification says it instead.
 
 ## Is it safe? What does it change?
 
@@ -102,8 +109,9 @@ What it touches, all under your own user (no admin, no services, no drivers):
 
 It reads, but never writes, the notification database (`wpndatabase.db`), to get a toast's full content.
 
-The only network traffic is the update check. A minute into the first run, PimpMyShell asks whether it may check
-by itself; if yes, it checks every day or two (`update_check` in the config, or the settings' *software update*). You
+The only network traffic is the update check, and none happens until you answer. A minute into the first run,
+PimpMyShell asks whether it may check by itself: *OK*, or closing the question, lets it check every day or two; *No,
+don't check* turns that off (`update_check` in the config, or the settings' *software update*, changes it later). You
 can also check from the tray or the settings. It sends nothing but the requests themselves.
 
 **Turning it off:** tray > *Pause* for a stock taskbar right now, tray > *Exit* to stop. `pms daemon stop` does the
@@ -275,7 +283,8 @@ second it reconciles:
      **`reset`**, then apply the whole config again.
 2. **Config hot reload.** When `pms.toml`'s modified time changes, it's loaded and validated. Only the sections that
    changed are re-sent, in one batch, so saving from the settings doesn't flash the taskbar back to stock. A broken
-   file keeps the previous config.
+   file keeps the previous config, and a notice (`notices.rs`) says what's wrong. One broken at the start doesn't stop
+   the daemon: it starts with a stock taskbar, until a save that loads.
 3. **Theme and power.** It follows `SystemUsesLightTheme` (with `theme = "auto"`) and switches between the dark and
    light looks. On battery (`GetSystemPowerStatus`) it lowers the animation cap.
 4. Then the hot mic, toasts and meters (below).
@@ -331,7 +340,8 @@ and feeds them to the alert. Apps that mute themselves (Discord, Teams) still re
 - **Source.** `UserNotificationListener` works unpackaged once you allow notification access. Its change event needs
   package identity, so the daemon polls it twice a second. The listener only exposes text, so the full toast XML
   (images, buttons, launch arguments) is read from the notification platform's `wpndatabase.db` by the same id,
-  read-only.
+  read-only. Without access (or once it's taken away), no banner is turned off, a notice says so, and the daemon
+  tries again every 15 seconds.
 - **Native banners out of the way.** `ShowBanner=0` under an app's `Notifications\Settings\<AUMID>` key takes effect
   live: the notification still reaches the center (and the listener), but the popup is gone. Set ahead of an app's
   first notification, it holds that one back too. So the daemon sets it for every app that has notified, and also for
@@ -384,10 +394,11 @@ which forgets the strikes and starts over.
 
 Nothing installs without you saying so.
 
-- **When.** A minute into the first run, the daemon asks whether it may check by itself. If yes, it checks a while
-  after each start (1 to 30 minutes, at random) and then every 24 to 48 hours (2 to 6 after a failed check). The time
-  of the last check is kept, so signing in again doesn't check again. *Check for updates* in the tray menu and the
-  settings' *software update* checks right away.
+- **When.** A minute into the first run, the daemon asks whether it may check by itself: *OK*, or closing the
+  question, is yes; *No, don't check* is no. Unanswered, it checks nothing, and asks again next run. If yes, it checks
+  a while after each start (1 to 30 minutes, at random) and then every 24 to 48 hours (2 to 6 after a failed check).
+  The time of the last check is kept, so signing in again doesn't check again. *Check for updates* in the tray menu
+  and the settings' *software update* checks right away.
 - **Telling you.** A new version is downloaded and checked, then a notification says it's ready and the tray menu
   offers *Install PimpMyShell X…*, which asks first. A check from the settings ends the same way, with *Install X and restart*.
 - **What's new.** The *stable* channel (`update_channel = "stable"`, the default) reads a tag from `update/stable.txt`

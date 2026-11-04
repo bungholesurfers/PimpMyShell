@@ -29,6 +29,7 @@ use windows_core::{BOOL, HSTRING, PCWSTR, w};
 use crate::config::{self, Config};
 use crate::hotmic::{self, MicWatch};
 use crate::meters::Sampler;
+use crate::notices::{self, Notices};
 use crate::toasts::{self, Banners, Incoming, Listener};
 use crate::tray::{self, Tray};
 use crate::watchdog::Watchdog;
@@ -58,6 +59,12 @@ const LONG_TOAST_MS: u32 = 25_000;
 const EVENT_POLL: Duration = Duration::from_millis(120);
 /// How often to look for apps installed since (their banners go off ahead of their first toast).
 const NOTIFIER_SCAN: Duration = Duration::from_secs(600);
+/// How often to try listening for notifications again, while Windows won't let us (notification access off): soon
+/// after it's turned on, toasts come to the taskbar.
+const LISTEN_RETRY: Duration = Duration::from_secs(15);
+/// How long a config that didn't load waits before its notice shows: a save that writes the file in two goes
+/// (truncated, then filled) loads at the second, and the notice never comes.
+const CONFIG_NOTICE_AFTER: Duration = Duration::from_secs(3);
 
 static STOP: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -137,6 +144,10 @@ struct Daemon {
     /// The TAP in explorer is of another build and wouldn't be swapped: it gets the rest of the config, but not the
     /// toasts (its protocol may differ); native banners stay until explorer restarts.
     stale_tap: bool,
+    /// What PimpMyShell has to tell the user itself (notices.rs).
+    notices: Notices,
+    /// The config didn't load at the start: this one is empty (a stock taskbar), until a save that loads.
+    stand_in: bool,
 }
 
 /// How many times in a row a TAP of another build gets swapped for ours before we stop trying.
@@ -161,7 +172,7 @@ struct Updates {
     found: Option<update::Status>,
     /// The version last told of (once a run each).
     told: Option<String>,
-    /// The question whether to check by itself waits a while into the first run, and is asked once.
+    /// The question whether to check by itself waits a while into a run, and is asked once a run until answered.
     since: Instant,
     asked: bool,
     /// A finished update's download was cleared away (a minute in: the installer that started this daemon still
@@ -178,7 +189,10 @@ const UPDATE_TIDY_AFTER: Duration = Duration::from_secs(60);
 /// In-taskbar toasts: where they come from, which native banners we turned off, and what is
 /// on screen.
 struct ToastFeed {
-    listener: Listener,
+    /// None until Windows lets us read notifications (`listen`); native banners stay meanwhile, and only our own
+    /// cards (notices.rs) come to the deck.
+    listener: Option<Listener>,
+    next_listen: Instant,
     banners: Banners,
     /// Toasts waiting for the taskbar (it's being set up).
     queue: VecDeque<Incoming>,
@@ -197,6 +211,42 @@ struct ToastFeed {
 }
 
 impl ToastFeed {
+    /// Start listening for notifications, if Windows lets us: then native banners go (to the taskbar from now on),
+    /// and so do the notices that said it couldn't. Otherwise a notice says why, and it tries again in a while.
+    fn listen(&mut self, cfg: &crate::config::Toasts, notices: &mut Notices, now: Instant) {
+        match Listener::new() {
+            Ok(l) => {
+                self.listener = Some(l);
+                self.banners.suppress_known(|aumid| cfg.ignores("", aumid));
+                self.scan = Some(scan_notifiers());
+                self.next_scan = now + NOTIFIER_SCAN;
+                if notices.is_raised("notification access") || notices.is_raised("toasts") {
+                    log("listening for notifications at last: they come to the taskbar");
+                }
+                notices.clear("notification access");
+                notices.clear("toasts");
+            }
+            Err(e) => {
+                self.next_listen = now + LISTEN_RETRY;
+                let notice = if toasts::access_allowed() { notices::toasts_failed(&e) } else { notices::notification_access() };
+                if !notices.is_raised(notice.key) {
+                    log(format!("notifications stay with Windows: {e} (trying again every {}s)", LISTEN_RETRY.as_secs()));
+                }
+                notices.raise(notice);
+            }
+        }
+    }
+
+    /// Windows stopped letting us read notifications: their banners go back to it, until `listen` works again.
+    fn deafen(&mut self, notices: &mut Notices, now: Instant) {
+        log("notification access was turned off: notification banners are back to Windows");
+        self.listener = None;
+        self.scan = None;
+        self.banners.restore();
+        self.next_listen = now + LISTEN_RETRY;
+        notices.raise(notices::notification_access());
+    }
+
     /// Clicks may still come: a card shows, or one left only just now.
     fn wants_events(&self, now: Instant) -> bool {
         !self.deck.is_empty() || self.gone.iter().any(|(_, at)| now.duration_since(*at) < LATE_CLICKS)
@@ -233,26 +283,16 @@ fn scan_notifiers() -> std::sync::mpsc::Receiver<Vec<String>> {
 }
 
 /// Start the feed if the config asks for one; otherwise undo banner changes a previous run
-/// (maybe one that crashed) left behind.
+/// (maybe one that crashed) left behind. It listens for notifications from its first pump (`listen`).
 fn toast_feed(config: &Config) -> Option<ToastFeed> {
-    let Some(t) = &config.toasts else {
-        Banners::load().restore();
-        return None;
-    };
-    let listener = match Listener::new() {
-        Ok(l) => l,
-        Err(e) => {
-            log(format!("toasts disabled: {e}"));
-            return None;
-        }
-    };
-    // Start from the user's own settings (a changed ignore list must take effect), then re-suppress.
+    // Start from the user's own settings (a changed ignore list must take effect); `listen` re-suppresses.
     let mut banners = Banners::load();
     banners.restore();
-    banners.suppress_known(|aumid| t.ignores("", aumid));
+    config.toasts()?;
     let now = Instant::now();
     Some(ToastFeed {
-        listener,
+        listener: None,
+        next_listen: now,
         banners,
         queue: VecDeque::new(),
         deck: Vec::new(),
@@ -261,8 +301,8 @@ fn toast_feed(config: &Config) -> Option<ToastFeed> {
         tap_empty: false,
         next_events: now,
         next_poll: now,
-        scan: Some(scan_notifiers()),
-        next_scan: now + NOTIFIER_SCAN,
+        scan: None,
+        next_scan: now,
     })
 }
 
@@ -292,16 +332,24 @@ impl Daemon {
         match config::load(&self.path).and_then(|c| Sampler::new(&c).map(|s| (c, s))) {
             Ok((config, sampler)) => {
                 log(format!("reloaded {}", self.path.display()));
+                self.notices.clear("config");
+                self.stand_in = false;
                 let old = std::mem::replace(&mut self.config, config);
                 self.sampler = sampler;
                 let new = &self.config;
                 if old.toasts != new.toasts {
                     if let Some(mut feed) = self.toasts.take() {
                         feed.banners.restore();
+                        // Cards on screen go with the feed: the TAP keeps a card up until we drop it.
+                        if !feed.deck.is_empty()
+                            && let Err(e) = send("toast hide")
+                        {
+                            log(format!("toast hide: {e}"));
+                        }
                     }
                     // Started now only while the taskbar has our config; otherwise `apply` starts it.
                     self.toasts = if self.active() && self.applied.is_some() && !self.stale_tap { toast_feed(&self.config) } else { None };
-                    if self.toasts.is_none() && self.config.toasts.is_some() {
+                    if self.toasts.is_none() && self.config.toasts().is_some() {
                         self.toasts_parked = self.active() && !self.stale_tap;
                     }
                 }
@@ -340,7 +388,10 @@ impl Daemon {
                     }
                 }
             }
-            Err(e) => log(format!("keeping the previous config: {e}")),
+            Err(e) => {
+                log(format!("keeping the previous config: {e}"));
+                self.notices.raise_in(notices::config(&self.path, &e, !self.stand_in), CONFIG_NOTICE_AFTER);
+            }
         }
     }
 
@@ -497,7 +548,9 @@ impl Daemon {
             self.updates.tidied = true;
             update::tidy();
         }
+        // (Not while the config is a stand-in: the real one may well have the answer.)
         if self.config.update_check.is_none()
+            && !self.stand_in
             && !self.updates.asked
             && self.updates.since.elapsed() >= UPDATE_QUESTION_AFTER
             && let Some(t) = &self.tray
@@ -562,6 +615,27 @@ impl Daemon {
         }
     }
 
+    /// Notices that are due while there's no deck to show them in, and none coming (toasts off in the config, the
+    /// stock taskbar: paused, given up on, a TAP of another build, or one that can't see the taskbar a while now): a
+    /// Windows notification says it instead. Once a second; with a deck, `pump_toasts` shows them.
+    fn pump_notices(&mut self) {
+        let unhooked = self.unhooked_since.is_some_and(|s| s.elapsed() >= TOAST_GRACE);
+        let deck_coming = self.config.toasts().is_some() && self.active() && !self.stale_tap && !unhooked;
+        if self.toasts.is_some() && !unhooked || deck_coming {
+            return;
+        }
+        let now = Instant::now();
+        if !self.notices.any_due(now) {
+            return;
+        }
+        for (_, n) in self.notices.due(now) {
+            log(format!("notice, as a Windows notification: {}", n.title));
+            if let Some(t) = &self.tray {
+                t.notify(&n.title, &n.hint);
+            }
+        }
+    }
+
     /// The tray menu's Install, which the user said yes to.
     fn install_update(&mut self) {
         let Some(update::Status::Ready { version, path, sha256 }) = self.updates.found.clone() else { return };
@@ -590,6 +664,19 @@ impl Daemon {
         }
     }
 
+    /// The notice about notification access was answered *Keep Windows' notifications*: `[toasts]` off in the config
+    /// (`enabled = false`, its settings kept). The reload that follows takes the feed down; the notice is over.
+    fn keep_native_toasts(&mut self) {
+        match config::set_in_table(&self.path, "toasts", "enabled", "false") {
+            Ok(()) => {
+                log("toasts off, as asked: notifications stay Windows' (the settings' Toasts page turns them on again)");
+                self.notices.clear("notification access");
+                self.notices.clear("toasts");
+            }
+            Err(e) => log(format!("couldn't turn toasts off in the config: {e}")),
+        }
+    }
+
     /// What the tray's menu asked for. True to exit.
     fn handle_tray(&mut self) -> bool {
         let Some(commands) = self.tray.as_ref().map(Tray::take) else { return false };
@@ -611,6 +698,7 @@ impl Daemon {
                 tray::Command::CheckUpdate => self.check_update(true),
                 tray::Command::InstallUpdate => self.install_update(),
                 tray::Command::UpdateConsent(yes) => self.set_update_consent(yes),
+                tray::Command::KeepNativeToasts => self.keep_native_toasts(),
             }
         }
         false
@@ -737,7 +825,7 @@ impl Daemon {
         if !self.stale_tap && std::mem::take(&mut self.toasts_parked) {
             self.toasts = toast_feed(&self.config);
             if self.toasts.is_some() {
-                log("the taskbar is ours again: notification banners go to it again");
+                log("the taskbar is ours again: toasts go to it again");
             }
         }
         self.sync_mic();
@@ -979,10 +1067,14 @@ impl Daemon {
     }
 
     fn pump_toasts(&mut self) {
-        let (Some(cfg), Some(f)) = (self.config.toasts.as_ref(), self.toasts.as_mut()) else { return };
+        let (Some(cfg), Some(f)) = (self.config.toasts(), self.toasts.as_mut()) else { return };
         let now = Instant::now();
+        if f.listener.is_none() && now >= f.next_listen {
+            f.listen(cfg, &mut self.notices, now);
+        }
         // Apps that haven't notified yet: banners off ahead of their first toast.
-        if let Some(rx) = &f.scan {
+        if f.listener.is_none() {
+        } else if let Some(rx) = &f.scan {
             match rx.try_recv() {
                 Ok(list) => {
                     f.banners.suppress_ahead(&list, |aumid| cfg.ignores("", aumid));
@@ -995,9 +1087,9 @@ impl Daemon {
             f.next_scan = now + NOTIFIER_SCAN;
             f.scan = Some(scan_notifiers());
         }
-        if now >= f.next_poll {
+        if let Some(listener) = f.listener.as_mut().filter(|_| now >= f.next_poll) {
             f.next_poll = now + TOAST_POLL;
-            match f.listener.poll() {
+            match listener.poll() {
                 Ok(new) => {
                     for n in new {
                         if cfg.ignores(&n.app, &n.aumid) || f.banners.user_silenced(&n.aumid) {
@@ -1015,6 +1107,10 @@ impl Daemon {
                         }
                     }
                 }
+                Err(e) if !toasts::access_allowed() => {
+                    log(format!("reading notifications: {e}"));
+                    f.deafen(&mut self.notices, now);
+                }
                 Err(e) => log(format!("reading notifications: {e}")),
             }
         }
@@ -1027,6 +1123,21 @@ impl Daemon {
             for ev in events.lines() {
                 let Some((id, what)) = ev.split_once(' ') else { continue };
                 let Some(t) = id.parse().ok().and_then(|id| f.take(id)) else { continue };
+                // One of our own: a click explains (the explanation waits for its answer, so off the loop).
+                if Notices::is_ours(t.id) {
+                    match self.notices.by_card(t.id).filter(|_| what == "open") {
+                        Some(n) => {
+                            let n = n.clone();
+                            log(format!("notice \"{}\" clicked: explaining", n.title));
+                            std::thread::spawn(move || {
+                                let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+                                notices::explain(&n);
+                            });
+                        }
+                        None => log(format!("notice \"{}\" put away", t.title)),
+                    }
+                    continue;
+                }
                 let picked = match what.split_once(' ') {
                     _ if what == "open" => Some((t.launch.0.clone(), t.launch.1)),
                     Some(("action", i)) => i.parse::<usize>().ok().and_then(|i| t.actions.get(i)).map(|a| (a.args.clone(), a.kind)),
@@ -1037,7 +1148,9 @@ impl Daemon {
                     log(format!("toast from {} {how}; it stays in the notification center", t.app));
                     continue;
                 };
-                f.listener.remove(t.id);
+                if let Some(l) = &f.listener {
+                    l.remove(t.id);
+                }
                 std::thread::spawn(move || {
                     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
                     match toasts::activate(&t, &args, kind) {
@@ -1081,12 +1194,23 @@ impl Daemon {
         if self.applied.is_none() {
             return;
         }
+        // Our own notices that are due, unless Windows holds toasts back (do not disturb, full screen, ...): then
+        // they wait.
+        if self.notices.any_due(now) && toasts::windows_accepts_toasts() {
+            let logo = tray::logo_file().ok();
+            for (id, n) in self.notices.due(now) {
+                log(format!("notice: {}", n.title));
+                f.queue.push_back(Incoming::own(id, &n.title, &n.body, logo.clone()));
+            }
+        }
         // New toasts go on top, in front of the ones still showing.
         while let Some(n) = f.queue.pop_front() {
             let ms = if n.long { cfg.duration_ms.max(LONG_TOAST_MS) } else { cfg.duration_ms };
             match send(&n.command(ms)) {
                 Ok(r) if !r.starts_with("error") => {
                     f.showing_until = Some(now + Duration::from_millis(ms as u64));
+                    // A card with the same id (a notice come again) is replaced: in front now.
+                    f.deck.retain(|d| d.id != n.id);
                     f.deck.push(n);
                     if f.deck.len() > DECK_MAX {
                         let old = f.deck.remove(0);
@@ -1130,8 +1254,17 @@ impl Daemon {
 
 pub fn run(path: &Path) -> Result<(), String> {
     let path = std::path::absolute(path).map_err(|e| e.to_string())?;
-    let config = config::load(&path)?;
-    let sampler = Sampler::new(&config)?;
+    // A config that doesn't load doesn't stop us: a stock taskbar (an empty config) meanwhile, a notice saying what's
+    // wrong, and the next save that loads takes over.
+    let (config, sampler, broken) = match config::load(&path).and_then(|c| Sampler::new(&c).map(|s| (c, s))) {
+        Ok((c, s)) => (c, s, None),
+        Err(e) => {
+            log(format!("{e}: starting with a stock taskbar until it loads"));
+            let empty: Config = toml::from_str("").map_err(|e| format!("an empty config: {e}"))?;
+            let sampler = Sampler::new(&empty)?;
+            (empty, sampler, Some(e))
+        }
+    };
 
     let instance = unsafe { CreateMutexW(None, false, INSTANCE_MUTEX) }.map_err(|e| e.to_string())?;
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -1189,7 +1322,13 @@ pub fn run(path: &Path) -> Result<(), String> {
         tap_build: std::env::current_exe().ok().and_then(|e| pms_tap::build_of(&e.with_file_name("pms_tap.dll"))),
         swaps: 0,
         stale_tap: false,
+        notices: Notices::default(),
+        stand_in: broken.is_some(),
     };
+    if let Some(e) = &broken {
+        let notice = notices::config(&d.path, e, false);
+        d.notices.raise(notice);
+    }
     // The feed (which turns native banners off) starts once the taskbar has our config (`apply`): toasts that came
     // before then would have nowhere to show. A previous run's leftovers go back meanwhile.
     Banners::load().restore();
@@ -1202,7 +1341,7 @@ pub fn run(path: &Path) -> Result<(), String> {
         d.path.display(),
         if d.config.backdrop.is_some() { "custom" } else { "stock" },
         if d.config.hotmic.is_some() { "on" } else { "off" },
-        if d.config.toasts.is_some() { "in the taskbar (once it's ours)" } else { "native" },
+        if d.config.toasts().is_some() { "in the taskbar (once it's ours)" } else { "native" },
         d.sampler.describe(),
     ));
 
@@ -1231,6 +1370,7 @@ pub fn run(path: &Path) -> Result<(), String> {
         if tick {
             next_status = Instant::now() + STATUS_EVERY;
             d.pump_updates();
+            d.pump_notices();
         }
         if active {
             d.pump_toasts();

@@ -110,6 +110,28 @@ struct Package {
 }
 
 impl Incoming {
+    /// A card of PimpMyShell's own (notices.rs), under its name and logo, kept up as long as Windows keeps a
+    /// reminder.
+    pub fn own(id: u32, title: &str, body: &str, logo: Option<PathBuf>) -> Incoming {
+        Incoming {
+            id,
+            aumid: String::new(),
+            app: "PimpMyShell".into(),
+            attribution: String::new(),
+            title: title.into(),
+            body: body.into(),
+            icon: None,
+            logo,
+            circle: false,
+            image: None,
+            launch: (String::new(), Activation::App),
+            actions: Vec::new(),
+            progress: None,
+            long: true,
+            package: None,
+        }
+    }
+
     /// `toast show` arguments for the TAP.
     pub fn command(&self, ms: u32) -> String {
         let q = crate::quote;
@@ -137,6 +159,14 @@ pub struct Listener {
     seen: HashSet<u32>,
     /// Per AUMID: display name and icon, looked up once.
     apps: HashMap<String, (String, Option<PathBuf>)>,
+}
+
+/// Whether Windows lets PimpMyShell read notifications (Settings > Privacy & security > Notifications). Unknown
+/// counts as yes: it's what Listener::new asks for.
+pub fn access_allowed() -> bool {
+    UserNotificationListener::Current()
+        .and_then(|l| l.GetAccessStatus())
+        .map_or(true, |a| matches!(a, UserNotificationListenerAccessStatus::Allowed | UserNotificationListenerAccessStatus::Unspecified))
 }
 
 impl Listener {
@@ -478,7 +508,7 @@ fn activator(t: &Incoming) -> Option<GUID> {
     unsafe { CLSIDFromString(&HSTRING::from(text)) }.ok()
 }
 
-fn open(uri: &str) -> Result<(), String> {
+pub(crate) fn open(uri: &str) -> Result<(), String> {
     let r = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(uri), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
     if r.0 as usize > 32 { Ok(()) } else { Err(format!("ShellExecute({uri}) failed ({})", r.0 as usize)) }
 }

@@ -9,6 +9,7 @@ mod hotmic;
 pub mod meters;
 mod nvml;
 pub mod signing;
+pub mod notices;
 mod toasts;
 mod tray;
 pub mod update;
@@ -20,6 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use pms_tap::ipc::quote;
+/// The question software update asks once (examples/dialogs.rs shows it).
+pub use tray::update_question;
 use pms_tap::ipc::{PIPE_NAME, read_frame, write_frame};
 use pms_tap::{CLSID_PMS_TAP, data_dir, xamlom::InitializeXamlDiagnosticsExFn};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY};

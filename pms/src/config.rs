@@ -63,7 +63,7 @@ pub struct Config {
     pub backdrop: Option<Backdrop>,
     /// Absent: don't watch the microphone.
     pub hotmic: Option<Hotmic>,
-    /// Absent: native toasts as usual.
+    /// Absent (or `enabled = false`): native toasts as usual. `toasts()` is it while they're on.
     pub toasts: Option<Toasts>,
     /// Absent: the Start button stays as it is.
     pub start_glow: Option<StartGlow>,
@@ -103,10 +103,19 @@ fn is_stable(s: &str) -> bool {
     s == "stable"
 }
 
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
 impl Config {
     /// Software update's channel is the newest release, not the stable tag.
     pub fn latest_channel(&self) -> bool {
         self.update_channel == "latest"
+    }
+
+    /// The toasts' settings while they're on: a `[toasts]` there, and not `enabled = false`.
+    pub fn toasts(&self) -> Option<&Toasts> {
+        self.toasts.as_ref().filter(|t| t.enabled)
     }
 }
 
@@ -125,6 +134,30 @@ pub fn set_top_level(path: &Path, key: &str, value: &str) -> Result<(), String> 
     }
     let new = lines.join("\n") + "\n";
     toml::from_str::<Config>(&new).map_err(|e| format!("setting {key}: {e}"))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, new).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Sets `key = value` (TOML) in the table `[table]` of the file at `path`, keeping the rest as `set_top_level` does:
+/// an existing line `key = ...` in the table is replaced, else the line goes right under its header. The table must
+/// be there, and the result must load, or the file is left alone.
+pub fn set_in_table(path: &Path, table: &str, key: &str, value: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let header = format!("[{table}]");
+    let start = lines
+        .iter()
+        .position(|l| l.split('#').next().is_some_and(|h| h.trim() == header))
+        .ok_or_else(|| format!("no {header} in {}", path.display()))?;
+    let end = lines[start + 1..].iter().position(|l| l.trim_start().starts_with('[')).map_or(lines.len(), |i| start + 1 + i);
+    let line = format!("{key} = {value}");
+    match lines[start + 1..end].iter().position(|l| l.split('=').next().is_some_and(|k| k.trim() == key)) {
+        Some(i) => lines[start + 1 + i] = line,
+        None => lines.insert(start + 1, line),
+    }
+    let new = lines.join("\n") + "\n";
+    toml::from_str::<Config>(&new).map_err(|e| format!("setting {table}.{key}: {e}"))?;
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, new).map_err(|e| format!("{}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
@@ -354,6 +387,10 @@ impl Default for Hotmic {
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Toasts {
+    /// false: off, as if there were no `[toasts]`, with its settings kept for when they're on again (the
+    /// reminder that notification access is off offers to turn them off so: notices.rs).
+    #[serde(skip_serializing_if = "is_true")]
+    pub enabled: bool,
     /// How long each toast stays in front (a card that comes forward again with more behind it: at most 4 s).
     pub duration_ms: u32,
     /// Apps that keep their native banners, matched case-insensitively against the app name or
@@ -418,7 +455,7 @@ impl AppGlow {
 
 impl Default for Toasts {
     fn default() -> Self {
-        Toasts { duration_ms: 7000, ignore: Vec::new() }
+        Toasts { enabled: true, duration_ms: 7000, ignore: Vec::new() }
     }
 }
 
@@ -476,6 +513,13 @@ mod tests {
         assert_eq!(again.counters.len(), config.counters.len());
     }
 
+    /// The daemon's stand-in for a config that doesn't load: empty, a stock taskbar.
+    #[test]
+    fn empty_is_stock() {
+        let c: Config = toml::from_str("").unwrap();
+        assert!(c.toasts.is_none() && c.backdrop.is_none() && c.hotmic.is_none() && c.meters.is_empty() && c.update_check.is_none());
+    }
+
     #[test]
     fn top_level() {
         let path = std::env::temp_dir().join(format!("pms-config-test-{}.toml", std::process::id()));
@@ -486,6 +530,27 @@ mod tests {
         assert!(load(&path).unwrap().update_check == Some(false));
         assert!(set_top_level(&path, "update_check", "\"maybe\"").is_err());
         assert!(std::fs::read_to_string(&path).unwrap().starts_with("update_check = false\n# mine"));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn in_table() {
+        let path = std::env::temp_dir().join(format!("pms-config-table-test-{}.toml", std::process::id()));
+        let text = "[toasts] # mine\nduration_ms = 5000\n\n[start_glow]\nhover = 0.5\n";
+        std::fs::write(&path, text).unwrap();
+        assert!(load(&path).unwrap().toasts().is_some());
+        // Under its header, the rest as it was; again, the same line replaced.
+        set_in_table(&path, "toasts", "enabled", "false").unwrap();
+        let off = "[toasts] # mine\nenabled = false\nduration_ms = 5000\n\n[start_glow]\nhover = 0.5\n";
+        assert!(std::fs::read_to_string(&path).unwrap() == off);
+        set_in_table(&path, "toasts", "enabled", "false").unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap() == off);
+        let c = load(&path).unwrap();
+        assert!(c.toasts().is_none() && c.toasts.as_ref().is_some_and(|t| t.duration_ms == 5000));
+        // No such table, or a result that doesn't load: the file as it was.
+        assert!(set_in_table(&path, "app_glow", "hover", "1").is_err());
+        assert!(set_in_table(&path, "toasts", "enabled", "\"nah\"").is_err());
+        assert!(std::fs::read_to_string(&path).unwrap() == off);
         std::fs::remove_file(&path).unwrap();
     }
 }

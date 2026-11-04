@@ -42,6 +42,8 @@ pub enum Command {
     InstallUpdate,
     /// The answer to whether software update may check by itself.
     UpdateConsent(bool),
+    /// Turn the taskbar's toasts off, notifications staying Windows' (asked from a notice: notices.rs).
+    KeepNativeToasts,
     Exit,
 }
 
@@ -142,19 +144,126 @@ impl Tray {
     }
 
     /// Asks, once, whether software update may check GitHub by itself; the answer comes back as
-    /// `Command::UpdateConsent`. On a thread of its own, so the daemon goes on while the question waits.
+    /// `Command::UpdateConsent`. As Nagare's card has it: OK, or closing the question, says yes; *No, don't check*
+    /// says no. On a thread of its own, so the daemon goes on while the question waits.
     pub fn ask_update_consent(&self) {
-        let _ = std::thread::Builder::new().name("update question".into()).spawn(|| {
-            let text = "PimpMyShell can check GitHub for a newer version every day or two and download it. It always asks \
-                        you before installing anything, and only installs what PimpMyShell's release key signed.\n\n\
-                        Nothing about you or your PC is sent, only the requests themselves.\n\n\
-                        Check for updates by itself? (You can change this in the settings, under software update.)";
-            let answer = unsafe {
-                MessageBoxW(None, &HSTRING::from(text), w!("PimpMyShell: software update"), MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST)
-            };
-            queue(Command::UpdateConsent(answer == IDYES));
-        });
+        let _ = std::thread::Builder::new().name("update question".into()).spawn(|| queue(Command::UpdateConsent(update_question())));
     }
+}
+
+/// The question whether software update may check by itself, waiting for the answer: true unless it was no. Where
+/// there's no task dialog, a Yes/No message box (which can't be closed without an answer).
+pub fn update_question() -> bool {
+    // Closing it (its x, Esc) answers as OK does.
+    match task_dialog("Software update", CONSENT_TEXT, &[(NO_CHECKS, "No, don't check")], true, IDOK.0) {
+        Ok(pressed) => pressed != NO_CHECKS,
+        Err(e) => {
+            log(format!("tray: no task dialog ({e}); a message box instead"));
+            message_box(&format!("{CONSENT_TEXT}\n\nCheck for updates by itself?"), true)
+        }
+    }
+}
+
+/// What the question about software update says.
+const CONSENT_TEXT: &str = "PimpMyShell checks GitHub for a newer version every day or two and downloads it, then asks you \
+                            before installing it. It installs only what PimpMyShell's release key signed, and nothing \
+                            about you or your PC is sent, only the requests themselves.\n\n\
+                            You can turn this off at any time in the settings, under software update.";
+
+/// The question's button that says no.
+const NO_CHECKS: i32 = 100;
+
+/// A notice's explanation (notices.rs), with what can be done as buttons (the first is the default), waiting until
+/// it's put away: the button pressed, by its place in `choices`, or None for Close. Where there's no task dialog, a
+/// message box, which offers the first.
+pub fn explain(instruction: &str, content: &str, choices: &[&str]) -> Option<usize> {
+    const FIRST: i32 = 101;
+    let buttons: Vec<(i32, &str)> = choices.iter().enumerate().map(|(i, c)| (FIRST + i as i32, *c)).collect();
+    let default = if choices.is_empty() { IDCLOSE.0 } else { FIRST };
+    match task_dialog(instruction, content, &buttons, false, default) {
+        Ok(pressed) => usize::try_from(pressed - FIRST).ok().filter(|&i| i < choices.len()),
+        Err(e) => {
+            log(format!("tray: no task dialog ({e}); a message box instead"));
+            match choices.first() {
+                Some(c) => message_box(&format!("{instruction}\n\n{content}\n\n{c}?"), true).then_some(0),
+                None => {
+                    message_box(&format!("{instruction}\n\n{content}"), false);
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// A message box in front of everything: Yes/No (true for yes), or just OK.
+fn message_box(text: &str, ask: bool) -> bool {
+    let style = if ask { MB_YESNO | MB_ICONQUESTION } else { MB_OK | MB_ICONINFORMATION };
+    unsafe { MessageBoxW(None, &HSTRING::from(text), w!("PimpMyShell"), style | MB_SETFOREGROUND | MB_TOPMOST) == IDYES }
+}
+
+/// A task dialog under PimpMyShell's name and logo: `instruction` over `content`, `buttons` (id, label) beside the
+/// common OK (`ok`; otherwise Close), `default` the one Enter presses. It waits, and gives the id pressed (closing it
+/// with its x or Esc presses the common button). Err where there's no task dialog (comctl32 before version 6, which
+/// the daemon's manifest asks for; it's looked up rather than imported, so that an exe without that manifest, a
+/// test's, still starts).
+fn task_dialog(instruction: &str, content: &str, buttons: &[(i32, &str)], ok: bool, default: i32) -> Result<i32, String> {
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+    use windows::Win32::UI::Controls::*;
+    use windows_core::{BOOL, HRESULT};
+    type TaskDialogIndirect = unsafe extern "system" fn(*const TASKDIALOGCONFIG, *mut i32, *mut i32, *mut BOOL) -> HRESULT;
+
+    let comctl = unsafe { LoadLibraryW(w!("comctl32.dll")) }.map_err(|e| e.to_string())?;
+    let found = unsafe { GetProcAddress(comctl, windows_core::s!("TaskDialogIndirect")) }.ok_or("comctl32 has no TaskDialogIndirect")?;
+    let show: TaskDialogIndirect = unsafe { std::mem::transmute(found) };
+    let module = unsafe { GetModuleHandleW(PCWSTR::null()) }.map_err(|e| e.to_string())?;
+    // The logo, from the exe's own icon (resource number 1: the icon group pms-res writes); an exe without one (an
+    // example's) goes without.
+    let side = unsafe { GetSystemMetrics(SM_CXICON) }.max(32);
+    let logo = unsafe { LoadImageW(Some(module.into()), PCWSTR(std::ptr::without_provenance(1)), IMAGE_ICON, side, side, LR_DEFAULTCOLOR) };
+    let logo = logo.map_or(HICON::default(), |h| HICON(h.0));
+    let (instruction, content) = (HSTRING::from(instruction), HSTRING::from(content));
+    let labels: Vec<HSTRING> = buttons.iter().map(|(_, l)| HSTRING::from(*l)).collect();
+    let buttons: Vec<TASKDIALOG_BUTTON> =
+        buttons.iter().zip(&labels).map(|((id, _), l)| TASKDIALOG_BUTTON { nButtonID: *id, pszButtonText: PCWSTR(l.as_ptr()) }).collect();
+    let config = TASKDIALOGCONFIG {
+        cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+        hInstance: module.into(),
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | if logo.is_invalid() { TASKDIALOG_FLAGS(0) } else { TDF_USE_HICON_MAIN },
+        dwCommonButtons: if ok { TDCBF_OK_BUTTON } else { TDCBF_CLOSE_BUTTON },
+        pszWindowTitle: w!("PimpMyShell"),
+        Anonymous1: TASKDIALOGCONFIG_0 { hMainIcon: logo },
+        pszMainInstruction: PCWSTR(instruction.as_ptr()),
+        pszContent: PCWSTR(content.as_ptr()),
+        cButtons: buttons.len() as u32,
+        pButtons: if buttons.is_empty() { std::ptr::null() } else { buttons.as_ptr() },
+        nDefaultButton: default,
+        pfCallback: Some(on_top),
+        ..Default::default()
+    };
+    let mut pressed = 0;
+    let shown = unsafe { show(&config, &mut pressed, std::ptr::null_mut(), std::ptr::null_mut()) }.ok();
+    if !logo.is_invalid() {
+        let _ = unsafe { DestroyIcon(logo) };
+    }
+    shown.map_err(|e| e.to_string())?;
+    Ok(pressed)
+}
+
+/// A task dialog comes up in front, as a message box with MB_TOPMOST and MB_SETFOREGROUND does.
+unsafe extern "system" fn on_top(
+    hwnd: HWND,
+    msg: windows::Win32::UI::Controls::TASKDIALOG_NOTIFICATIONS,
+    _: WPARAM,
+    _: LPARAM,
+    _: isize,
+) -> windows_core::HRESULT {
+    if msg == windows::Win32::UI::Controls::TDN_CREATED {
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+    windows_core::HRESULT(0)
 }
 
 /// Asks whether to install the downloaded `version` now: the menu's Install item.
@@ -175,14 +284,21 @@ const LOGO_128: &[u8] = include_bytes!("../../assets/icon/pms-128.png");
 /// The app id PimpMyShell's notifications go out under, registered with its name and logo (the uninstaller removes it).
 const AUMID: &str = "PimpMyShell";
 
-fn toast(title: &str, text: &str) -> Result<(), String> {
-    use windows::Data::Xml::Dom::XmlDocument;
-    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+/// The logo as a file (`pms-128.png` in %LOCALAPPDATA%\PimpMyShell), for notifications: Windows' and the taskbar's.
+pub(crate) fn logo_file() -> Result<PathBuf, String> {
     let dir = pms_tap::data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let logo = dir.join("pms-128.png");
-    std::fs::write(&logo, LOGO_128).map_err(|e| format!("{}: {e}", logo.display()))?;
-    let logo = logo.display().to_string();
+    if std::fs::read(&logo).ok().as_deref() != Some(LOGO_128) {
+        std::fs::write(&logo, LOGO_128).map_err(|e| format!("{}: {e}", logo.display()))?;
+    }
+    Ok(logo)
+}
+
+fn toast(title: &str, text: &str) -> Result<(), String> {
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    let logo = logo_file()?.display().to_string();
     let key = HSTRING::from(format!(r"Software\Classes\AppUserModelId\{AUMID}"));
     for (name, value) in [("DisplayName", "PimpMyShell"), ("IconUri", logo.as_str())] {
         let value: Vec<u16> = value.encode_utf16().chain([0]).collect();
@@ -216,7 +332,7 @@ fn post(msg: u32) {
     }
 }
 
-fn queue(c: Command) {
+pub(crate) fn queue(c: Command) {
     let s = shared();
     s.queued.lock().unwrap().push(c);
     let _ = unsafe { SetEvent(HANDLE(s.wake as *mut _)) };

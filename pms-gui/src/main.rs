@@ -154,6 +154,8 @@ struct Gui {
     update: Arc<Mutex<Update>>,
     /// `update_check` as the file has it: the daemon writes it too (the answer to its question).
     disk_update_check: Option<bool>,
+    /// `[toasts]`'s `enabled` as the file has it: the daemon writes it too (a notice's *Keep Windows' notifications*).
+    disk_toasts_enabled: Option<bool>,
 }
 
 impl Gui {
@@ -186,8 +188,10 @@ impl Gui {
             polled: Instant::now() - Duration::from_secs(10),
             update: Arc::default(),
             disk_update_check: None,
+            disk_toasts_enabled: None,
         };
         gui.disk_update_check = gui.config.update_check;
+        gui.disk_toasts_enabled = gui.config.toasts.as_ref().map(|t| t.enabled);
         // Compare against the config as the editor states it, so opening isn't an edit.
         gui.saved = config::to_toml(&gui.current()).unwrap_or_default();
         gui.poll_daemon();
@@ -213,6 +217,23 @@ impl Gui {
                 }
             }
             self.disk_update_check = disk.update_check;
+        }
+        // Likewise `[toasts]`'s `enabled`.
+        if let Ok(disk) = config::load(&self.path)
+            && let Some(enabled) = disk.toasts.as_ref().map(|t| t.enabled)
+            && Some(enabled) != self.disk_toasts_enabled
+        {
+            let following = self.config.toasts.as_ref().is_some_and(|t| Some(t.enabled) == self.disk_toasts_enabled);
+            if following {
+                let clean = config::to_toml(&self.current()).is_ok_and(|t| t == self.saved);
+                if let Some(t) = self.config.toasts.as_mut() {
+                    t.enabled = enabled;
+                }
+                if clean {
+                    self.saved = config::to_toml(&self.current()).unwrap_or_default();
+                }
+            }
+            self.disk_toasts_enabled = Some(enabled);
         }
     }
 
@@ -262,6 +283,7 @@ impl Gui {
             Ok(()) => {
                 self.saved = text;
                 self.disk_update_check = config.update_check;
+                self.disk_toasts_enabled = config.toasts.as_ref().map(|t| t.enabled);
                 let live = if self.daemon_running { " — the taskbar follows in a moment" } else { " — start the daemon to see it" };
                 self.message = (format!("Saved{live}"), false);
             }
@@ -1062,8 +1084,18 @@ fn hotmic(ui: &mut egui::Ui, h: &mut Option<Hotmic>) {
 
 fn toasts(ui: &mut egui::Ui, t: &mut Option<Toasts>) {
     heading(ui, "Toasts", "Notifications shown inside the taskbar instead of as popups; their buttons work, and they stay in the notification center.");
-    switch(ui, "Notifications in the taskbar", t, Toasts::default);
-    let Some(t) = t else { return };
+    // Off with its settings kept (`enabled = false`, as a notice's *Keep Windows' notifications* leaves it), it comes
+    // on again with them.
+    let mut on = t.as_ref().is_some_and(|t| t.enabled);
+    if ui.checkbox(&mut on, RichText::new("Notifications in the taskbar").size(14.0)).changed() {
+        match (on, t.as_mut()) {
+            (true, Some(t)) => t.enabled = true,
+            (true, None) => *t = Some(Toasts::default()),
+            (false, _) => *t = None,
+        }
+    }
+    ui.add_space(4.0);
+    let Some(t) = t.as_mut().filter(|t| t.enabled) else { return };
     let d = Toasts::default();
     section(ui, "[toasts]", |ui| {
         row(ui, "duration_ms", "how long each toast stays in front (one that comes forward again with more behind it: at most 4 s)", &mut t.duration_ms, d.duration_ms, |ui, v| number(ui, v, 1000..=60_000, " ms"));
