@@ -3,7 +3,12 @@
 //! to soft color. (Blurred once, into a second tile, so that it costs a frame nothing.) A swap chain in a SwapChainPanel behind everything else, transparent but for
 //! the tile, drawn on a thread of its own so that the window's own work never makes it stutter (and it never holds
 //! the window up). With Windows' animation effects off, it holds still. Anything failing here only means no dollars.
+//!
+//! The bills are the original ones or flags (flag.rs), as `settings_bill` in pms-art's design says. Flags wave: the bill is
+//! drawn flat once, and each frame the tile is put together again from it, a pixel's width at a time, and blurred again.
+//! The tile being small, that's little work.
 
+use std::f32::consts::TAU;
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -30,6 +35,8 @@ use windows_core::{BOOL, Interface, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 use windows_reactor::{ElementRef, SwapChainPanel};
 
+use crate::flag;
+
 /// The tile, its strength over the backdrop, and how fast it drifts on each axis (all DIPs).
 const TILE_W: f32 = 288.0;
 const TILE_H: f32 = 184.0;
@@ -42,6 +49,12 @@ const DRIFT: f32 = 16.0;
 const SLOGAN: &str = "BUY $MSFT";
 /// Banknote green.
 const GREEN: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.52, g: 0.78, b: 0.42, a: 1.0 };
+/// pms-art's design, which says which bills these are: `settings_bill`, flags unless it says otherwise.
+const DESIGN: &str = include_str!("../../art/design.json");
+
+fn flags() -> bool {
+    !DESIGN.contains(r#""settings_bill": "classic""#)
+}
 /// The least time between frames, should presenting not wait for the screen.
 const FRAME: Duration = Duration::from_millis(14);
 
@@ -146,7 +159,7 @@ fn run(hwnd: HWND, pane: &AtomicU32, tx: &Sender<usize>) -> Result<()> {
         let began = Instant::now();
         // What depends on the window's size and DPI, made again when they change.
         let mut tile_for = 0.0;
-        let mut tile: Option<(ID2D1BitmapBrush1, ID2D1BitmapBrush1)> = None;
+        let mut tile: Option<Tiles> = None;
         let mut target = false;
         let mut drawn = false;
         let mut drawn_pane = u32::MAX;
@@ -191,9 +204,12 @@ fn run(hwnd: HWND, pane: &AtomicU32, tx: &Sender<usize>) -> Result<()> {
             let frame = Instant::now();
             let drift = if moving { began.elapsed().as_secs_f32() * DRIFT } else { 0.0 };
             let (dips_w, dips_h) = (w as f32 * 96.0 / d, h as f32 * 96.0 / d);
+            if moving && let Some(wave) = tile.as_ref().and_then(|t| t.wave.as_ref()) {
+                wave.draw(&dc, flag::REST - began.elapsed().as_secs_f32() * TAU / flag::PERIOD, d)?;
+            }
             dc.BeginDraw();
             dc.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-            if let Some((crisp, soft)) = &tile {
+            if let Some(Tiles { crisp, soft, .. }) = &tile {
                 let split = (nav as f32).min(dips_w);
                 let moved = Matrix3x2::translation(drift % TILE_W, -(drift % TILE_H));
                 crisp.SetTransform(&moved);
@@ -210,20 +226,83 @@ fn run(hwnd: HWND, pane: &AtomicU32, tx: &Sender<usize>) -> Result<()> {
     }
 }
 
-/// The tile as two brushes that repeat: crisp, and blurred. The blur wraps around the tile's edges, so that the blurred
-/// one has no seams either. `dc` is left with its target as it was.
-unsafe fn make_tiles(dc: &ID2D1DeviceContext) -> Result<(ID2D1BitmapBrush1, ID2D1BitmapBrush1)> {
+/// The tile as two brushes that repeat, crisp and blurred, and what keeps them moving if the bills are flags.
+struct Tiles {
+    crisp: ID2D1BitmapBrush1,
+    soft: ID2D1BitmapBrush1,
+    wave: Option<Wave>,
+}
+
+/// What each frame of waving flags is made from, and into.
+struct Wave {
+    slogans: ID2D1Bitmap,
+    flat: ID2D1Bitmap,
+    crisp: ID2D1Bitmap1,
+    soft: ID2D1Bitmap1,
+    blur: ID2D1Effect,
+}
+
+impl Wave {
+    /// Puts the tile together at `phase`: the slogans, each flag a pixel's width at a time, then the blur of all that. `dc`
+    /// is left with its target as it was.
+    unsafe fn draw(&self, dc: &ID2D1DeviceContext, phase: f32, dpi: f32) -> Result<()> {
+        unsafe {
+            let area = D2D_RECT_F { left: 0.0, top: 0.0, right: TILE_W, bottom: TILE_H };
+            let clear = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+            let target = dc.GetTarget()?;
+            let step = 96.0 / dpi;
+            dc.SetTarget(&self.crisp);
+            dc.BeginDraw();
+            dc.Clear(Some(&clear));
+            dc.DrawBitmap(&self.slogans, Some(&area), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            // Each strip's edges lie on pixels, and its top and bottom in the picture's clear margin.
+            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            for (x, middle, ahead) in flag::FLAGS {
+                let x = (x / step).round() * step;
+                let mut at = 0.0;
+                while at < flag::FLAT_W {
+                    let b = flag::bend((at + step / 2.0) / flag::FLAT_W, phase + ahead);
+                    let half = flag::FLAT_H / 2.0 * b.stretch;
+                    let to = D2D_RECT_F { left: x + at, top: middle + b.lift - half, right: x + at + step, bottom: middle + b.lift + half };
+                    let from = D2D_RECT_F { left: at, top: 0.0, right: at + step, bottom: flag::FLAT_H };
+                    dc.DrawBitmap(&self.flat, Some(&to), b.light, D2D1_INTERPOLATION_MODE_LINEAR, Some(&from), None);
+                    at += step;
+                }
+            }
+            dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            dc.EndDraw(None, None)?;
+            dc.SetTarget(&self.soft);
+            dc.BeginDraw();
+            dc.Clear(Some(&clear));
+            dc.DrawImage(&self.blur.GetOutput()?, None, Some(&area), D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            dc.EndDraw(None, None)?;
+            dc.SetTarget(&target);
+            Ok(())
+        }
+    }
+}
+
+/// The tile, as `Tiles` says. The blur wraps around the tile's edges, so that the blurred one has no seams either. `dc` is
+/// left with its target as it was.
+unsafe fn make_tiles(dc: &ID2D1DeviceContext) -> Result<Tiles> {
     unsafe {
-        let crisp = draw_tile(dc)?;
-        let size = crisp.GetPixelSize();
         let (mut dpi_x, mut dpi_y) = (0.0, 0.0);
-        crisp.GetDpi(&mut dpi_x, &mut dpi_y);
+        dc.GetDpi(&mut dpi_x, &mut dpi_y);
         let props = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
             dpiX: dpi_x,
             dpiY: dpi_y,
             bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
             ..Default::default()
+        };
+        let waving = flags();
+        let still = if waving { draw_slogans(dc)? } else { draw_tile(dc)? };
+        let size = still.GetPixelSize();
+        // Flags are drawn into this each frame. The original bills are drawn once, and it's that picture.
+        let moving: Option<ID2D1Bitmap1> = if waving { Some(dc.CreateBitmap(size, None, 0, &props)?) } else { None };
+        let crisp: ID2D1Bitmap = match &moving {
+            Some(bitmap) => bitmap.cast()?,
+            None => still.clone(),
         };
         let soft = dc.CreateBitmap(size, None, 0, &props)?;
         let wrapped = dc.CreateEffect(&CLSID_D2D1Border)?;
@@ -244,7 +323,73 @@ unsafe fn make_tiles(dc: &ID2D1DeviceContext) -> Result<(ID2D1BitmapBrush1, ID2D
         dc.SetTarget(&target);
         let repeat = D2D1_BITMAP_BRUSH_PROPERTIES1 { extendModeX: D2D1_EXTEND_MODE_WRAP, extendModeY: D2D1_EXTEND_MODE_WRAP, interpolationMode: D2D1_INTERPOLATION_MODE_LINEAR };
         let brush = |bitmap: &ID2D1Bitmap, opacity: f32| dc.CreateBitmapBrush(bitmap, Some(&repeat), Some(&D2D1_BRUSH_PROPERTIES { opacity, transform: Matrix3x2::identity() }));
-        Ok((brush(&crisp, STRENGTH)?, brush(&soft.cast()?, STRENGTH_BEHIND)?))
+        let tiles = Tiles { crisp: brush(&crisp, STRENGTH)?, soft: brush(&soft.cast()?, STRENGTH_BEHIND)?, wave: None };
+        let Some(moving) = moving else { return Ok(tiles) };
+        let wave = Wave { slogans: still, flat: draw_flag(dc)?, crisp: moving, soft, blur };
+        wave.draw(dc, flag::REST, dpi_x)?;
+        Ok(Tiles { wave: Some(wave), ..tiles })
+    }
+}
+
+/// The font for what's written on the tile.
+unsafe fn tile_font(size: f32) -> Result<IDWriteTextFormat> {
+    unsafe {
+        let write: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+        let f = write.CreateTextFormat(w!("Segoe UI"), None, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, w!("en-us"))?;
+        f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        Ok(f)
+    }
+}
+
+/// What holds still between the flags: the slogans.
+unsafe fn draw_slogans(dc: &ID2D1DeviceContext) -> Result<ID2D1Bitmap> {
+    unsafe {
+        let rt = dc.CreateCompatibleRenderTarget(Some(&D2D_SIZE_F { width: TILE_W, height: TILE_H }), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE)?;
+        let ink = rt.CreateSolidColorBrush(&GREEN, None)?;
+        let font = tile_font(21.0)?;
+        let words: Vec<u16> = SLOGAN.encode_utf16().collect();
+        rt.BeginDraw();
+        rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+        for (x, y) in flag::SLOGANS {
+            rt.DrawText(&words, &font, &D2D_RECT_F { left: x - 70.0, top: y - 20.0, right: x + 70.0, bottom: y + 20.0 }, &ink, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+        rt.EndDraw(None, None)?;
+        rt.GetBitmap()
+    }
+}
+
+/// The flag, flat: its trail of blocks, and the bill.
+unsafe fn draw_flag(dc: &ID2D1DeviceContext) -> Result<ID2D1Bitmap> {
+    unsafe {
+        let rt = dc.CreateCompatibleRenderTarget(Some(&D2D_SIZE_F { width: flag::FLAT_W, height: flag::FLAT_H }), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE)?;
+        let ink = rt.CreateSolidColorBrush(&GREEN, None)?;
+        let paper = rt.CreateSolidColorBrush(&D2D1_COLOR_F { a: flag::PAPER, ..GREEN }, None)?;
+        let (x, y) = (flag::BILL_X + flag::BILL_W / 2.0, flag::BILL_Y + flag::BILL_H / 2.0);
+        let edge = |inset: f32, radius: f32| D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: flag::BILL_X + inset, top: flag::BILL_Y + inset, right: flag::BILL_X + flag::BILL_W - inset, bottom: flag::BILL_Y + flag::BILL_H - inset },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let font = tile_font(17.0)?;
+        rt.BeginDraw();
+        rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+        for (bx, by, bw, bh, opacity) in flag::blocks() {
+            let block = rt.CreateSolidColorBrush(&D2D1_COLOR_F { a: opacity, ..GREEN }, None)?;
+            rt.FillRectangle(&D2D_RECT_F { left: bx, top: by, right: bx + bw, bottom: by + bh }, &block);
+        }
+        rt.FillRoundedRectangle(&edge(0.0, 5.0), &paper);
+        rt.DrawRoundedRectangle(&edge(0.9, 5.0), &ink, 1.8, None);
+        rt.DrawRoundedRectangle(&edge(4.0, 2.5), &ink, 0.8, None);
+        rt.DrawEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x, Y: y }, radiusX: 10.5, radiusY: 10.5 }, &ink, 1.2, None);
+        let sign: Vec<u16> = "$".encode_utf16().collect();
+        rt.DrawText(&sign, &font, &D2D_RECT_F { left: x - 20.0, top: y - 20.5, right: x + 20.0, bottom: y + 19.5 }, &ink, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        for (dx, dy) in [(-25.0, -8.5), (25.0, -8.5), (-25.0, 8.5), (25.0, 8.5)] {
+            rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x + dx, Y: y + dy }, radiusX: 1.4, radiusY: 1.4 }, &ink);
+        }
+        rt.EndDraw(None, None)?;
+        rt.GetBitmap()
     }
 }
 

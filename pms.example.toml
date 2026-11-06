@@ -1,4 +1,7 @@
-# PimpMyShell config. Copy to %APPDATA%\PimpMyShell\pms.toml, then:
+# PimpMyShell's defaults, and every option. Your own %APPDATA%\PimpMyShell\pms.toml holds only what you change, on top
+# of these, so that better defaults still reach you. (With config_version = 2 in it, as it starts out. A [[meter]] there
+# with one of the labels below changes that meter; `unset = ["key"]` clears a default; `removed_meters` and `meter_order`
+# say which shipped meters go, and in what order. The settings window writes all of this for you.)
 #   pms daemon                 keep it applied (foreground; Ctrl+C restores the stock taskbar)
 #   pms autostart on           run the windowless daemon at every logon
 #   pms meters <this file>     just the meters, without the daemon
@@ -12,7 +15,8 @@ interval_ms = 1000
 # Meter height: "compact" (3/4 of the taskbar), "tall" (default, halfway to full) or "full".
 # When space runs short the strip squeezes (spacing, graphics, then text width) and finally
 # hides meters from the end of the list; order them by importance.
-meter_height = "tall"
+meter_height = "tall"     # pies, graphs and gauges: compact (75% of the taskbar), tall (87.5%), full
+bar_height   = "full"     # meters of bars (threads, engines, disks, adapters): the same; full stops a pixel short of the edges
 
 # Look: "auto" follows Windows' light/dark mode for the taskbar (Settings > Personalization >
 # Colors > "Choose your default Windows mode"); or "dark" / "light". It picks the backdrop below and
@@ -73,6 +77,8 @@ duration_ms = 7000    # each toast in front (one that comes forward again with m
                       # ask for duration="long" get at least 25 s, and alarms, calls and reminders with a button stay
                       # until you answer them, as they do in Windows
 # style     = "pimped"  # gold cards with a sheen sweeping across (default: "standard")
+# confirm_clicks = "window"  # before a notification opens something, ask in a window with room for every detail
+                             # (default: "card", in the notification itself; "off": don't ask)
 ignore      = []      # apps that keep native banners (name or AUMID substring), e.g. ["Teams"]
 
 # [start_glow]: a glow behind the Start button - none at rest, `hover` (its opacity) while the pointer
@@ -166,7 +172,8 @@ label       = "CPU"
 group       = "cpu"
 style       = "cores"
 glow        = "heat"       # threads heat up as they work and glow hotter; "level" glows by load now; "off"
-interval_ms = 200
+interval_ms = 250
+caption     = false
 value       = false        # tooltips show each thread's user/kernel %
 # bar_width = 3.6          # DIPs per thread bar (default by thread count)
 colors      = ["#66BB6A", "#E040FB"]   # user, kernel
@@ -191,6 +198,7 @@ pressure = 0.8
 
 [[meter]]
 label = "SWAP"           # the pagefile, only when it matters (and never without one)
+caption = false
 group = "memory"
 style = "pie"
 expr  = "swap_used"
@@ -263,7 +271,7 @@ label     = "NET"            # in tooltips; each interface is labelled by its ki
 group     = "io"
 style     = "nics"           # up and down bars per network interface: the one the route to the internet takes
                              # always, first; the others while they're busy
-names     = ["up", "down"]
+names     = ["sent", "received"]
 colors    = ["#F06292", "#4DB6AC"]
 max       = 1073741824
 unit      = "bytes/s"

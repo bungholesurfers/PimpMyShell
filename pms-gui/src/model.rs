@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use pms::config::{self, Agg, Config, CounterSpec, Exprs, Max, MeterSpec};
+use pms::config::{self, Agg, Config, CounterSpec, Exprs, Max, MeterSpec, Toasts};
 use pms::update::Status;
+
+use crate::copy;
 
 /// How long edits settle before they're saved.
 pub const SAVE_AFTER: Duration = Duration::from_millis(500);
@@ -18,6 +20,38 @@ pub struct CounterRow {
     pub path: String,
     pub agg: Agg,
     pub default: Option<f64>,
+}
+
+/// A part of the settings that can go back to its defaults in one go.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Section {
+    Taskbar,
+    Performance,
+    Updates,
+    Meters,
+    Counters,
+    Backdrop,
+    StartGlow,
+    AppGlow,
+    Hotmic,
+    Toasts,
+}
+
+impl Section {
+    pub fn name(self) -> &'static str {
+        match self {
+            Section::Taskbar => "Taskbar",
+            Section::Performance => "Performance",
+            Section::Updates => "Software update",
+            Section::Meters => "Meters",
+            Section::Counters => "Performance counters",
+            Section::Backdrop => "Background",
+            Section::StartGlow => "Start button",
+            Section::AppGlow => "App buttons",
+            Section::Hotmic => "Microphone alert",
+            Section::Toasts => "Notifications",
+        }
+    }
 }
 
 /// The updater's state, written by its thread.
@@ -54,6 +88,11 @@ pub struct Model {
 
 impl Model {
     pub fn open(path: PathBuf) -> Model {
+        // A file from before 0.1.4: only what its owner changed, from now on. A daemon does this as it starts, so one
+        // that's running with such a file is older than this window, and can't read the new form: it's left as it is.
+        if !pms::daemon::running() {
+            let _ = config::adopt_layers(&path);
+        }
         let path_read = path.clone();
         let (config, message) = match config::load(&path) {
             Ok(c) => (c, ("Changes save automatically".to_string(), false)),
@@ -147,6 +186,12 @@ impl Model {
         }
     }
 
+    /// Saves now, without waiting for edits to settle.
+    pub fn save_now(&mut self) {
+        self.edited_at = Some(Instant::now() - SAVE_AFTER);
+        self.autosave();
+    }
+
     /// Starts a check (and, for the installed copy, the download) on a thread of its own.
     pub fn start_check(&mut self, ask: pms::update::Ask) {
         let shared = self.update.clone();
@@ -218,15 +263,22 @@ impl Model {
         }
     }
 
+    /// The welcome, again, in a window of its own.
+    pub fn open_welcome(&mut self) {
+        if let Err(e) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--welcome").arg(&self.path).spawn()) {
+            self.message = (format!("We couldn't open the welcome window: {e}"), true);
+        }
+    }
+
     /// The config file, selected in Explorer.
     pub fn show_config(&self) {
         let _ = std::process::Command::new("explorer.exe").arg("/select,").arg(&self.path).spawn();
     }
 
     /// Installs a downloaded version (the installer runs silently, then PimpMyShell starts again if it was running):
-    /// this window closes for it.
+    /// this window closes for it, and the installer opens it again.
     pub fn install(&mut self, path: &std::path::Path, version: &str, sha256: &str) {
-        match pms::update::install(path, version, sha256) {
+        match pms::update::install(path, version, sha256, true) {
             Ok(()) => std::process::exit(0),
             Err(e) => self.message = (e, true),
         }
@@ -262,6 +314,107 @@ pub fn new_counter() -> CounterRow {
 }
 
 impl Model {
+    fn baseline_rows(&self) -> Vec<CounterRow> {
+        self.baseline.counters.iter().map(|(name, spec)| counter_row(name, spec)).collect()
+    }
+
+    /// Puts `section` back as it ships, in `config` and `counters`: all but what's kept (`kept`).
+    fn apply_reset(&self, section: Section, c: &mut Config, counters: &mut Vec<CounterRow>) {
+        let b = self.baseline.clone();
+        match section {
+            Section::Taskbar => (c.theme, c.meter_height, c.bar_height, c.interval_ms, c.value_font) = (b.theme, b.meter_height, b.bar_height, b.interval_ms, b.value_font),
+            Section::Performance => (c.max_fps, c.battery_fps, c.software_gpus) = (b.max_fps, b.battery_fps, b.software_gpus),
+            // Whether to check at all is consent, not a setting: only its owner changes that.
+            Section::Updates => c.update_channel = b.update_channel,
+            Section::Meters => c.meters = b.meters,
+            Section::Counters => *counters = self.baseline_rows(),
+            Section::Backdrop => c.backdrop = b.backdrop,
+            Section::StartGlow => c.start_glow = b.start_glow,
+            Section::AppGlow => c.app_glow = b.app_glow,
+            Section::Hotmic => {
+                let ignore = c.hotmic.take().map(|h| h.ignore);
+                c.hotmic = b.hotmic;
+                if let (Some(h), Some(ignore)) = (c.hotmic.as_mut(), ignore) {
+                    h.ignore = ignore;
+                }
+            }
+            // Off stays off (it decides whether notifications get read at all), and so do the choices that were made once
+            // and for all: *Shut up, computer*, and the apps kept out.
+            Section::Toasts => {
+                if let (Some(mine), Some(shipped)) = (c.toasts.as_mut(), b.toasts) {
+                    *mine = Toasts { enabled: mine.enabled, confirm_clicks: std::mem::take(&mut mine.confirm_clicks), ignore: std::mem::take(&mut mine.ignore), ..shipped };
+                }
+            }
+        }
+    }
+
+    /// Whether a reset of `section` would change nothing.
+    pub fn at_default(&self, section: Section) -> bool {
+        let key = |r: &CounterRow| (r.name.clone(), r.path.clone(), format!("{:?}", r.agg), r.default.map(f64::to_bits));
+        let sorted = |rows: &[CounterRow]| {
+            let mut all: Vec<_> = rows.iter().map(key).collect();
+            all.sort();
+            all
+        };
+        let (mut config, mut counters) = (self.config.clone(), self.counters.iter().map(|r| CounterRow { name: r.name.clone(), path: r.path.clone(), agg: r.agg, default: r.default }).collect());
+        self.apply_reset(section, &mut config, &mut counters);
+        config::to_toml(&config).ok() == config::to_toml(&self.config).ok() && sorted(&counters) == sorted(&self.counters)
+    }
+
+    /// What a reset of `section` leaves as you set it: the ones that aren't at their defaults, in the window's words.
+    pub fn kept(&self, section: Section) -> Vec<&'static str> {
+        let c = &self.config;
+        let mut kept = Vec::new();
+        match section {
+            Section::Updates if c.update_check.is_some() => kept.push(copy::setting("update_check").0),
+            Section::Hotmic if c.hotmic.as_ref().is_some_and(|h| !h.ignore.is_empty()) => kept.push(copy::setting("hotmic.ignore").0),
+            Section::Toasts => match &c.toasts {
+                Some(t) => {
+                    let d = self.baseline.toasts.clone().unwrap_or_default();
+                    if !t.enabled {
+                        kept.push("Notifications in the taskbar being off");
+                    }
+                    if t.confirm_clicks != d.confirm_clicks {
+                        kept.push(copy::setting("toasts.confirm_clicks").0);
+                    }
+                    if !t.ignore.is_empty() {
+                        kept.push(copy::setting("toasts.ignore").0);
+                    }
+                }
+                None => kept.push("Notifications in the taskbar being off"),
+            },
+            _ => {}
+        }
+        kept
+    }
+
+    /// What the confirmation says: what goes, and what stays.
+    pub fn warning(&self, section: Section) -> String {
+        let all = format!("Everything else in {} goes back to its default.", section.name());
+        let all = match section {
+            Section::Meters => format!("{all} Meters you added are removed, and meters you removed come back."),
+            Section::Counters => format!("{all} Counters you added are removed, and meters that read them may stop working."),
+            _ => all,
+        };
+        match self.kept(section).as_slice() {
+            [] => all.replace("Everything else", "Everything"),
+            kept => format!("This won't change: {}.\n\n{all}", kept.join(", ")),
+        }
+    }
+
+    /// Puts `section` back as it ships, saves that, and says what it left alone.
+    pub fn reset(&mut self, section: Section) {
+        let kept = self.kept(section);
+        let (mut config, mut counters) = (self.config.clone(), std::mem::take(&mut self.counters));
+        self.apply_reset(section, &mut config, &mut counters);
+        (self.config, self.counters) = (config, counters);
+        self.save_now();
+        if !self.message.1 {
+            let done = format!("{} reset", section.name());
+            self.message = (if kept.is_empty() { done } else { format!("{done}. Not changed: {}", kept.join(", ")) }, false);
+        }
+    }
+
     /// Takes in what changed in the file since we last read or wrote it, so that a save here never undoes it: the file
     /// wins over a change here that hasn't been saved yet. Returns whether the file is ours to write now. It isn't
     /// after taking something in, nor while what's there doesn't load: that's someone's work, not to be saved over.
@@ -371,15 +524,89 @@ mod tests {
     /// A model of a file of its own holding the shipped config.
     fn on_file(name: &str) -> Model {
         let path = std::env::temp_dir().join(format!("pms-gui-test-{name}-{}.toml", std::process::id()));
-        std::fs::write(&path, config::EXAMPLE).unwrap();
+        std::fs::write(&path, "config_version = 2\n").unwrap();
         Model::open(path)
     }
 
     fn change_outside(m: &Model) -> String {
         let text = config::EXAMPLE.replace("interval_ms = 1000", "interval_ms = 1234");
         assert_ne!(text, config::EXAMPLE);
+        let text = format!("config_version = 2\n{text}");
         std::fs::write(&m.path, &text).unwrap();
         text
+    }
+
+    #[test]
+    fn every_section_goes_back_to_its_defaults() {
+        let sections = [
+            Section::Taskbar,
+            Section::Performance,
+            Section::Updates,
+            Section::Meters,
+            Section::Counters,
+            Section::Backdrop,
+            Section::StartGlow,
+            Section::AppGlow,
+            Section::Hotmic,
+            Section::Toasts,
+        ];
+        let mut m = on_file("sections");
+        assert!(sections.iter().all(|s| m.at_default(*s)), "a new config is all defaults");
+        let c = &mut m.config;
+        c.theme = "dark".into();
+        c.software_gpus = true;
+        c.update_channel = "latest".into();
+        c.meters.remove(1);
+        c.backdrop = None;
+        c.start_glow = None;
+        c.app_glow = None;
+        c.hotmic = None;
+        c.toasts.as_mut().unwrap().style = "pimped".into();
+        m.counters.pop();
+        for s in sections {
+            assert!(!m.at_default(s), "{s:?} changed");
+            m.reset(s);
+            assert!(m.at_default(s), "{s:?} reset");
+        }
+        assert_eq!(config::to_toml(&m.current()), config::to_toml(&m.baseline), "back to writing nothing");
+        std::fs::remove_file(&m.path).unwrap();
+    }
+
+    #[test]
+    fn a_reset_leaves_your_choices_alone_and_says_so() {
+        let mut m = on_file("kept");
+        m.config.update_check = Some(false);
+        m.config.update_channel = "latest".into();
+        assert!(m.warning(Section::Updates).contains("won't change"), "{}", m.warning(Section::Updates));
+        m.reset(Section::Updates);
+        assert_eq!(m.config.update_check, Some(false), "consent stays");
+        assert_eq!(m.config.update_channel, m.baseline.update_channel);
+        assert!(m.message.0.contains("Not changed"), "{}", m.message.0);
+
+        let t = m.config.toasts.as_mut().unwrap();
+        t.style = "pimped".into();
+        t.confirm_clicks = "off".into();
+        t.ignore = vec!["Teams".into()];
+        t.enabled = false;
+        assert_eq!(m.kept(Section::Toasts).len(), 3);
+        m.reset(Section::Toasts);
+        let t = m.config.toasts.as_ref().unwrap();
+        assert_eq!(t.style, "standard");
+        assert!(t.confirm_clicks == "off" && t.ignore == ["Teams"] && !t.enabled);
+        assert!(m.at_default(Section::Toasts), "what's kept doesn't leave Reset lit");
+
+        m.config.toasts = None;
+        m.reset(Section::Toasts);
+        assert!(m.config.toasts.is_none(), "off stays off");
+        std::fs::remove_file(&m.path).unwrap();
+    }
+
+    #[test]
+    fn a_reset_with_nothing_kept_says_nothing_of_it() {
+        let m = on_file("nothing-kept");
+        assert!(!m.warning(Section::Taskbar).contains("won't change"));
+        assert!(m.warning(Section::Taskbar).starts_with("Everything in"));
+        std::fs::remove_file(&m.path).unwrap();
     }
 
     #[test]

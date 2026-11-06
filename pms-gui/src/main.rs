@@ -10,6 +10,7 @@
 mod copy;
 mod model;
 mod dollars;
+mod flag;
 mod winui;
 
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use eframe::egui::{self, Color32, RichText};
 use pms::config::{self, Agg, AppGlow, Backdrop, Config, Exprs, Hotmic, Look, Max, MeterSpec, ShowWhen, StartGlow, Style, Toasts};
 use pms::update::Status;
 
-use model::{Model, Update, toml_meter};
+use model::{Model, Section, Update, toml_meter};
 
 
 const AMBER: Color32 = Color32::from_rgb(0xFF, 0xC1, 0x5A);
@@ -43,17 +44,30 @@ fn main() -> eframe::Result {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let flag = |f: &str| args.iter().any(|a| a == f);
     let path = config::given(args.iter().find(|a| !a.to_string_lossy().starts_with("--")).cloned());
-    if !flag("--egui") && (flag("--winui") || winui::available()) {
-        match winui::run(path.clone()) {
-            Ok(()) => return Ok(()),
-            // It can't start (only once a process: Application::Start), so the egui one does.
-            Err(e) => eprintln!("WinUI 3: {e}; the egui window instead"),
+    if flag("--welcome") {
+        std::process::exit(if winui::available() { winui::welcome(path) } else { 255 });
+    }
+    // `--no-winui` acts as if the Windows App Runtime weren't here.
+    let runtime = !flag("--no-winui") && winui::available();
+    let mut fallback = None;
+    if !flag("--egui") {
+        if flag("--winui") || runtime {
+            match winui::run(path.clone()) {
+                Ok(()) => return Ok(()),
+                // It can't start (only once a process: Application::Start), so the egui one does.
+                Err(e) => {
+                    eprintln!("WinUI 3: {e}; the egui window instead");
+                    fallback = Some(copy::CLASSIC_FAILED);
+                }
+            }
+        } else {
+            fallback = Some(copy::CLASSIC_NO_RUNTIME);
         }
     }
-    egui_main(path)
+    egui_main(path, runtime, fallback)
 }
 
-fn egui_main(path: PathBuf) -> eframe::Result {
+fn egui_main(path: PathBuf, runtime: bool, fallback: Option<&'static str>) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: {
             let v = egui::ViewportBuilder::default().with_title("PimpMyShell").with_inner_size([960.0, 700.0]).with_min_inner_size([760.0, 460.0]);
@@ -71,7 +85,7 @@ fn egui_main(path: PathBuf) -> eframe::Result {
         Box::new(move |cc| {
             fonts(&cc.egui_ctx);
             style(&cc.egui_ctx);
-            Ok(Box::new(Gui::open(path)))
+            Ok(Box::new(Gui::open(path, runtime, fallback)))
         }),
     )
 }
@@ -146,17 +160,32 @@ const PAGES: [(Page, &str, &str); 6] = [
 ];
 
 /// The egui window: the model (model.rs, which the WinUI 3 window shares), and which page and meter it shows.
+/// A small button under a section that puts it back, once `update` has asked.
+fn reset_line(ui: &mut egui::Ui, ask: &mut Option<Section>, section: Section) {
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        if ui.small_button(format!("Reset {}…", section.name())).clicked() {
+            *ask = Some(section);
+        }
+    });
+    ui.add_space(6.0);
+}
+
 struct Gui {
     m: Model,
     page: Page,
     meter: usize,
     /// This PC can show the new (WinUI 3) window: the General page offers it.
     winui: bool,
+    /// The section whose reset is waiting to be confirmed.
+    confirm: Option<Section>,
+    /// Why this window is showing instead of the WinUI 3 one, unless it was asked for.
+    fallback: Option<&'static str>,
 }
 
 impl Gui {
-    fn open(path: PathBuf) -> Gui {
-        Gui { m: Model::open(path), page: Page::General, meter: 0, winui: winui::available() }
+    fn open(path: PathBuf, runtime: bool, fallback: Option<&'static str>) -> Gui {
+        Gui { m: Model::open(path), page: Page::General, meter: 0, winui: runtime, confirm: None, fallback }
     }
 }
 
@@ -232,19 +261,62 @@ impl eframe::App for Gui {
         });
         let body = egui::Frame::new().fill(Color32::from_rgb(0x1B, 0x1C, 0x20)).inner_margin(egui::Margin::symmetric(18, 10));
         egui::CentralPanel::default().frame(body).show(ctx, |ui| {
+            if let Some(why) = self.fallback {
+                let note = egui::Frame::new().fill(Color32::from_rgb(0x2B, 0x28, 0x1C)).stroke(egui::Stroke::new(1.0f32, AMBER)).corner_radius(6).inner_margin(10);
+                note.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(why).color(Color32::from_gray(230)));
+                    if why == copy::CLASSIC_NO_RUNTIME {
+                        ui.hyperlink_to(copy::RUNTIME_DOWNLOAD.0, copy::RUNTIME_DOWNLOAD.1);
+                    }
+                });
+                ui.add_space(8.0);
+            }
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.page {
                 Page::General => self.general(ui),
                 Page::Meters => self.meters(ui),
                 Page::Counters => self.counter_rows(ui),
                 Page::Backdrop => {
+                    let mut ask = None;
                     backdrop(ui, &mut self.config);
+                    reset_line(ui, &mut ask, Section::Backdrop);
                     start_glow(ui, &mut self.config.start_glow);
+                    reset_line(ui, &mut ask, Section::StartGlow);
                     app_glow(ui, &mut self.config.app_glow);
+                    reset_line(ui, &mut ask, Section::AppGlow);
+                    self.confirm = ask.or(self.confirm);
                 }
-                Page::Hotmic => hotmic(ui, &mut self.config.hotmic),
-                Page::Toasts => toasts(ui, &mut self.config.toasts),
+                Page::Hotmic => {
+                    hotmic(ui, &mut self.config.hotmic);
+                    let mut ask = None;
+                    reset_line(ui, &mut ask, Section::Hotmic);
+                    self.confirm = ask.or(self.confirm);
+                }
+                Page::Toasts => {
+                    toasts(ui, &mut self.config.toasts);
+                    let mut ask = None;
+                    reset_line(ui, &mut ask, Section::Toasts);
+                    self.confirm = ask.or(self.confirm);
+                }
             });
         });
+        // Asking before a section goes back to its defaults.
+        if let Some(section) = self.confirm {
+            egui::Window::new(format!("Reset {}?", section.name())).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.set_max_width(340.0);
+                ui.label(self.m.warning(section));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Reset").clicked() {
+                        self.m.reset(section);
+                        self.confirm = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm = None;
+                    }
+                });
+            });
+        }
         self.autosave();
         // Keep ticking while a save or an update is under way, and now and then for the daemon status.
         let busy = self.updating();
@@ -462,7 +534,10 @@ impl Gui {
             ui.end_row();
 
             ui.label("Last log entry");
-            ui.add(egui::Label::new(RichText::new(&self.last_log).monospace().small().color(DIM)).truncate());
+            ui.scope(|ui| {
+                ui.set_max_width(520.0);
+                ui.add(egui::Label::new(RichText::new(&self.last_log).monospace().small().color(DIM)).truncate());
+            });
             ui.label("");
             ui.end_row();
 
@@ -484,10 +559,12 @@ impl Gui {
 
             ui.label("Settings file");
             ui.horizontal(|ui| {
-                ui.label(RichText::new(self.path.display().to_string()).monospace().small());
+                // The button first: a long path gives way to it, not the other way around.
+                ui.set_max_width(520.0);
                 if ui.small_button("Show in File Explorer").clicked() {
                     self.show_config();
                 }
+                ui.add(egui::Label::new(RichText::new(self.path.display().to_string()).monospace().small()).truncate());
             });
             ui.label("");
             ui.end_row();
@@ -498,6 +575,9 @@ impl Gui {
             row(ui, "theme", &mut c.theme, "auto".into(), |ui, v| choice(ui, "theme", v, copy::THEMES));
             row(ui, "meter_height", &mut c.meter_height, "tall".into(), |ui, v| {
                 choice(ui, "height", v, copy::HEIGHTS)
+            });
+            row(ui, "bar_height", &mut c.bar_height, "full".into(), |ui, v| {
+                choice(ui, "bar-height", v, copy::HEIGHTS)
             });
             row(ui, "interval_ms", &mut c.interval_ms, 1000, |ui, v| number(ui, v, 16..=60_000, " ms"));
             row(ui, "software_gpus", &mut c.software_gpus, false, |ui, v| {
@@ -523,7 +603,12 @@ impl Gui {
             });
         });
 
+        let mut ask = None;
+        reset_line(ui, &mut ask, Section::Taskbar);
+        reset_line(ui, &mut ask, Section::Performance);
         self.software_update(ui);
+        reset_line(ui, &mut ask, Section::Updates);
+        self.confirm = ask.or(self.confirm);
     }
 
     fn software_update(&mut self, ui: &mut egui::Ui) {
@@ -623,6 +708,9 @@ impl Gui {
 
     fn meters(&mut self, ui: &mut egui::Ui) {
         heading(ui, copy::METERS.0, copy::METERS.1);
+        let mut ask = None;
+        reset_line(ui, &mut ask, Section::Meters);
+        self.confirm = ask.or(self.confirm);
         let interval = self.config.interval_ms;
         // What's shipped that you've removed, a click from coming back.
         let missing: Vec<String> = self.m.missing_meters().iter().map(|m| m.label.clone()).collect();
@@ -722,6 +810,9 @@ impl Gui {
 
     fn counter_rows(&mut self, ui: &mut egui::Ui) {
         heading(ui, copy::COUNTERS.0, copy::COUNTERS.1);
+        let mut ask = None;
+        reset_line(ui, &mut ask, Section::Counters);
+        self.confirm = ask.or(self.confirm);
         let mut remove = None;
         egui::Grid::new("counters").num_columns(5).spacing([10.0, 6.0]).striped(true).show(ui, |ui| {
             for id in ["counter.name", "counter.path", "counter.agg", "counter.default", ""] {
@@ -777,7 +868,7 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, base: Option<&MeterSpec>, 
         opt_row_base(ui, "meter.caption", base.and_then(|b| b.caption.clone()), &mut m.caption, true, |ui, v| {
             ui.checkbox(v, "");
         });
-        row(ui, "meter.style", &mut m.style, Style::History, |ui, v| {
+        row(ui, "meter.style", &mut m.style, base.map_or(Style::History, |b| b.style), |ui, v| {
             let label = |s: Style| copy::STYLES.iter().find(|(n, _)| *n == format!("{s:?}").to_lowercase()).map_or("", |(_, l)| *l);
             egui::ComboBox::from_id_salt("style").width(170.0).selected_text(label(*v)).show_ui(ui, |ui| {
                 for s in [Style::History, Style::Bar, Style::Pie, Style::Bars, Style::Cores, Style::Engines, Style::Disks, Style::Nics] {
@@ -791,7 +882,7 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, base: Option<&MeterSpec>, 
         }
         if !matches!(style, Style::Cores | Style::Engines | Style::Disks | Style::Nics) {
             let many = matches!(style, Style::Pie | Style::Bars);
-            row(ui, "meter.expr", &mut m.expr, expr, |ui, v| {
+            row(ui, "meter.expr", &mut m.expr, base.map_or(expr, |b| b.expr.clone()), |ui, v| {
                 let mut list = v.as_ref().map(Exprs::list).unwrap_or_default();
                 if many {
                     string_list(ui, "exprs", &mut list, "Expression");
@@ -806,7 +897,7 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, base: Option<&MeterSpec>, 
                 };
             });
             if many {
-                row(ui, "meter.names", &mut m.names, Vec::new(), |ui, v| string_list(ui, "names", v, "Name"));
+                row(ui, "meter.names", &mut m.names, base.map_or(Vec::new(), |b| b.names.clone()), |ui, v| string_list(ui, "names", v, "Name"));
             }
         }
         if matches!(style, Style::Cores | Style::Pie | Style::Bars | Style::Disks | Style::Nics) {
@@ -820,7 +911,7 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, base: Option<&MeterSpec>, 
             let parts: Vec<String> = match style {
                 Style::Cores => vec!["User time".into(), "Kernel time".into()],
                 Style::Disks => vec!["Write".into(), "Read".into()],
-                Style::Nics => vec!["Upload".into(), "Download".into()],
+                Style::Nics => vec!["Sent".into(), "Received".into()],
                 _ => {
                     let exprs = m.expr.as_ref().map(Exprs::list).unwrap_or_default();
                     exprs.iter().enumerate().map(|(k, e)| m.names.get(k).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| e.clone())).collect()
@@ -832,8 +923,8 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, base: Option<&MeterSpec>, 
             opt_row_base(ui, "meter.color", base.and_then(|b| b.color.clone()), &mut m.color, "#4FC3F7".into(), color);
         }
         if !matches!(style, Style::Cores | Style::Engines) {
-            row(ui, "meter.max", &mut m.max, None, |ui, v| max_editor(ui, "max", v));
-            row(ui, "meter.unit", &mut m.unit, String::new(), |ui, v| {
+            row(ui, "meter.max", &mut m.max, base.and_then(|b| b.max.clone()), |ui, v| max_editor(ui, "max", v));
+            row(ui, "meter.unit", &mut m.unit, base.map_or(String::new(), |b| b.unit.clone()), |ui, v| {
                 choice(ui, "unit", v, copy::UNITS);
                 text(ui, v, "Or another suffix", 110.0);
             });
@@ -860,7 +951,7 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, base: Option<&MeterSpec>, 
             });
         }
         if matches!(style, Style::Cores | Style::Engines | Style::Bars | Style::Disks | Style::Nics) {
-            row(ui, "meter.bar_width", &mut m.bar_width, None, |ui, v| {
+            row(ui, "meter.bar_width", &mut m.bar_width, base.and_then(|b| b.bar_width), |ui, v| {
                 let mut on = v.is_some();
                 if ui.checkbox(&mut on, "").changed() {
                     *v = on.then_some(5.0);
@@ -906,8 +997,8 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, base: Option<&MeterSpec>, 
             });
             opt_row_base(ui, "meter.history_seconds", base.and_then(|b| b.history_seconds.clone()), &mut m.history_seconds, 300, |ui, v| number(ui, v, 10..=86_400, " s"));
         }
-        row(ui, "meter.show_above", &mut m.show_above, None, |ui, v| max_editor(ui, "show_above", v));
-        row(ui, "meter.show_when", &mut m.show_when, None, show_when_editor);
+        row(ui, "meter.show_above", &mut m.show_above, base.and_then(|b| b.show_above.clone()), |ui, v| max_editor(ui, "show_above", v));
+        row(ui, "meter.show_when", &mut m.show_when, base.and_then(|b| b.show_when.clone()), show_when_editor);
     });
 }
 
@@ -997,6 +1088,7 @@ fn toasts(ui: &mut egui::Ui, t: &mut Option<Toasts>) {
     let d = Toasts::default();
     section(ui, "Taskbar notifications", |ui| {
         row(ui, "toasts.duration_ms", &mut t.duration_ms, d.duration_ms, |ui, v| number(ui, v, 1000..=60_000, " ms"));
+        row(ui, "toasts.confirm_clicks", &mut t.confirm_clicks, d.confirm_clicks.clone(), |ui, v| choice(ui, "toast-confirm", v, copy::CONFIRMS));
         row(ui, "toasts.style", &mut t.style, d.style.clone(), |ui, v| choice(ui, "toast-style", v, copy::TOAST_STYLES));
         row(ui, "toasts.ignore", &mut t.ignore, Vec::new(), |ui, v| string_list(ui, "toast-ignore", v, "For example, Teams"));
     });

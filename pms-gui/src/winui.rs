@@ -15,7 +15,7 @@ use windows_reactor::*;
 
 use crate::copy;
 use crate::dollars::Layer;
-use crate::model::{self, Model, Update};
+use crate::model::{self, Model, Section, Update};
 
 /// The Windows App Runtime's framework package, at the version windows-reactor is built for or later.
 const RUNTIME_FAMILY: &str = "Microsoft.WindowsAppRuntime.2_8wekyb3d8bbwe";
@@ -85,6 +85,8 @@ pub struct Settings {
     meter: usize,
     pane_open: bool,
     pane_mode: NavigationViewDisplayMode,
+    /// The section whose reset is waiting to be confirmed.
+    confirm: Option<Section>,
     /// What floats behind the controls (dollars.rs), and where.
     dollars: Layer,
     panel: ElementRef<SwapChainPanel>,
@@ -96,6 +98,8 @@ pub enum Msg {
     Pane(bool),
     /// The pane changed form, with the window's width.
     PaneMode(NavigationViewDisplayMode),
+    /// The answer to whether to reset the section in `Settings::confirm`.
+    Reset(ContentDialogResult),
     Tick,
     /// What a control did: a change to the settings.
     Edit(Box<dyn FnOnce(&mut Settings) + Send>),
@@ -130,7 +134,7 @@ impl Component for Settings {
 
     fn create(path: &PathBuf, context: &ComponentContext<Self>) -> Self {
         tick_later(context);
-        Settings { m: Model::open(path.clone()), page: Page::General, meter: 0, pane_open: true, pane_mode: NavigationViewDisplayMode::Expanded, dollars: Layer::default(), panel: ElementRef::new() }
+        Settings { m: Model::open(path.clone()), page: Page::General, meter: 0, pane_open: true, pane_mode: NavigationViewDisplayMode::Expanded, confirm: None, dollars: Layer::default(), panel: ElementRef::new() }
     }
 
     fn update(&mut self, msg: Msg, context: &ComponentContext<Self>) {
@@ -142,6 +146,11 @@ impl Component for Settings {
             }
             Msg::Pane(open) => self.pane_open = open,
             Msg::PaneMode(mode) => self.pane_mode = mode,
+            Msg::Reset(answer) => {
+                if let Some(section) = self.confirm.take().filter(|_| answer == ContentDialogResult::Primary) {
+                    self.m.reset(section);
+                }
+            }
             Msg::Tick => {
                 if self.m.polled.elapsed() > Duration::from_secs(2) {
                     self.m.poll_daemon();
@@ -205,6 +214,12 @@ impl Component for Settings {
             ScrollViewer::new().content(StackPanel::new().max_width(1000.0).margin(Thickness::new(36.0, 24.0, 36.0, 36.0)).children([page]))
         };
         let body = Grid::new().rows([GridLength::STAR, GridLength::Auto]).keyed_children([KeyedView::new(tag, Border::new().grid_row(0).content(content)), KeyedView::new("status", status)]);
+        // The small print, where nobody can claim not to have seen it; there's no room for it in a narrow pane.
+        let footer: View = if self.pane_open && self.pane_mode == NavigationViewDisplayMode::Expanded {
+            ScrollViewer::new().height(300.0).vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(TextBlock::new().text(copy::LEGAL).font_size(9.0).opacity(0.55).text_wrapping(TextWrapping::Wrap).margin(Thickness::new(14.0, 6.0, 12.0, 8.0)))
+        } else {
+            Border::new().into()
+        };
         let window = NavigationView::new()
             .pane_display_mode(NavigationViewPaneDisplayMode::Auto)
             .is_settings_visible(false)
@@ -215,9 +230,18 @@ impl Component for Settings {
             .on_is_pane_open_changed(cx.callback(Msg::Pane))
             .on_display_mode_changed(cx.callback(Msg::PaneMode))
             .on_selected_tag_changed(cx.callback(Msg::Page))
-            .slots([SlotView::collection(NavigationViewSlot::MenuItems, items), SlotView::new(NavigationViewSlot::Content, body)]);
+            .slots([SlotView::collection(NavigationViewSlot::MenuItems, items), SlotView::new(NavigationViewSlot::Content, body), SlotView::new(NavigationViewSlot::PaneFooter, footer)]);
+        // Asking before a section goes back to its defaults.
+        let question = self.confirm.unwrap_or(Section::Taskbar);
+        let confirm = ContentDialog::new()
+            .is_open(self.confirm.is_some())
+            .title(format!("Reset {}?", question.name()))
+            .primary_button_text("Reset")
+            .close_button_text("Cancel")
+            .on_closed(cx.callback(Msg::Reset))
+            .content(TextBlock::new().text(self.m.warning(question)).text_wrapping(TextWrapping::Wrap));
         // The dollars first: over the acrylic, under everything else.
-        Grid::new().children((SwapChainPanel::new().element_ref(&self.panel), window))
+        Grid::new().children((SwapChainPanel::new().element_ref(&self.panel), window, confirm))
     }
 }
 
@@ -242,6 +266,36 @@ fn heading((title, help): (&str, &str)) -> View {
 }
 
 /// A group of cards under a heading.
+/// The button that puts a section back, once it's been asked; greyed out while it's as it ships.
+fn reset_section(cx: &Cx, section: Section, at_default: bool, margin: Thickness) -> View {
+    Button::new()
+        .grid_column(1)
+        .margin(margin)
+        .vertical_alignment(VerticalAlignment::Top)
+        .is_enabled(!at_default)
+        .on_click(act(cx, move |s| s.confirm = Some(section)))
+        .content(TextBlock::new().text("Reset").font_size(12.0))
+}
+
+/// A group of cards under a heading, with a way back to the defaults.
+fn group_reset(cx: &Cx, title: &str, section: Section, at_default: bool, cards: Vec<View>) -> View {
+    let head = Grid::new().columns([GridLength::STAR, GridLength::Auto]).margin(Thickness::new(1.0, 24.0, 0.0, 6.0)).children((
+        TextBlock::new().grid_column(0).text(title).font_weight(FontWeight::SEMI_BOLD).vertical_alignment(VerticalAlignment::Center),
+        reset_section(cx, section, at_default, Thickness::uniform(0.0)),
+    ));
+    let mut all: Vec<View> = vec![head];
+    all.extend(cards);
+    children(StackPanel::new().spacing(4.0), all)
+}
+
+/// A page's heading, for a page that's a section of its own.
+fn heading_reset(cx: &Cx, text: (&str, &str), section: Section, at_default: bool) -> View {
+    Grid::new().columns([GridLength::STAR, GridLength::Auto]).children((
+        Border::new().grid_column(0).content(heading(text)),
+        reset_section(cx, section, at_default, Thickness::new(0.0, 8.0, 0.0, 0.0)),
+    ))
+}
+
 fn group(title: &str, cards: Vec<View>) -> View {
     let mut all = vec![TextBlock::new().text(title).font_weight(FontWeight::SEMI_BOLD).margin(Thickness::new(1.0, 24.0, 0.0, 6.0)).into()];
     all.extend(cards);
@@ -292,14 +346,17 @@ fn settings_card(glyph: Option<&str>, title: &str, help: &str, key: Option<&str>
 }
 
 /// The Reset button of a setting that isn't the default.
+/// The icon, and the padding a button keeps around it.
+const RESET_W: f64 = 46.0;
+
 fn reset_button(changed: bool, reset: Option<Callback<()>>) -> Option<View> {
     let reset = reset.filter(|_| changed)?;
-    Some(Button::new().width(40.0).on_click(reset).content(SymbolIcon::new().symbol(Symbol::Undo)).tooltip("Reset to default"))
+    Some(Button::new().width(RESET_W).on_click(reset).content(SymbolIcon::new().symbol(Symbol::Undo)).tooltip("Reset to default"))
 }
 
 /// Where Reset goes, whether it shows or not: so that controls line up from card to card.
 fn reset_slot(changed: bool, reset: Option<Callback<()>>) -> View {
-    reset_button(changed, reset).unwrap_or_else(|| Border::new().width(40.0).into())
+    reset_button(changed, reset).unwrap_or_else(|| Border::new().width(RESET_W).into())
 }
 
 /// A setting: its title, description and key (copy.rs), its control, and Reset when it isn't the default.
@@ -624,17 +681,24 @@ impl Settings {
                 TextBlock::new().text(copy::LOG_PRIVACY).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7).margin(Thickness::new(1.0, 2.0, 0.0, 0.0)).into(),
             ],
         );
-        let taskbar = group(
+        let taskbar = group_reset(
+            cx,
             "Taskbar",
+            Section::Taskbar,
+            m.at_default(Section::Taskbar),
             vec![
                 row("theme", c.theme != b.theme, top!(theme), choice(cx, &c.theme, copy::THEMES, |s, v| s.m.config.theme = v)),
                 row("meter_height", c.meter_height != b.meter_height, top!(meter_height), choice(cx, &c.meter_height, copy::HEIGHTS, |s, v| s.m.config.meter_height = v)),
+                row("bar_height", c.bar_height != b.bar_height, top!(bar_height), choice(cx, &c.bar_height, copy::HEIGHTS, |s, v| s.m.config.bar_height = v)),
                 row("interval_ms", c.interval_ms != b.interval_ms, top!(interval_ms), number(cx, c.interval_ms as f64, 16.0, 60_000.0, "ms", |s, v| s.m.config.interval_ms = v as u64)),
                 row("value_font", c.value_font != b.value_font, top!(value_font), text(cx, c.value_font.as_deref().unwrap_or(""), "Cascadia Mono", 220.0, |s, v| s.m.config.value_font = Some(v).filter(|v| !v.is_empty()))),
             ],
         );
-        let advanced = group(
+        let advanced = group_reset(
+            cx,
             "Performance",
+            Section::Performance,
+            m.at_default(Section::Performance),
             vec![
                 row(
                     "max_fps",
@@ -664,6 +728,13 @@ impl Settings {
             "Settings",
             vec![
                 settings_card(Some("\u{E8A5}"), "Settings file", &m.path.display().to_string(), None, Button::new().on_click(act(cx, |s| s.m.show_config())).content("Show in File Explorer")),
+                settings_card(
+                    Some("\u{E789}"),
+                    "Welcome",
+                    "The first-run questions, again",
+                    None,
+                    Button::new().on_click(act(cx, |s| s.m.open_welcome())).content("Open"),
+                ),
                 settings_card(
                     Some("\u{E8A7}"),
                     "Classic settings window",
@@ -766,7 +837,7 @@ impl Settings {
             None,
             StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((reinstall("Stable version", false), reinstall("Latest version", true))),
         ));
-        group("Software update", cards)
+        group_reset(cx, "Software update", Section::Updates, self.m.at_default(Section::Updates), cards)
     }
 
     fn meters(&self, cx: &Cx) -> View {
@@ -870,7 +941,7 @@ impl Settings {
         ));
         let right = ScrollViewer::new().grid_column(1).vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(Border::new().margin(Thickness::new(0.0, 0.0, 14.0, 12.0)).content(editor));
         Grid::new().max_width(1000.0).margin(Thickness::new(36.0, 24.0, 22.0, 0.0)).rows([GridLength::Auto, GridLength::STAR]).children((
-            Border::new().grid_row(0).content(heading(copy::METERS)),
+            Border::new().grid_row(0).content(heading_reset(cx, copy::METERS, Section::Meters, self.m.at_default(Section::Meters))),
             Grid::new()
                 .grid_row(1)
                 .columns([GridLength::Pixel(264.0), GridLength::STAR])
@@ -960,7 +1031,7 @@ impl Settings {
             let parts: Vec<String> = match style {
                 Style::Cores => vec!["User time".into(), "Kernel time".into()],
                 Style::Disks => vec!["Write".into(), "Read".into()],
-                Style::Nics => vec!["Upload".into(), "Download".into()],
+                Style::Nics => vec!["Sent".into(), "Received".into()],
                 _ => exprs.iter().enumerate().map(|(k, e)| m.names.get(k).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| e.clone())).collect(),
             };
             let shipped_colors = shipped!(colors, Vec::new());
@@ -1134,15 +1205,18 @@ impl Settings {
                 .on_click(act(cx, |s| s.m.counters.push(model::new_counter())))
                 .content(StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((SymbolIcon::new().symbol(Symbol::Add), TextBlock::new().text("Add counter")))),
         );
-        StackPanel::new().spacing(4.0).children((heading(copy::COUNTERS), children(StackPanel::new().spacing(4.0), rows)))
+        StackPanel::new().spacing(4.0).children((heading_reset(cx, copy::COUNTERS, Section::Counters, self.m.at_default(Section::Counters)), children(StackPanel::new().spacing(4.0), rows)))
     }
 
     fn look(&self, cx: &Cx) -> View {
         let c = &self.m.config;
         let mut parts = vec![
             heading(copy::LOOK),
-            group(
+            group_reset(
+                cx,
                 "Background",
+                Section::Backdrop,
+                self.m.at_default(Section::Backdrop),
                 vec![switch_card(
                     "\u{E771}",
                     "Use a custom taskbar background",
@@ -1199,7 +1273,7 @@ impl Settings {
                 row("start_glow.press_radius", g.press_radius != d.press_radius, reset!(press_radius), number(cx, f64::from(g.press_radius), 0.0, 600.0, "px", |s, v| glow!(press_radius)(s, v as f32))),
             ]);
         }
-        group("Start button", cards)
+        group_reset(cx, "Start button", Section::StartGlow, self.m.at_default(Section::StartGlow), cards)
     }
 
     fn app_glow(&self, cx: &Cx) -> View {
@@ -1237,7 +1311,7 @@ impl Settings {
                 row("app_glow.press_radius", g.press_radius != d.press_radius, reset!(press_radius), number(cx, f64::from(g.press_radius), 0.0, 600.0, "px", |s, v| glow!(press_radius)(s, v as f32))),
             ]);
         }
-        group("App buttons", cards)
+        group_reset(cx, "App buttons", Section::AppGlow, self.m.at_default(Section::AppGlow), cards)
     }
 
     fn hotmic(&self, cx: &Cx) -> View {
@@ -1272,10 +1346,14 @@ impl Settings {
                 row("hotmic.low", h.low != d.low, reset!(low), level(cx, h.low, 1.0, mic!(low))),
                 row("hotmic.high", h.high != d.high, reset!(high), level(cx, h.high, 1.0, mic!(high))),
                 row("hotmic.broad_ms", h.broad_ms != d.broad_ms, reset!(broad_ms), number(cx, f64::from(h.broad_ms), 0.0, 60_000.0, "ms", |s, v| mic!(broad_ms)(s, v as u32))),
-                wide_row("hotmic.ignore", !h.ignore.is_empty(), None, list(cx, &h.ignore, ListAt::HotmicIgnore, "For example, obs64.exe", false)),
+                wide_row("hotmic.ignore", !h.ignore.is_empty(), Some(act(cx, |s| {
+                    if let Some(h) = s.m.config.hotmic.as_mut() {
+                        h.ignore.clear();
+                    }
+                })), list(cx, &h.ignore, ListAt::HotmicIgnore, "For example, obs64.exe", false)),
             ]);
         }
-        StackPanel::new().spacing(4.0).children((heading(copy::HOTMIC), group("Alert", cards)))
+        StackPanel::new().spacing(4.0).children((heading(copy::HOTMIC), group_reset(cx, "Alert", Section::Hotmic, self.m.at_default(Section::Hotmic), cards)))
     }
 
     fn toasts(&self, cx: &Cx) -> View {
@@ -1313,6 +1391,23 @@ impl Settings {
                     }),
                 ),
                 row(
+                    "toasts.confirm_clicks",
+                    t.confirm_clicks != d.confirm_clicks,
+                    {
+                        let to = d.confirm_clicks.clone();
+                        Some(act(cx, move |s| {
+                            if let Some(t) = s.m.config.toasts.as_mut() {
+                                t.confirm_clicks = to.clone();
+                            }
+                        }))
+                    },
+                    choice(cx, &t.confirm_clicks, copy::CONFIRMS, |s, v| {
+                        if let Some(t) = s.m.config.toasts.as_mut() {
+                            t.confirm_clicks = v;
+                        }
+                    }),
+                ),
+                row(
                     "toasts.style",
                     t.style != d.style,
                     {
@@ -1329,10 +1424,14 @@ impl Settings {
                         }
                     }),
                 ),
-                wide_row("toasts.ignore", !t.ignore.is_empty(), None, list(cx, &t.ignore, ListAt::ToastsIgnore, "For example, Teams", false)),
+                wide_row("toasts.ignore", !t.ignore.is_empty(), Some(act(cx, |s| {
+                    if let Some(t) = s.m.config.toasts.as_mut() {
+                        t.ignore.clear();
+                    }
+                })), list(cx, &t.ignore, ListAt::ToastsIgnore, "For example, Teams", false)),
             ]);
         }
-        StackPanel::new().spacing(4.0).children((heading(copy::TOASTS), group("Taskbar notifications", cards)))
+        StackPanel::new().spacing(4.0).children((heading(copy::TOASTS), group_reset(cx, "Taskbar notifications", Section::Toasts, self.m.at_default(Section::Toasts), cards)))
     }
 }
 
@@ -1457,16 +1556,31 @@ pub struct Question {
     pub text: String,
     pub link: Option<String>,
     pub buttons: Vec<String>,
+    /// A checkbox, and the note beside it once it's checked. Checked, the answer is `CHECKED` higher.
+    pub check: Option<String>,
+    pub check_note: String,
+    /// Exact details, each a label and a value: with these it's a question about something specific, drawn as such.
+    pub rows: Vec<(String, String)>,
 }
+
+/// See `Question::check`.
+const CHECKED: i32 = 16;
 
 impl Question {
     /// From `--ask`'s arguments.
     pub fn from_args(args: &[String]) -> Question {
-        let mut q = Question { heading: String::new(), text: String::new(), link: None, buttons: Vec::new() };
+        let mut q = Question { heading: String::new(), text: String::new(), link: None, buttons: Vec::new(), check: None, check_note: String::new(), rows: Vec::new() };
         let mut it = args.iter();
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--heading" => q.heading = it.next().cloned().unwrap_or_default(),
+                "--check" => q.check = it.next().cloned(),
+                "--row" => {
+                    if let (Some(label), Some(value)) = (it.next(), it.next()) {
+                        q.rows.push((label.clone(), value.clone()));
+                    }
+                }
+                "--check-note" => q.check_note = it.next().cloned().unwrap_or_default(),
                 "--text" => q.text = it.next().cloned().unwrap_or_default(),
                 "--link" => q.link = it.next().cloned(),
                 "--button" => q.buttons.extend(it.next().cloned()),
@@ -1479,30 +1593,332 @@ impl Question {
 
 /// Asks `q`, waiting for the answer: the exit code (see above).
 pub fn ask(q: Question) -> i32 {
+    if !q.rows.is_empty() {
+        std::thread::spawn(to_the_corner);
+    }
     match App::run_component::<Asking>(q) {
         Ok(()) => 0,
         Err(_) => 255,
     }
 }
 
-struct Asking;
+/// Shows the welcome, for the settings at `path`: the exit code says only that it ran (255 where there's no WinUI 3).
+pub fn welcome(path: PathBuf) -> i32 {
+    match App::run_component::<Welcome>(path) {
+        Ok(()) => 0,
+        Err(_) => 255,
+    }
+}
+
+/// The first run: a few choices, with what they look like, in the settings' clothes. Nothing's kept until the end, so
+/// closing it leaves the defaults.
+struct Welcome {
+    m: Model,
+    step: usize,
+    style: String,
+    confirm: String,
+    updates: bool,
+    startup: bool,
+    dollars: Layer,
+    panel: ElementRef<SwapChainPanel>,
+}
+
+enum WelcomeMsg {
+    Tick,
+    Next,
+    Back,
+    Style(String),
+    Confirm(String),
+    Updates(bool),
+    Startup(bool),
+}
+
+const WELCOME_STEPS: usize = 4;
+
+fn welcome_tick(context: &ComponentContext<Welcome>) {
+    context.spawn_background(|_| {
+        std::thread::sleep(TICK);
+        WelcomeMsg::Tick
+    });
+}
+
+impl Component for Welcome {
+    type Input = PathBuf;
+    type Message = WelcomeMsg;
+
+    fn create(path: &PathBuf, context: &ComponentContext<Self>) -> Self {
+        welcome_tick(context);
+        let m = Model::open(path.clone());
+        let toasts = m.config.toasts.clone().unwrap_or_default();
+        let (updates, startup) = (m.config.update_check.unwrap_or(true), true);
+        Welcome { m, step: 0, style: toasts.style, confirm: toasts.confirm_clicks, updates, startup, dollars: Layer::default(), panel: ElementRef::new() }
+    }
+
+    fn update(&mut self, msg: WelcomeMsg, context: &ComponentContext<Self>) {
+        match msg {
+            WelcomeMsg::Tick => {
+                self.dollars.attach(&self.panel);
+                welcome_tick(context);
+            }
+            WelcomeMsg::Back => self.step = self.step.saturating_sub(1),
+            WelcomeMsg::Next if self.step + 1 < WELCOME_STEPS => self.step += 1,
+            WelcomeMsg::Next => self.finish(),
+            WelcomeMsg::Style(v) => self.style = v,
+            WelcomeMsg::Confirm(v) => self.confirm = v,
+            WelcomeMsg::Updates(v) => self.updates = v,
+            WelcomeMsg::Startup(v) => self.startup = v,
+        }
+    }
+
+    fn view(&self, _: &PathBuf, cx: &mut ViewContext<Self>) -> View {
+        cx.window_title("Welcome to PimpMyShell");
+        let visuals = WindowVisuals::new().backdrop(WindowBackdrop::Acrylic).client_size(640.0, 600.0);
+        cx.window_visuals(match icon() {
+            Some(icon) => visuals.icon(icon),
+            None => visuals,
+        });
+        self.dollars.set_pane(0);
+        let (title, help, body): (&str, &str, View) = match self.step {
+            0 => ("Welcome to the good life", "Three quick choices, and your taskbar is pimped. You can change all of it later in Settings.", Image::new().source_data(EncodedImage::new(LOGO)).width(160.0).height(160.0).horizontal_alignment(HorizontalAlignment::Left).into()),
+            1 => ("To pimp, or not to pimp?", "Notifications show up in your taskbar. Here's how they can look.", {
+                let pick = |value: &str, name: &str, words: &str, pimped: bool| {
+                    option(cx, self.style == value, name, words, Some(sample(pimped)), WelcomeMsg::Style(value.to_string()))
+                };
+                children(StackPanel::new().spacing(10.0), vec![pick("standard", "Standard", "Clean, like the rest of Windows", false), pick("pimped", "Pimped", "Gold, with a sheen that sweeps across", true)])
+            }),
+            2 => ("Look before you leap?", "Selecting a notification can open programs and links. We can show you exactly what first.", {
+                let pick = |value: &str, name: &str, words: &str| option(cx, self.confirm == value, name, words, None, WelcomeMsg::Confirm(value.to_string()));
+                children(
+                    StackPanel::new().spacing(10.0),
+                    vec![
+                        pick("card", "Ask in the notification", "A quick question, right where you clicked"),
+                        pick("window", "Ask in a window", "Room for every path and argument"),
+                        pick("off", "Don't ask", "Notifications open what they open"),
+                    ],
+                )
+            }),
+            _ => ("Stay fresh", "Last thing. Both are easy to change later.", {
+                let line = |title: &str, words: &str, on: bool, msg: fn(bool) -> WelcomeMsg| {
+                    settings_card(None, title, words, None, ToggleSwitch::new().is_on(on).on_toggled(cx.callback(msg)))
+                };
+                children(
+                    StackPanel::new().spacing(10.0),
+                    vec![
+                        line("Check for updates", "We check GitHub every day or two, and you choose when to install. We don't send anything about you", self.updates, WelcomeMsg::Updates),
+                        line("Start when I sign in", "Keep your taskbar pimped after a restart", self.startup, WelcomeMsg::Startup),
+                    ],
+                )
+            }),
+        };
+        let last = self.step + 1 == WELCOME_STEPS;
+        let next = match self.step {
+            0 => "Let's ride",
+            _ if last => "Get pimped",
+            _ => "Next",
+        };
+        let dots = (0..WELCOME_STEPS).map(|i| {
+            let dot = Border::new().width(8.0).height(8.0).corner_radius(CornerRadius::uniform(4.0)).background(Brush::Theme(ThemeBrush::PrimaryText)).opacity(if i == self.step { 0.9 } else { 0.25 });
+            KeyedView::new(i.to_string(), dot)
+        });
+        let back = Button::new().grid_column(0).is_enabled(self.step > 0).opacity(if self.step > 0 { 1.0 } else { 0.0 }).min_width(90.0).on_click(cx.callback(|()| WelcomeMsg::Back)).content("Back");
+        let forward = Button::new().grid_column(2).style(ButtonStyle::Accent).min_width(120.0).on_click(cx.callback(|()| WelcomeMsg::Next)).content(next);
+        let page = Grid::new().rows([GridLength::Auto, GridLength::STAR, GridLength::Auto]).margin(Thickness::new(44.0, 40.0, 44.0, 28.0)).row_spacing(24.0).children((
+            StackPanel::new().grid_row(0).spacing(8.0).children((
+                TextBlock::new().text(title).font_size(32.0).font_weight(FontWeight::SEMI_BOLD).text_wrapping(TextWrapping::Wrap),
+                TextBlock::new().text(help).font_size(15.0).opacity(0.75).text_wrapping(TextWrapping::Wrap),
+            )),
+            Border::new().grid_row(1).content(body),
+            Grid::new().grid_row(2).columns([GridLength::Auto, GridLength::STAR, GridLength::Auto]).children((
+                back,
+                StackPanel::new().grid_column(1).orientation(Orientation::Horizontal).spacing(8.0).horizontal_alignment(HorizontalAlignment::Center).vertical_alignment(VerticalAlignment::Center).keyed_children(dots),
+                forward,
+            )),
+        ));
+        Grid::new().children((SwapChainPanel::new().element_ref(&self.panel), page))
+    }
+}
+
+impl Welcome {
+    /// Keeps the choices, and that's that.
+    fn finish(&mut self) {
+        let toasts = self.m.config.toasts.get_or_insert_with(Toasts::default);
+        toasts.style = self.style.clone();
+        toasts.confirm_clicks = self.confirm.clone();
+        self.m.config.update_check = Some(self.updates);
+        if self.startup != self.m.autostarts() {
+            self.m.set_autostart(self.startup);
+        }
+        self.m.save_now();
+        std::process::exit(0);
+    }
+}
+
+/// A notification as it looks in the taskbar, for choosing one.
+fn sample(pimped: bool) -> View {
+    let gold = parse_color("#FFD35C");
+    let title = TextBlock::new().text("Your taskbar called").font_size(12.0).font_weight(FontWeight::SEMI_BOLD);
+    let title = if pimped { title.foreground(Brush::Solid(gold)) } else { title };
+    let words = StackPanel::new().vertical_alignment(VerticalAlignment::Center).children((
+        TextBlock::new().text("PimpMyShell").font_size(10.5).opacity(0.65),
+        title,
+        TextBlock::new().text("It says it's looking good.").font_size(11.5).opacity(0.8),
+    ));
+    let inside = StackPanel::new().orientation(Orientation::Horizontal).spacing(10.0).children((Image::new().source_data(EncodedImage::new(LOGO)).width(32.0).height(32.0).vertical_alignment(VerticalAlignment::Center), words));
+    let card = Border::new().padding(Thickness::xy(10.0, 6.0)).corner_radius(CornerRadius::uniform(6.0)).background(Brush::Solid(if pimped { parse_color("#34FFB830") } else { parse_color("#18FFFFFF") }));
+    let card = if pimped { card.border_brush(Brush::Solid(parse_color("#C8E8B030"))).border_thickness(Thickness::uniform(1.0)) } else { card };
+    card.content(inside)
+}
+
+/// One of a welcome's choices: a tick when it's the one, what it's called, and maybe what it looks like.
+fn option(cx: &ViewContext<Welcome>, chosen: bool, title: &str, words: &str, look: Option<View>, pick: WelcomeMsg) -> View {
+    let pick = std::sync::Mutex::new(Some(pick));
+    let mut lines: Vec<View> = vec![
+        TextBlock::new().text(title).font_weight(FontWeight::SEMI_BOLD).into(),
+        TextBlock::new().text(words).font_size(12.0).opacity(0.7).text_wrapping(TextWrapping::Wrap).into(),
+    ];
+    lines.extend(look.map(|l| Border::new().margin(Thickness::new(0.0, 8.0, 0.0, 0.0)).content(l)));
+    let line = Grid::new().margin(Thickness::xy(4.0, 6.0)).columns([GridLength::Pixel(22.0), GridLength::STAR]).column_spacing(10.0).children((
+        FontIcon::new().glyph("\u{E73E}").opacity(if chosen { 1.0 } else { 0.0 }).vertical_alignment(VerticalAlignment::Top).margin(Thickness::new(0.0, 2.0, 0.0, 0.0)).grid_column(0),
+        children(StackPanel::new().grid_column(1).spacing(2.0), lines),
+    ));
+    let chose = match pick.lock().unwrap().take() {
+        Some(WelcomeMsg::Style(v)) => cx.callback(move |()| WelcomeMsg::Style(v.clone())),
+        Some(WelcomeMsg::Confirm(v)) => cx.callback(move |()| WelcomeMsg::Confirm(v.clone())),
+        _ => cx.callback(|()| WelcomeMsg::Tick),
+    };
+    Button::new().horizontal_alignment(HorizontalAlignment::Stretch).horizontal_content_alignment(HorizontalAlignment::Stretch).on_click(chose).content(line)
+}
+
+/// A question about a notification comes up where notifications do: the bottom right of the work area, next to the
+/// cards, and on top, as it's the answer to a click that's waiting. WinUI has no say in where a window starts, so it's
+/// moved as it appears, and kept there while it takes its size.
+fn to_the_corner() {
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows_core::BOOL;
+    const MARGIN: i32 = 12;
+    unsafe extern "system" fn each(hwnd: HWND, out: LPARAM) -> BOOL {
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        let mut class = [0u16; 32];
+        let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
+        if pid == std::process::id() && String::from_utf16_lossy(&class[..n]).starts_with("WinUIDesktop") {
+            unsafe { *(out.0 as *mut isize) = hwnd.0 as isize };
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let mut work = RECT::default();
+    if unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut work as *mut RECT as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) }.is_err() {
+        return;
+    }
+    let mut on_top = false;
+    for _ in 0..150 {
+        std::thread::sleep(Duration::from_millis(8));
+        let mut found = 0isize;
+        let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut found as *mut isize as isize)) };
+        if found == 0 {
+            continue;
+        }
+        let hwnd = HWND(found as *mut _);
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+            continue;
+        }
+        let (x, y) = (work.right - (r.right - r.left) - MARGIN, work.bottom - (r.bottom - r.top) - MARGIN);
+        if (r.left, r.top) != (x, y) || !on_top {
+            let _ = unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, 0, 0, SWP_NOSIZE) };
+            on_top = unsafe { SetForegroundWindow(hwnd) }.as_bool() || on_top;
+        }
+    }
+}
+
+struct Asking {
+    checked: bool,
+}
+
+impl Asking {
+    /// A question about something specific: the question, who's asking, the thing itself exactly, and the answer.
+    /// Nothing else, with room around it; the first button (the yes) goes last, under the thumb of a reading eye.
+    fn exact(&self, q: &Question, cx: &mut ViewContext<Self>) -> View {
+        const WIDTH: f64 = 480.0;
+        const MARGIN: f64 = 28.0;
+        // A line of a detail holds about this many characters at this width.
+        const PER_LINE: usize = 58;
+        let lines: usize = q.rows.iter().flat_map(|(_, value)| value.split('\n')).map(|line| line.chars().count().div_ceil(PER_LINE).max(1)).sum();
+        let height = 196.0 + q.rows.len() as f64 * 34.0 + lines as f64 * 19.0;
+        cx.window_title("PimpMyShell");
+        let visuals = WindowVisuals::new().backdrop(WindowBackdrop::Mica).client_size(WIDTH, height.min(560.0));
+        cx.window_visuals(match icon() {
+            Some(icon) => visuals.icon(icon),
+            None => visuals,
+        });
+        let rows = q.rows.iter().enumerate().map(|(i, (label, value))| {
+            KeyedView::new(
+                i.to_string(),
+                StackPanel::new().spacing(3.0).children((
+                    TextBlock::new().text(label.clone()).font_size(11.0).opacity(0.6),
+                    TextBlock::new().text(value.clone()).font_size(13.0).text_wrapping(TextWrapping::Wrap).is_text_selection_enabled(true),
+                )),
+            )
+        });
+        // The card scrolls when there's more than fits: the question and its answers stay where they are.
+        let details = Border::new()
+            .grid_row(1)
+            .margin(Thickness::new(MARGIN, 18.0, MARGIN, 0.0))
+            .corner_radius(CornerRadius::uniform(8.0))
+            .background(Brush::Theme(ThemeBrush::CardBackground))
+            .border_brush(Brush::Theme(ThemeBrush::CardStroke))
+            .border_thickness(Thickness::uniform(1.0))
+            .content(ScrollViewer::new().vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(StackPanel::new().spacing(12.0).margin(Thickness::xy(16.0, 14.0)).keyed_children(rows)));
+        let top = StackPanel::new().grid_row(0).spacing(2.0).margin(Thickness::new(MARGIN, 22.0, MARGIN, 0.0)).children((
+            TextBlock::new().text(q.heading.clone()).font_size(24.0).font_weight(FontWeight::SEMI_BOLD).text_wrapping(TextWrapping::Wrap),
+            TextBlock::new().text(q.text.clone()).opacity(0.6).text_trimming(TextTrimming::CharacterEllipsis),
+        ));
+        let label = q.check.clone().unwrap_or_default();
+        let check = CheckBox::new().is_checked(self.checked).on_is_checked_changed(cx.callback(AskMsg::Checked)).content(TextBlock::new().text(label).font_size(12.0).opacity(0.75));
+        let note = TextBlock::new().text(q.check_note.clone()).font_size(10.5).font_weight(FontWeight::BOLD).foreground(Brush::Solid(Color::rgb(0xFF, 0xD6, 0x00))).vertical_alignment(VerticalAlignment::Center).opacity(if self.checked { 1.0 } else { 0.0 });
+        let left = StackPanel::new().grid_column(0).orientation(Orientation::Horizontal).spacing(10.0).vertical_alignment(VerticalAlignment::Center).children((check, note));
+        let buttons = q.buttons.iter().enumerate().rev().map(|(i, label)| {
+            let style = if i == 0 { ButtonStyle::Accent } else { ButtonStyle::Default };
+            KeyedView::new(i.to_string(), Button::new().style(style).min_width(76.0).on_click(cx.callback(move |()| AskMsg::Pressed(i))).content(label.clone()))
+        });
+        let right = StackPanel::new().grid_column(1).orientation(Orientation::Horizontal).spacing(8.0).keyed_children(buttons);
+        Grid::new().rows([GridLength::Auto, GridLength::STAR, GridLength::Auto]).children((
+            top,
+            details,
+            Grid::new().grid_row(2).columns([GridLength::STAR, GridLength::Auto]).margin(Thickness::new(MARGIN, 14.0, MARGIN, 22.0)).children((left, right)),
+        ))
+    }
+}
+
+enum AskMsg {
+    Pressed(usize),
+    Checked(bool),
+}
 
 impl Component for Asking {
     type Input = Question;
-    type Message = usize;
+    type Message = AskMsg;
 
     fn create(_: &Question, _: &ComponentContext<Self>) -> Self {
-        Asking
+        Asking { checked: false }
     }
 
-    fn update(&mut self, pressed: usize, _: &ComponentContext<Self>) {
-        std::process::exit(pressed as i32 + 1);
+    fn update(&mut self, msg: AskMsg, _: &ComponentContext<Self>) {
+        match msg {
+            AskMsg::Pressed(i) => std::process::exit(i as i32 + 1 + if self.checked { CHECKED } else { 0 }),
+            AskMsg::Checked(on) => self.checked = on,
+        }
     }
 
     fn view(&self, q: &Question, cx: &mut ViewContext<Self>) -> View {
+        if !q.rows.is_empty() {
+            return self.exact(q, cx);
+        }
         // Sized for its text (a line holds about 70 characters at this width), as a dialog is.
         let lines: usize = q.text.split('\n').map(|l| l.chars().count() / 70 + 1).sum();
-        let height = 150.0 + lines as f64 * 20.0 + if q.link.is_some() { 36.0 } else { 0.0 };
+        let height = 150.0 + lines as f64 * 20.0 + if q.link.is_some() { 36.0 } else { 0.0 } + if q.check.is_some() { 44.0 } else { 0.0 };
         cx.window_title("PimpMyShell");
         let visuals = WindowVisuals::new().backdrop(WindowBackdrop::Mica).client_size(520.0, height.min(640.0));
         cx.window_visuals(match icon() {
@@ -1518,9 +1934,14 @@ impl Component for Asking {
         {
             body.push(button.content(TextBlock::new().text(link.clone()).text_wrapping(TextWrapping::Wrap)));
         }
+        if let Some(label) = &q.check {
+            let note = TextBlock::new().text(q.check_note.clone()).font_size(11.0).font_weight(FontWeight::SEMI_BOLD).foreground(Brush::Solid(Color::rgb(0xFF, 0xD6, 0x00))).vertical_alignment(VerticalAlignment::Center).opacity(if self.checked { 1.0 } else { 0.0 });
+            let check = CheckBox::new().is_checked(self.checked).on_is_checked_changed(cx.callback(AskMsg::Checked)).content(label.clone());
+            body.push(StackPanel::new().orientation(Orientation::Horizontal).spacing(12.0).children((check, note)));
+        }
         let buttons = q.buttons.iter().enumerate().map(|(i, label)| {
             let style = if i == 0 { ButtonStyle::Accent } else { ButtonStyle::Default };
-            KeyedView::new(i.to_string(), Button::new().style(style).min_width(110.0).on_click(cx.message(i)).content(label.clone()))
+            KeyedView::new(i.to_string(), Button::new().style(style).min_width(110.0).on_click(cx.callback(move |()| AskMsg::Pressed(i))).content(label.clone()))
         });
         Grid::new().rows([GridLength::STAR, GridLength::Auto]).children((
             children(StackPanel::new().grid_row(0).spacing(12.0).margin(Thickness::new(24.0, 20.0, 24.0, 12.0)), body),

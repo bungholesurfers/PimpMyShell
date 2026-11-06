@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, GENERIC_ACCESS_RIGHTS};
 use windows::Win32::NetworkManagement::IpHelper::{
-    GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses, GetBestInterfaceEx, IP_ADAPTER_ADDRESSES_LH,
+    ConvertInterfaceLuidToNameW, FreeMibTable, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses, GetBestInterfaceEx, GetIfTable2, IP_ADAPTER_ADDRESSES_LH,
 };
 use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, IN_ADDR, IN_ADDR_0, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6};
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, GetDiskFreeSpaceExW, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES};
@@ -84,6 +84,8 @@ pub struct Disk {
     pub model: String,
     /// Its drive letters, with free and total space.
     pub volumes: Vec<(String, u64, u64)>,
+    /// What Windows calls the disk: `\\.\PhysicalDrive0`.
+    pub id: String,
     /// Windows is on it.
     pub system: bool,
 }
@@ -98,10 +100,12 @@ pub fn disks(instances: &[String]) -> Vec<Disk> {
             let mut words = instance.split_whitespace();
             let number = words.next().and_then(|n| n.parse::<u32>().ok());
             let letters: Vec<String> = words.map(str::to_string).collect();
-            let label = letters.first().cloned().unwrap_or_else(|| number.map_or("disk".into(), |n| format!("#{n}")));
+            // `\\.\PhysicalDrive0`, is `disk0` on the taskbar: the number diskpart and Disk Management call it by.
+            let label = number.map_or_else(|| letters.first().cloned().unwrap_or("disk".into()), |n| format!("disk{n}"));
             Disk {
                 instance: instance.clone(),
                 label,
+                id: number.map_or_else(|| instance.clone(), |n| format!(r"\\.\PhysicalDrive{n}")),
                 model: number.and_then(disk_model).unwrap_or_default(),
                 volumes: letters.iter().map(|l| (l.clone(), free_space(l).0, free_space(l).1)).collect(),
                 system: windows.as_ref().is_some_and(|w| letters.iter().any(|l| l.eq_ignore_ascii_case(w))),
@@ -191,6 +195,11 @@ pub struct Nic {
     /// The counter instance (the description, spelled the counters' way).
     pub instance: String,
     pub label: String,
+    /// What Windows calls the interface inside: its LUID's name, `ethernet_32773`.
+    pub id: String,
+    /// The interfaces of its type with a lower LUID index and no counters to read, so no bar: why it's `eth5` on a PC
+    /// with one adapter.
+    pub earlier: Vec<String>,
     /// "Wi-Fi", as Windows' settings call it, and what it is ("Intel(R) Wi-Fi 6E AX211 160MHz").
     pub name: String,
     pub description: String,
@@ -215,6 +224,7 @@ fn instance_name(description: &str) -> String {
 pub fn nics(instances: &[String]) -> Vec<Nic> {
     let internet = internet_interface();
     let adapters = adapters();
+    let all = interfaces();
     let mut taken: HashMap<String, usize> = HashMap::new();
     instances
         .iter()
@@ -222,13 +232,16 @@ pub fn nics(instances: &[String]) -> Vec<Nic> {
         .map(|instance| {
             let a = adapters.iter().find(|a| instance_name(&a.description).eq_ignore_ascii_case(instance));
             let kind = a.map_or_else(|| short_kind(0, instance, instance), |a| short_kind(a.if_type, &a.name, &a.description));
-            // ETH, ETH2, ...
+            // eth5, wlan0; ETH, ETH2, ... should an adapter have no LUID name to go by.
             let n = taken.entry(kind.to_string()).or_default();
             *n += 1;
-            let label = if *n == 1 { kind.to_string() } else { format!("{kind}{n}") };
+            let fallback = if *n == 1 { kind.to_string() } else { format!("{kind}{n}") };
+            let id = a.map_or_else(String::new, |a| a.luid_name.clone());
             Nic {
                 instance: instance.clone(),
-                label,
+                label: short_interface(&id).unwrap_or(fallback),
+                earlier: earlier_interfaces(&id, &all, instances),
+                id,
                 name: a.map_or_else(|| instance.clone(), |a| a.name.clone()),
                 description: a.map_or_else(String::new, |a| a.description.clone()),
                 speed: a.map_or(0, |a| a.speed),
@@ -237,6 +250,66 @@ pub fn nics(instances: &[String]) -> Vec<Nic> {
             }
         })
         .collect()
+}
+
+/// Every interface Windows has numbered, hidden ones included (`GetAdaptersAddresses` leaves many out), as its LUID's
+/// name and description. Filter drivers, stacked on real adapters, aren't interfaces in their own right.
+fn interfaces() -> Vec<(String, String)> {
+    const FILTER_INTERFACE: u8 = 1 << 1;
+    let text = |wide: &[u16]| String::from_utf16_lossy(&wide[..wide.iter().position(|&c| c == 0).unwrap_or(wide.len())]);
+    let mut table = std::ptr::null_mut();
+    if unsafe { GetIfTable2(&mut table) }.is_err() || table.is_null() {
+        return Vec::new();
+    }
+    let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
+    let mut out = Vec::new();
+    for row in rows.iter().filter(|r| r.InterfaceAndOperStatusFlags._bitfield & FILTER_INTERFACE == 0) {
+        let mut name = [0u16; 257];
+        if unsafe { ConvertInterfaceLuidToNameW(&row.InterfaceLuid, &mut name) }.is_ok() {
+            out.push((text(&name), text(&row.Description)));
+        }
+    }
+    unsafe { FreeMibTable(table as *const _) };
+    out
+}
+
+/// The interfaces of `id`'s type with a lower LUID index, in order, as the lines of a table for a fixed-width font: its
+/// headings, then `eth1  ethernet_32769  Microsoft Kernel Debug Network Adapter`. One with a `\Network Interface(*)`
+/// instance isn't among them: it gets a bar of its own when it's active.
+fn earlier_interfaces(id: &str, all: &[(String, String)], instances: &[String]) -> Vec<String> {
+    let parts = |name: &str| name.rsplit_once('_').and_then(|(kind, n)| Some((kind.to_string(), n.parse::<u32>().ok()?)));
+    let Some((kind, number)) = parts(id) else { return Vec::new() };
+    let counted = |description: &str| instances.iter().any(|i| i.eq_ignore_ascii_case(&instance_name(description)));
+    let mut before: Vec<(u32, &str, &str)> = all
+        .iter()
+        .filter(|(_, description)| !counted(description))
+        .filter_map(|(name, description)| parts(name).filter(|(k, n)| *k == kind && *n < number).map(|(_, n)| (n, name.as_str(), description.as_str())))
+        .collect();
+    before.sort();
+    before.dedup_by_key(|b| b.0);
+    if before.is_empty() {
+        return Vec::new();
+    }
+    let head = ["PMS shorthand", "LUID name", "Description"].map(String::from);
+    let rows: Vec<[String; 3]> = before.iter().map(|(_, name, description)| [short_interface(name).unwrap_or_else(|| name.to_string()), name.to_string(), description.to_string()]).collect();
+    let width = |column: usize| std::iter::once(&head).chain(&rows).map(|r| r[column].chars().count()).max().unwrap_or(0);
+    let (first, second) = (width(0), width(1));
+    std::iter::once(&head).chain(&rows).map(|[a, b, c]| format!("{a:<first$}  {b:<second$}  {c}")).collect()
+}
+
+/// An interface's LUID name, short enough for the taskbar: `ethernet_32773` is `eth5`, `wireless_32768` is `wlan0`.
+/// (Windows numbers the interfaces it assigns from 32768, so that's the zero.)
+fn short_interface(luid_name: &str) -> Option<String> {
+    let (kind, number) = luid_name.rsplit_once('_')?;
+    let number: u32 = number.parse().ok()?;
+    let kind = match kind {
+        "ethernet" => "eth",
+        "wireless" => "wlan",
+        "tunnel" => "tun",
+        "loopback" => "lo",
+        other => other,
+    };
+    Some(format!("{kind}{}", number.checked_sub(32768).unwrap_or(number)))
 }
 
 /// A short label by the kind of interface: WiFi, ETH, vETH (Hyper-V's virtual switches), CELL, VPN, BT, NET.
@@ -259,6 +332,8 @@ fn short_kind(if_type: u32, name: &str, description: &str) -> &'static str {
 struct Adapter {
     /// IPv4 and IPv6 interface indexes.
     indexes: [u32; 2],
+    /// Its interface LUID's name: `ethernet_32773`, `wireless_32768`.
+    luid_name: String,
     if_type: u32,
     name: String,
     description: String,
@@ -290,8 +365,12 @@ fn adapters() -> Vec<Adapter> {
             }
             u = addr.Next;
         }
+        let mut luid_name = [0u16; 257];
+        let named = unsafe { ConvertInterfaceLuidToNameW(&a.Luid, &mut luid_name) }.is_ok();
+        let luid_name = if named { String::from_utf16_lossy(&luid_name[..luid_name.iter().position(|&c| c == 0).unwrap_or(0)]) } else { String::new() };
         out.push(Adapter {
             indexes: [unsafe { a.Anonymous1.Anonymous.IfIndex }, a.Ipv6IfIndex],
+            luid_name,
             if_type: a.IfType,
             name: unsafe { a.FriendlyName.to_string() }.unwrap_or_default(),
             description: unsafe { a.Description.to_string() }.unwrap_or_default(),
@@ -431,6 +510,23 @@ mod tests {
     fn counter_spelling() {
         assert_eq!(instance_name("Intel(R) Ethernet Connection #2 I219-V"), "Intel[R] Ethernet Connection _2 I219-V");
         assert_eq!(short_kind(71, "Wi-Fi", "Intel(R) Wi-Fi 6E AX211"), "WiFi");
+        let all = [("ethernet_32773", "Mine"), ("ethernet_32770", "WAN Miniport (IP)"), ("ethernet_32769", "Kernel Debug"), ("wireless_32768", "Wi-Fi"), ("ethernet_32774", "Later")];
+        let all: Vec<(String, String)> = all.iter().map(|(n, d)| (n.to_string(), d.to_string())).collect();
+        assert_eq!(
+            earlier_interfaces("ethernet_32773", &all, &[]),
+            [
+                "PMS shorthand  LUID name       Description",
+                "eth1           ethernet_32769  Kernel Debug",
+                "eth2           ethernet_32770  WAN Miniport (IP)"
+            ]
+        );
+        assert!(earlier_interfaces("wireless_32768", &all, &[]).is_empty());
+        // One with counters gets a bar of its own, spelled the counters' way.
+        assert_eq!(earlier_interfaces("ethernet_32773", &all, &["WAN Miniport [IP]".to_string()])[1..], ["eth1           ethernet_32769  Kernel Debug"]);
+        assert_eq!(short_interface("ethernet_32773").as_deref(), Some("eth5"));
+        assert_eq!(short_interface("wireless_32768").as_deref(), Some("wlan0"));
+        assert_eq!(short_interface("tunnel_32512").as_deref(), Some("tun32512"));
+        assert_eq!(short_interface(""), None);
         assert_eq!(short_kind(6, "Bluetooth Network Connection", "Bluetooth Device (Personal Area Network)"), "BT");
         assert_eq!(short_kind(6, "vEthernet (Default Switch)", "Hyper-V Virtual Ethernet Adapter"), "vETH");
         assert_eq!(link_speed(1_200_000_000), "1.2 Gb/s");

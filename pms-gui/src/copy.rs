@@ -10,7 +10,8 @@ pub fn setting(id: &str) -> (&str, &str) {
     match id {
         // General
         "theme" => ("Theme", "Choose dark or light for the taskbar's look, or follow your Windows mode"),
-        "meter_height" => ("Meter height", "How much of the taskbar's height meters use"),
+        "meter_height" => ("Meter height", "How much of the taskbar's height pies, graphs, and gauges use"),
+        "bar_height" => ("Bar height", "How much of the taskbar's height meters made of bars use"),
         "interval_ms" => ("Update interval", "How often meters refresh, unless a meter has its own interval"),
         "software_gpus" => ("Include software graphics adapters", "Count Microsoft Basic Render Driver, which runs on the CPU, in GPU meters"),
         "max_fps" => ("Limit animation frame rate", "Cap ongoing animations, such as the microphone alert. When it's off, they run at your display's refresh rate"),
@@ -107,6 +108,7 @@ pub fn setting(id: &str) -> (&str, &str) {
             "Display time",
             "How long a notification stays in front, or at most 4 seconds if more are waiting. Those that ask for longer get at least 25 seconds. Alarms, calls, and reminders stay until you respond",
         ),
+        "toasts.confirm_clicks" => ("Ask before opening", "When you select a notification, show what it's about to open and let you say no. A window has room for every detail"),
         "toasts.style" => ("Card style", "Standard matches Windows. Pimped turns cards gold, with a sheen that sweeps across them"),
         "toasts.ignore" => ("Excluded apps", "Apps that keep their standard pop-ups. Enter part of an app's name or ID"),
 
@@ -121,29 +123,23 @@ pub fn key(id: &str) -> &str {
     parts.next().unwrap_or(first)
 }
 
+/// Why the classic window is showing, where nobody asked for it.
+pub const CLASSIC_NO_RUNTIME: &str = "You're seeing the classic settings window because this PC doesn't have the Windows App Runtime 2.4 or later, which the new window needs. It's a Microsoft component that PimpMyShell doesn't install for you. Every setting works the same here.";
+pub const CLASSIC_FAILED: &str = "You're seeing the classic settings window because the new window couldn't start on this PC. Every setting works the same here.";
+pub const RUNTIME_DOWNLOAD: (&str, &str) = ("Get the Windows App Runtime", "https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads");
+
 /// What's in the logs, and what isn't (logfile.rs, and the daemon's lines on toasts).
 pub const LOG_PRIVACY: &str = "Logs can include app and file names and error details. We leave out your Windows user name and what your notifications say, but check a log before you share it.";
 
 /// The small print for what floats behind the settings window (dollars.rs).
-pub const LEGAL: &str = "NOTICE REGARDING BACKGROUND IMAGERY. The words \"BUY $MSFT\" and all depictions of currency displayed in \
-the background of this window (collectively, the \"Background\") are decorative, are provided solely for purposes of \
-entertainment, and do not constitute, and shall not be construed as, financial, investment, legal, tax, or accounting advice, \
-or as an offer, solicitation, or recommendation to purchase, sell, or hold any security or other financial instrument. The \
-authors and contributors of PimpMyShell (the \"Authors\") are not registered investment advisers, broker-dealers, or \
-fiduciaries, assume no duty to you in respect of the Background, and make no representation or warranty of any kind, express \
-or implied, as to the merit, suitability, or future performance of any investment. Past performance is not indicative of \
-future results. All investments involve risk, including the possible loss of principal. You are solely responsible for your \
-own investment decisions and should consult a qualified, licensed professional before making them. To the fullest extent \
-permitted by applicable law, the Authors disclaim all liability for any loss or damage arising from or in connection with \
-any reliance on the Background. The Authors may or may not hold positions in the security referenced herein and are under no \
-obligation to disclose or update the same. \"MSFT\" is the ticker symbol of Microsoft Corporation, which is not affiliated \
-with, and has neither sponsored nor endorsed, PimpMyShell or the Background.";
+pub const LEGAL: &str = include_str!("legal.txt");
 
 /// Choices: each value as the file has it, and what the window calls it.
 pub const THEMES: &[(&str, &str)] = &[("auto", "Use my Windows mode"), ("dark", "Dark"), ("light", "Light")];
 pub const HEIGHTS: &[(&str, &str)] = &[("compact", "Compact (75%)"), ("tall", "Tall (88%)"), ("full", "Full")];
 pub const CHANNELS: &[(&str, &str)] = &[("stable", "Stable"), ("latest", "Latest")];
 pub const TOAST_STYLES: &[(&str, &str)] = &[("standard", "Standard"), ("pimped", "Pimped")];
+pub const CONFIRMS: &[(&str, &str)] = &[("card", "In the notification"), ("window", "In a window"), ("off", "Don't ask")];
 pub const STYLES: &[(&str, &str)] = &[
     ("history", "History graph"),
     ("bar", "Bar"),
@@ -179,6 +175,31 @@ pub const TOASTS: (&str, &str) = ("Notifications", "Show notifications in the ta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// UTF-8 read as Windows-1252 and saved again turns a middle dot, a bullet or a dash into pairs of odd letters. It still
+    /// builds and runs, so nothing else would notice. (The pairs are spelled out by code point, or this file would trip.)
+    #[test]
+    fn no_garbled_text() {
+        let garbled = [['\u{c2}', '\u{b7}'], ['\u{e2}', '\u{2014}'], ['\u{e2}', '\u{20ac}'], ['\u{c3}', '\u{a9}']].map(|p| p.iter().collect::<String>());
+        let sources = [
+            ("main.rs", include_str!("main.rs")),
+            ("winui.rs", include_str!("winui.rs")),
+            ("model.rs", include_str!("model.rs")),
+            ("copy.rs", include_str!("copy.rs")),
+            ("dollars.rs", include_str!("dollars.rs")),
+            ("tooltip.rs", include_str!("../../pms-tap/src/tooltip.rs")),
+            ("meters.rs", include_str!("../../pms-tap/src/meters.rs")),
+            ("toast.rs", include_str!("../../pms-tap/src/toast.rs")),
+            ("daemon meters.rs", include_str!("../../pms/src/meters.rs")),
+            ("notices.rs", include_str!("../../pms/src/notices.rs")),
+            ("tray.rs", include_str!("../../pms/src/tray.rs")),
+        ];
+        for (name, text) in sources {
+            for g in &garbled {
+                assert!(!text.contains(g.as_str()), "{name} has garbled text: {g}");
+            }
+        }
+    }
 
     #[test]
     fn keys_and_style() {

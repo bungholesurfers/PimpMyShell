@@ -11,3 +11,23 @@
 # The release key's secret half never goes in the repository (pms-release keygen won't write it in one anyway).
 *.key
 *signing-key*
+
+# A user's own files, in a public repository: a config, its whole-file backup from before layering, one a save left
+# behind, and a report. (pms.example.toml and pms/shipped/*.toml are ours, and don't match.)
+/pms.toml
+*.toml.full.bak
+*.toml.tmp
+pms-report.txt
+
+# Crash dumps hold what was in memory, and this one injects into Explorer.
+*.dmp
+
+# Keys in other clothes.
+*.pem
+*.pfx
+
+# Editors and Windows.
+.vs/
+.vscode/
+Thumbs.db
+desktop.ini

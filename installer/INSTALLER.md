@@ -19,11 +19,13 @@ VERSION is the workspace's version, in the root `Cargo.toml` (`[workspace.packag
 - the three exes, the TAP DLL, `pms.example.toml` and `LICENSE.txt`;
 - a Start menu shortcut, **PimpMyShell**, to the settings (and a desktop one, if ticked);
 - an entry in Settings > Apps, under a fixed AppId, so each version installs over the last;
-- the task *Start PimpMyShell when I sign in*, ticked by default: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `PimpMyShell`, which is also what the settings' **start at sign-in** writes.
+- the task *Start PimpMyShell when I sign in*, ticked by default: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `PimpMyShell`, which is also what the settings' **start at sign-in** writes. A silent update leaves it as it is, and the wizard shows how it is now.
 
-Before copying files it asks a running daemon to stop (which puts the stock taskbar back), then closes any that are left, and the settings window too. A silent install (an update) starts the daemon again if it had been running.
+The wizard is dark whatever Windows is set to. Behind every page is the settings' tile of bills, with the box on it, which `cargo xtask art` draws into `installer/art`, from vectors, once for each display scale at the exact size Inno Setup's help gives (any other size gets stretched on the way to the screen); beside the buttons is the notice it needs, from `pms-gui/src/legal.txt`, which the settings show too.
 
-The config, `%APPDATA%\PimpMyShell\pms.toml` (roaming; before 0.1.3 it was in `%LOCALAPPDATA%\PimpMyShell`, and one there moves over the first time), belongs to the user: the daemon writes the example there the first time, if there's none, and the uninstaller leaves it. The logs and the machine's own notes stay in `%LOCALAPPDATA%\PimpMyShell`. Uninstalling also removes the Run value (whichever of them wrote it) and Task Manager's on/off mark for it.
+Before copying files it asks a running daemon to stop (which puts the stock taskbar back), then closes any that are left, and the settings window too. A silent install (an update) starts the daemon again if it had been running, and the settings if they were open. Settings that close themselves to install an update pass `/SETTINGS=1`, because the installer can't see them by then.
+
+The config, `%APPDATA%\PimpMyShell\pms.toml` (only what the user changed, on top of the shipped defaults; roaming; before 0.1.3 it was in `%LOCALAPPDATA%\PimpMyShell`, and one there moves over the first time), belongs to the user: the daemon writes the example there the first time, if there's none, and the uninstaller leaves it. The logs and the machine's own notes stay in `%LOCALAPPDATA%\PimpMyShell`. Uninstalling also removes the Run value (whichever of them wrote it) and Task Manager's on/off mark for it.
 
 A development build (run from `target\release`) and an installed copy can live side by side, but only one daemon at a time. If autostart was switched on from a development build, installing with the task ticked points it at the installed copy.
 

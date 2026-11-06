@@ -1,9 +1,10 @@
-//! The log files in `%LOCALAPPDATA%\PimpMyShell`, kept small: once one passes `MAX` bytes it starts over, the full
+//! The log files in `%APPDATA%\PimpMyShell\logs` (where VS Code keeps its own: `%APPDATA%\Code\logs`), kept small: once
+//! one passes `MAX` bytes it starts over, the full
 //! one kept beside it as `NAME.1.log` and the one before that as `NAME.2.log`, so each log holds at most three
 //! files, about 3 MB.
 //!
 //! Nothing here deletes a file outright. The oldest generation goes only by the next one being renamed over it, and
-//! the only paths ever touched are the fixed names below, in `data_dir()`, and only while each is a plain file (not
+//! the only paths ever touched are the fixed names below, in `dir()`, and only while each is a plain file (not
 //! a folder, nor a link to somewhere else).
 //!
 //! People send these files to others, so no line keeps the Windows user name: see `redact`.
@@ -36,7 +37,24 @@ impl Log {
 
     /// The current file.
     pub fn path(self) -> PathBuf {
-        data_dir().join(self.names()[0])
+        dir().join(self.names()[0])
+    }
+}
+
+/// Where the logs live.
+pub fn dir() -> PathBuf {
+    std::env::var_os("APPDATA").map_or_else(|| data_dir().join("logs"), |d| PathBuf::from(d).join("PimpMyShell").join("logs"))
+}
+
+/// Brings the logs from where they were before 0.1.4 (`data_dir()`): each moves, unless one has started in its place.
+pub fn move_old() {
+    let new = dir();
+    let _ = std::fs::create_dir_all(&new);
+    for name in [Log::Daemon, Log::Tap].iter().flat_map(|l| l.names()) {
+        let (from, to) = (data_dir().join(name), new.join(name));
+        if std::fs::symlink_metadata(&from).is_ok_and(|m| m.file_type().is_file()) && !to.exists() {
+            let _ = std::fs::rename(from, to);
+        }
     }
 }
 
@@ -107,8 +125,7 @@ fn redact_for(line: &str, profile: &str, user: &str) -> String {
 pub fn append(log: Log, line: &str) {
     let line = redact(line);
     let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = data_dir();
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::create_dir_all(dir());
     let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log.path()) else { return };
     let _ = writeln!(f, "{line}");
     let full = f.metadata().is_ok_and(|m| m.len() > MAX);
@@ -122,8 +139,8 @@ pub fn append(log: Log, line: &str) {
 /// taken - a file held open by another process, say - leaves the files as they are, to be tried again on the next
 /// line; a name that isn't a plain file stops it altogether.
 fn rotate(log: Log) {
-    let dir = data_dir();
-    let [current, older, oldest] = log.names().map(|n| dir.join(n));
+    let folder = dir();
+    let [current, older, oldest] = log.names().map(|n| folder.join(n));
     let plain_or_absent = |p: &PathBuf| match std::fs::symlink_metadata(p) {
         Ok(m) => m.file_type().is_file(),
         Err(e) => e.kind() == std::io::ErrorKind::NotFound,

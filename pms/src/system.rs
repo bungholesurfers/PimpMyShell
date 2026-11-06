@@ -65,7 +65,8 @@ fn third_party(path: &str, windows: &str) -> bool {
     let (path, windows) = (path.to_lowercase(), windows.to_lowercase());
     let of_windows = path.strip_prefix(&format!("{windows}\\")).is_some_and(|rest| rest.contains('\\') || rest == "explorer.exe");
     let file = path.rsplit('\\').next().unwrap_or("");
-    !(of_windows || path.contains("\\windowsapps\\microsoft") || file.starts_with("pms_tap"))
+    // Windows' own folders in Program Files too: Windows Photo Viewer, Windows Defender, ...
+    !(of_windows || path.contains("\\windowsapps\\microsoft") || path.contains("\\program files\\windows ") || file.starts_with("pms_tap"))
 }
 
 fn text(wide: &[u16]) -> String {
@@ -196,6 +197,46 @@ pub fn shell_report(pid: u32) -> Vec<String> {
     ]
 }
 
+/// A log line without what a notification said: lines from before 0.1.4 had its title, and the link it opened.
+fn without_notification(line: &str) -> String {
+    if let Some(at) = line.find("toast from ").filter(|_| !line.contains("showing toast from"))
+        && let Some(colon) = line[at..].find(": ")
+    {
+        return line[..at + colon].to_string();
+    }
+    match line.find("toast click: opened ") {
+        Some(at) => format!("{}toast click: opened a link", &line[..at]),
+        None => line.to_string(),
+    }
+}
+
+/// Saves what a developer would need to see into the logs folder, and returns the file. Every line goes through the
+/// logs' redaction, and loses what any notification said.
+pub fn write_report(config: &Path) -> Result<std::path::PathBuf, String> {
+    use pms_tap::logfile::{self, Log};
+    let tail = |path: std::path::PathBuf, lines: usize| {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let all: Vec<&str> = text.lines().collect();
+        all[all.len().saturating_sub(lines)..].join("\n")
+    };
+    let mut report = vec![format!("PimpMyShell {} on {}", crate::version::CURRENT, windows_version())];
+    report.extend(shell_pid().into_iter().flat_map(shell_report));
+    for (title, body) in [
+        ("Settings (pms.toml)", std::fs::read_to_string(config).unwrap_or_default()),
+        ("daemon.log", tail(Log::Daemon.path(), 400)),
+        ("tap.log", tail(Log::Tap.path(), 200)),
+        ("The taskbar's layout (tree.txt)", std::fs::read_to_string(pms_tap::data_dir().join("tree.txt")).unwrap_or_default()),
+    ] {
+        report.push(format!("\n===== {title} =====\n{body}"));
+    }
+    let text: Vec<String> = report.join("\n").lines().map(|l| logfile::redact(&without_notification(l))).collect();
+    let dir = logfile::dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join("pms-report.txt");
+    std::fs::write(&file, text.join("\n")).map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,7 +266,19 @@ mod tests {
         assert!(!is(r"C:\WINDOWS\System32\ntdll.dll") && !is(r"C:\Windows\explorer.exe"));
         assert!(!is(r"C:\Windows\ShellExperiences\TileControl.dll") && !is(r"C:\Windows\ShellComponents\WindowsInternal.ShellUI.dll"));
         assert!(!is(r"C:\Users\x\AppData\Local\PimpMyShell\pms_tap-1.dll"));
+        assert!(!is(r"C:\Program Files\Windows Photo Viewer\PhotoViewer.dll"));
         assert!(!is(r"C:\Program Files\WindowsApps\Microsoft.VCLibs.140\vcruntime140.dll"));
+    }
+
+    #[test]
+    fn a_report_leaves_out_what_notifications_said() {
+        assert_eq!(without_notification("17:27:58 toast from Telegram: Alice sent you a photo"), "17:27:58 toast from Telegram");
+        assert_eq!(without_notification("12:00:00 toast click: opened tg://resolve?domain=alice"), "12:00:00 toast click: opened a link");
+        assert_eq!(without_notification("12:00:00 toast from Telegram"), "12:00:00 toast from Telegram");
+        // An error is what a report is for.
+        let error = "12:00:00 showing toast from Telegram: error: no Grid";
+        assert_eq!(without_notification(error), error);
+        assert_eq!(without_notification("12:00:00 applied config to tap=1"), "12:00:00 applied config to tap=1");
     }
 
     #[test]

@@ -70,7 +70,7 @@ const HELP: &str = r#"commands:
   meters add label=.. style=history|bar|pie|cores|engines|bars|devices color=#.. [colors=#..,#..]
              [max=N] [wide=..] ..   add a meter cell (all its key=value fields: pms-tap/src/meters.rs)
   meters push <i> <text> [<v> ..]   one sample for meter i
-  meters sep | presence <i> on|off | height compact|tall|full | mic <apps>|off | micmute 0|1
+  meters sep | presence <i> on|off | height compact|tall|full [<bars>] | mic <apps>|off | micmute 0|1
   meters bars <i> <name>.. | gpustate <i> .. | tip|bartips|devtips <i> <text>..   (tooltips)
   meters clear|off | status         (normally driven by the daemon, from pms.toml)
 

@@ -68,16 +68,23 @@ it needs the real thing to be there.
 
 ## Using it
 
-Your settings live in `%APPDATA%\PimpMyShell\pms.toml`, in the roaming profile, so they follow you to another PC. The
-first run writes it from `pms.example.toml`, which explains every option. Edit it by hand or in the settings window
-(left-click the tray icon). The daemon picks up changes within a second. (Before 0.1.3 it lived in
-`%LOCALAPPDATA%\PimpMyShell`; one there moves over by itself the first time.)
+Your settings live in `%APPDATA%\PimpMyShell\pms.toml`, in the roaming profile, so they follow you to another PC. It holds
+only what you've changed; everything else comes from the defaults, so better defaults still reach you with an update.
+`pms.example.toml` is those defaults, and explains every option. Edit it by hand or in the settings window (left-click
+the tray icon). The daemon picks up changes within a second. (Before 0.1.3 it lived in `%LOCALAPPDATA%\PimpMyShell`; one
+there moves over by itself the first time. Before 0.1.4 it held every setting: the first run keeps only what differs from
+every default we've shipped, and the whole file stays beside it as `pms.toml.full.bak`.)
 
 The settings window is a WinUI 3 one (the Settings app's look: a pane of pages and a card per setting, over acrylic with dollar bills and sound investment advice drifting through the pane and blurred behind the settings, which, per the General page, is not investment advice) wherever the
 PC has Microsoft's Windows App Runtime, which many PCs have from Store apps; PimpMyShell doesn't install it. Without it,
 the same `pms-gui.exe` shows the classic (egui) window, which edits the same settings the same way; `pms-gui --egui`
 asks for that one anyway, and each window has a button that opens the other. PimpMyShell's questions (software update's,
 a notice's explanation, *Install X*) come as small windows of the same look where it can, else as task dialogs.
+
+A first run on a new config opens a short welcome: how notifications should look, whether to ask before they open
+anything, updates, and starting at sign-in. The General page has it again. Every part of the settings has a Reset, with a
+confirmation, in both windows. A reset leaves your own decisions alone, and says which: whether to check for updates,
+taskbar notifications being off, Ask before opening, and the lists of apps you've excluded.
 
 The tray icon's menu:
 
@@ -89,6 +96,7 @@ The tray icon's menu:
 | Start when I sign in | the HKCU Run value, on or off |
 | Check for updates | checks now; once a new version is downloaded and checked, *Install PimpMyShell X…* (asks first); a portable copy offers *PimpMyShell X is available…*, which opens its page |
 | Open log | `daemon.log` in Notepad |
+| Save a report | saves `pms-report.txt` beside the logs, shows it, and offers to open GitHub (issues there are public) |
 | Exit | stops the daemon, which puts the standard taskbar back |
 
 Toasts need notification access. Windows asks the first time; it lives under Settings > Privacy & security >
@@ -122,12 +130,13 @@ What it touches, all under your own user (no admin, no services, no drivers):
   notified, Windows has filled the key in and it stays, as it would have anyway.
 - **`HKCU\Control Panel\NotifyIconSettings`**: on the first start of each copy (each exe path), the tray icon is
   promoted out of the overflow, once (`tray-pinned.txt` remembers). Hide it again and it stays hidden.
-- **`%APPDATA%\PimpMyShell`**: `pms.toml`, and `pms.toml.bak` (the settings window's copy of it from before its first
-  save).
-- **`%LOCALAPPDATA%\PimpMyShell`**: this PC's own files: the logs (`daemon.log` and `tap.log`, each rotated at 1 MB with two
-  older generations kept, `daemon.1.log` and `daemon.2.log`; about 3 MB each at most), `banners.txt`, `tree.txt` (a
+- **`%APPDATA%\PimpMyShell`**: `pms.toml`, `pms.toml.bak` (the settings window's copy of it from before its first save),
+  `pms.toml.full.bak` (the whole file, from before it held only your changes), and `logs` (`daemon.log` and `tap.log`, each
+  rotated at 1 MB with two older generations kept, `daemon.1.log` and `daemon.2.log`; about 3 MB each at most; where VS
+  Code keeps its own, `%APPDATA%\Code\logs`).
+- **`%LOCALAPPDATA%\PimpMyShell`**: this PC's own files: `banners.txt`, `tree.txt` (a
   dump of the taskbar's visual tree), `update-checked.txt` (when updates were last checked), `taskbar-told.txt` (whose
-  replaced taskbar we've explained, so that it's only once), `pms-128.png`,
+  replaced taskbar we've explained, so that it's only once), `welcomed.txt` (the welcome has been offered), `pms-128.png`,
   `tray-pinned.txt`, and `pms_tap-<stamp>.dll` copies (see below).
 - **`%TEMP%\pms-update`**: a downloaded update, until it's installed.
 
@@ -362,6 +371,13 @@ App names come from the exe's `FileDescription` or the package's display name. W
 every active capture endpoint's `IAudioMeterInformation` peak about 15 times a second, plus the default endpoint's mute,
 and feeds them to the alert. Apps that mute themselves (Discord, Teams) still read as live: Windows can't see that.
 
+### Device names
+
+The taskbar names devices the way Windows does inside. A network interface goes by its LUID's name, the closest thing
+Windows has to Linux's `eth0`: `ethernet_32773` (what `Get-NetAdapter` calls `InterfaceName`) shows as `eth5`, and
+`wireless_32768` as `wlan0`, counting from the 32768 that Windows starts at. A disk goes by its device name:
+`\\.\PhysicalDrive0` shows as `disk0`, the number diskpart and Disk Management use. The tooltips give the full names.
+
 ### Toasts
 
 - **Source.** `UserNotificationListener` works unpackaged once you allow notification access. Its change event needs
@@ -378,6 +394,10 @@ and feeds them to the alert. Apps that mute themselves (Discord, Teams) still re
   notification. The taskbar gets another try after 5 minutes, then after twice as long each time it refuses, up to an
   hour; the first toast it shows ends all that. Cards and meter tooltips go in the nearest Grid above the tray, which is normally its parent; if not, the
   TAP's log names what's between them.
+- **When something keeps failing.** Three failures in a row to set up or feed the meters raise a notice asking for a
+  report: your Windows version, the logs and settings, and the taskbar's layout, redacted like the logs. *Save a report* in
+  the tray menu makes the same file any time. Nothing is sent: the report is saved beside the logs, and a window explains
+  that GitHub issues are public before offering to open GitHub.
 - **Reports.** The daemon's log starts with the Windows version, then, for each explorer, the versions of what we hook
   (`explorer.exe`, `Taskbar.dll`, `Taskbar.View.dll`, `Windows.UI.Xaml.dll`), the taskbar software it knows, and every
   third-party DLL in explorer. File names and versions only, not paths. Both logs leave out your Windows user name
@@ -408,7 +428,13 @@ and feeds them to the alert. Apps that mute themselves (Discord, Teams) still re
   that dismisses it, like its x. Otherwise it springs back (a composition spring, carrying the release speed).
 - **Clicks and swipes** on a card are queued in the TAP with the card's id; the daemon collects them. A click on the card
   or a button activates the app the way Windows would: its `INotificationActivationCallback` COM activator, a protocol
-  URI, or launching the app; a swipe or the x just dismisses it. The card leaves at once; the next one's countdown starts when the daemon says (`toast front`).
+  URI, or launching a packaged app with the toast's arguments; a swipe or the x just dismisses it. An unpackaged app
+  with no activator can only hear of a click through a handler in its own process, which nothing outside it can reach,
+  so it's started as its Start menu entry would be.
+- **Asking first.** `confirm_clicks` under `[toasts]`: `"card"` turns the card itself into the question, with what it
+  would open and NO and YES; `"window"` asks in a window at the corner, with room for every path and argument; `"off"`
+  doesn't ask. *SHUT UP, COMPUTER* makes it `"off"`. A card that's asking stays until it's answered.
+- The card leaves at once; the next one's countdown starts when the daemon says (`toast front`).
 - Do not disturb and full-screen apps still hold toasts back (`SHQueryUserNotificationState`).
 
 ### The watchdog
@@ -460,7 +486,8 @@ Nothing installs without you saying so.
   is checked the same way: no other host, no user, no port. TLS against Mozilla's roots, bundled. Timeouts and a size
   cap on every response.
 - **Install.** The Inno Setup installer runs `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`. It stops the daemon, installs
-  over it, and starts it again if it was running. The new daemon swaps its TAP in for the old one (see the reconcile
+  over it, and starts it again if it was running, and the settings too if they were open. Start at sign-in stays as you
+  left it. The new daemon swaps its TAP in for the old one (see the reconcile
   loop above). The version goes into `tried.txt` first: if the install didn't take, the next check by itself says so
   (once a run) instead of looping; one you ask for downloads it again.
 - Only an installed copy (running from `%LOCALAPPDATA%\Programs\PimpMyShell`) updates itself. A portable or dev build
@@ -488,6 +515,10 @@ workflow's when there's no profile).
 
 The installer needs **Inno Setup 6**: `winget install --id JRSoftware.InnoSetup --scope user`. VERSION is the
 workspace's version, in the root `Cargo.toml` (`[workspace.package]`), which every crate takes.
+
+To see the meters with hardware you don't have, `pms demo intel+radeon` (or any of `intel`, `radeon`, `nvidia`,
+`snapdragon`, joined by `+`) pretends the PC has those GPUs, on a throwaway config, until Ctrl+C. `pms-gui --no-winui`
+shows the settings as a PC without the Windows App Runtime does.
 
 To try a fresh TAP by hand: stop the daemon first (`pms daemon stop`), then `pms inject`, then poke it with `pms`.
 Two TAPs racing for one pipe is no fun.

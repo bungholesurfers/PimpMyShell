@@ -19,6 +19,8 @@
 //! comes forward. The front card can be dragged: let go far enough right, or flicked right, it flies off (dismissed,
 //! as with its x); otherwise it springs back.
 //!
+//! A card can ask before it does what's clicked (`ask=`): its insides become the question, with NO and YES.
+//!
 //! Clicks and swipes are queued as events (`<id> open`, `<id> action <i>`, `<id> close`, `<id> swipe`) for the
 //! daemon, which owns the notifications and knows how to activate their apps; the card leaves right away, and the
 //! next one's countdown waits for the daemon's `toast front`. The daemon decides what to show and for how long;
@@ -32,7 +34,7 @@ use std::time::{Duration, Instant};
 use pms_xaml::{
     Border, ColumnDefinition, CornerRadius, ElementCompositionPreview, FontFamily, FrameworkElement, Grid, GridLength, GridUnitType,
     HorizontalAlignment, LineStackingStrategy, LoadedImageSurface, Orientation, Pointer, PointerEventHandler, PointerRoutedEventArgs,
-    Rectangle, SolidColorBrush, StackPanel, TappedEventHandler, TextBlock, TextTrimming, Thickness, UIElement, VerticalAlignment,
+    Rectangle, SolidColorBrush, StackPanel, TappedEventHandler, TextBlock, TextTrimming, Thickness, UIElement, VerticalAlignment, Visibility,
 };
 use windows::Foundation::{IReference, PropertyValue, TimeSpan, TypedEventHandler};
 use windows::Storage::Streams::IRandomAccessStream;
@@ -103,6 +105,8 @@ const GOLD_CARD: Color = Color { A: 0x34, R: 0xFF, G: 0xB8, B: 0x30 };
 const GOLD_HOVER: Color = Color { A: 0x50, R: 0xFF, G: 0xB8, B: 0x30 };
 const GOLD_BACK: Color = Color { A: 0x60, R: 0xFF, G: 0xB8, B: 0x30 };
 const SHEEN_MS: i64 = 3200;
+/// *Pimp hand!*: the note beside *Shut up, computer*, as in the window that asks.
+const PIMP_HAND: Color = Color { A: 0xFF, R: 0xFF, G: 0xD6, B: 0x00 };
 
 /// What `toast show` asks for; every field is optional (the daemon always gives the duration).
 #[derive(Default)]
@@ -122,6 +126,70 @@ struct Content {
     progress: Option<f64>,
     /// `style=pimped`: gold, with a sheen sweeping across.
     pimped: bool,
+    /// What to ask before each thing that can be clicked (`ask=`).
+    asks: Vec<Ask>,
+}
+
+/// A question the card asks in place of doing `what`, the name a click on it goes by: `open`, `action <i>`.
+struct Ask {
+    what: String,
+    question: String,
+    detail: String,
+}
+
+/// A card's way of asking: clicking what has an `Ask` turns its insides into the question and its answers. The daemon
+/// hears `<id> asking`, so that the card stays, and then the answer as an ordinary click, or `close` for no.
+#[derive(Clone)]
+struct Asker {
+    id: u32,
+    asks: Arc<Vec<Ask>>,
+    normal: UIElement,
+    panel: UIElement,
+    question: TextBlock,
+    detail: TextBlock,
+    countdown: Rectangle,
+    /// What's being asked about.
+    pending: Arc<Mutex<Option<String>>>,
+    quiet: Arc<AtomicBool>,
+}
+
+impl Asker {
+    fn tapped(&self, what: &str) {
+        if lock(&self.pending).is_some() {
+            return;
+        }
+        match self.asks.iter().find(|a| a.what == what) {
+            Some(ask) => {
+                if let Err(e) = self.ask(ask) {
+                    crate::log(format!("toast question: {e}"));
+                    clicked(self.id, what);
+                }
+            }
+            None => clicked(self.id, what),
+        }
+    }
+
+    fn ask(&self, ask: &Ask) -> R<()> {
+        self.question.SetText(&HSTRING::from(&ask.question)).map_err(w)?;
+        self.detail.SetText(&HSTRING::from(&ask.detail)).map_err(w)?;
+        self.normal.SetVisibility(Visibility::Collapsed).map_err(w)?;
+        self.panel.SetVisibility(Visibility::Visible).map_err(w)?;
+        let bar = visual(&ui(&self.countdown)?)?;
+        let _ = bar.StopAnimation(&HSTRING::from("Scale"));
+        bar.SetScale(Vector3 { X: 0.0, Y: 1.0, Z: 1.0 }).map_err(w)?;
+        *lock(&self.pending) = Some(ask.what.clone());
+        lock(&EVENTS).push(format!("{} asking", self.id));
+        Ok(())
+    }
+
+    /// The answer: `Some` of what was asked about for yes.
+    fn answer(&self, yes: bool) {
+        let Some(what) = lock(&self.pending).take() else { return };
+        if self.quiet.load(Ordering::Relaxed) {
+            lock(&EVENTS).push(format!("{} quiet", self.id));
+        }
+        clicked(self.id, if yes { &what } else { "close" });
+    }
 }
 
 /// One notification's card in the deck.
@@ -270,6 +338,12 @@ pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
                     "b" => c.buttons.push(v.into()),
                     "progress" => c.progress = v.parse().ok(),
                     "style" => c.pimped = v == "pimped",
+                    "ask" => {
+                        let mut parts = v.splitn(3, '\u{1f}').map(String::from);
+                        if let (Some(what), Some(question), Some(detail)) = (parts.next(), parts.next(), parts.next()) {
+                            c.asks.push(Ask { what, question, detail });
+                        }
+                    }
                     other => return Err(format!("unknown toast field `{other}`")),
                 }
             }
@@ -509,6 +583,90 @@ fn on_tap(e: &UIElement, id: u32, name: &str) -> R<()> {
     .map_err(w)
 }
 
+/// As `on_tap`, for what the card may ask about first.
+fn on_tap_asking(e: &UIElement, asker: &Asker, what: &str) -> R<()> {
+    let (asker, what) = (asker.clone(), what.to_string());
+    e.Tapped(&TappedEventHandler::new(move |_, args| {
+        if let Some(a) = args.as_ref() {
+            let _ = a.SetHandled(true);
+        }
+        if !DRAGGED.get() {
+            asker.tapped(&what);
+        }
+        Ok(())
+    }))
+    .map(drop)
+    .map_err(w)
+}
+
+/// A tap on `e`, for what isn't a click on the card.
+fn on_press(e: &UIElement, f: impl Fn() + Send + 'static) -> R<()> {
+    e.Tapped(&TappedEventHandler::new(move |_, args| {
+        if let Some(a) = args.as_ref() {
+            let _ = a.SetHandled(true);
+        }
+        if !DRAGGED.get() {
+            f();
+        }
+        Ok(())
+    }))
+    .map(drop)
+    .map_err(w)
+}
+
+/// What a card turns into to ask: the question and what it's about, *Shut up, computer*, NO and YES. Hidden until then.
+fn ask_panel(id: u32, c: &Content, normal: UIElement, countdown: Rectangle) -> R<(Grid, Asker)> {
+    let panel = Grid::new().map_err(w)?;
+    panel.SetColumnSpacing(10.0).map_err(w)?;
+    for star in [true, false, false, false] {
+        column(&panel, star)?;
+    }
+    let lines = StackPanel::new().map_err(w)?;
+    lines.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
+    lines.SetMargin(Thickness { Left: 0.0, Top: 0.0, Right: 0.0, Bottom: 3.0 }).map_err(w)?;
+    let question = text("", 12.5, 15.0, 600, if c.pimped { GOLD } else { TEXT })?;
+    let detail = text("", 11.0, 13.5, 400, TEXT_DIM)?;
+    lines.Children().map_err(w)?.Append(&ui(&question)?).map_err(w)?;
+    lines.Children().map_err(w)?.Append(&ui(&detail)?).map_err(w)?;
+    put(&panel, &ui(&lines)?, 0)?;
+
+    let quiet = Arc::new(AtomicBool::new(false));
+    let hush = StackPanel::new().map_err(w)?;
+    hush.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
+    let label = text("\u{2610} SHUT UP, COMPUTER", 9.5, 12.0, 600, TEXT_DIM)?;
+    let note = text("PIMP HAND!", 9.0, 11.0, 700, PIMP_HAND)?;
+    note.SetHorizontalAlignment(HorizontalAlignment::Right).map_err(w)?;
+    ui(&note)?.SetOpacity(0.0).map_err(w)?;
+    hush.Children().map_err(w)?.Append(&ui(&label)?).map_err(w)?;
+    hush.Children().map_err(w)?.Append(&ui(&note)?).map_err(w)?;
+    let (on, shown, tick) = (quiet.clone(), ui(&note)?, label.clone());
+    let hush_el = ui(&hush)?;
+    on_press(&hush_el, move || {
+        let now = !on.fetch_xor(true, Ordering::Relaxed);
+        let _ = tick.SetText(&HSTRING::from(if now { "\u{2611} SHUT UP, COMPUTER" } else { "\u{2610} SHUT UP, COMPUTER" }));
+        let _ = shown.SetOpacity(if now { 1.0 } else { 0.0 });
+    })?;
+    put(&panel, &hush_el, 1)?;
+
+    let no = button("NO")?;
+    let yes = button("YES")?;
+    yes.SetBackground(&brush(if c.pimped { GOLD_RIM } else { PROGRESS })?).map_err(w)?;
+    if let Ok(t) = yes.Child().and_then(|t| t.cast::<TextBlock>()) {
+        t.SetForeground(&brush(Color { A: 0xFF, R: 0, G: 0, B: 0 })?).map_err(w)?;
+    }
+    put(&panel, &ui(&no)?, 2)?;
+    put(&panel, &ui(&yes)?, 3)?;
+    let panel_el = ui(&panel)?;
+    panel_el.SetVisibility(Visibility::Collapsed).map_err(w)?;
+    let asks = c.asks.iter().map(|a| Ask { what: a.what.clone(), question: a.question.clone(), detail: a.detail.clone() }).collect();
+    let asker = Asker { id, asks: Arc::new(asks), normal, panel: panel_el, question, detail, countdown, pending: Arc::default(), quiet };
+    let answering = asker.clone();
+    on_press(&ui(&no)?, move || answering.answer(false))?;
+    let answering = asker.clone();
+    on_press(&ui(&yes)?, move || answering.answer(true))?;
+    Ok((panel, asker))
+}
+
 fn column(g: &Grid, star: bool) -> R<()> {
     let col = ColumnDefinition::new().map_err(w)?;
     let unit = if star { GridUnitType::Star } else { GridUnitType::Auto };
@@ -569,10 +727,11 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
             let _ = target.SetBackground(&b);
         }
     })?;
-    on_tap(&card_el, id, "open")?;
-
     let grid = Grid::new().map_err(w)?;
     grid.SetColumnSpacing(10.0).map_err(w)?;
+    let countdown = Rectangle::new().map_err(w)?;
+    let (panel, asker) = ask_panel(id, c, ui(&grid)?, countdown.clone())?;
+    on_tap_asking(&card_el, &asker, "open")?;
     for star in [false, true, false, false, false] {
         column(&grid, star)?;
     }
@@ -644,7 +803,7 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
         row.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
         for (i, label) in c.buttons.iter().enumerate() {
             let b = button(label)?;
-            on_tap(&ui(&b)?, id, &format!("action {i}"))?;
+            on_tap_asking(&ui(&b)?, &asker, &format!("action {i}"))?;
             row.Children().map_err(w)?.Append(&ui(&b)?).map_err(w)?;
             // Rough: ~6.5 DIPs per character at 11.5px, plus padding and spacing.
             want += ((label.chars().count() as f64 * 6.5 + 20.0).min(BUTTON_MAX_W) + 6.0) as f32;
@@ -675,7 +834,6 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
     put(&grid, &close_el, 4)?;
     want += 24.0 + 10.0;
 
-    let countdown = Rectangle::new().map_err(w)?;
     countdown.SetHeight(if c.progress.is_some() { 2.5 } else { 2.0 }).map_err(w)?;
     countdown.SetFill(&brush(match (c.progress.is_some(), c.pimped) {
         (true, _) => PROGRESS,
@@ -690,6 +848,9 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
 
     let outer = Grid::new().map_err(w)?;
     outer.Children().map_err(w)?.Append(&ui(&grid)?).map_err(w)?;
+    if !c.asks.is_empty() {
+        outer.Children().map_err(w)?.Append(&ui(&panel)?).map_err(w)?;
+    }
     outer.Children().map_err(w)?.Append(&ui(&countdown)?).map_err(w)?;
     card.SetChild(&ui(&outer)?).map_err(w)?;
     // A pimped card's logo glows, and ripples out, in gold.

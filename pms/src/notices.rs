@@ -61,6 +61,57 @@ pub fn notification_access() -> Notice {
 }
 
 /// Toasts couldn't start, for a reason other than notification access.
+/// Where a report goes: the fix that isn't a file or a page, but `save_report`.
+const REPORT: &str = "pms:report";
+/// A new issue, for a report to be attached to.
+const NEW_ISSUE: &str = "https://github.com/bungholesurfers/PimpMyShell/issues/new";
+
+/// Something that should work didn't (`what`, a sentence), more than once: we can't fix it from here, but whoever made
+/// this can, with a report. Said plainly, and with what's in the report, so that sending it is an informed choice.
+pub fn problem(what: &str, error: &str) -> Notice {
+    Notice {
+        key: "problem",
+        title: what.to_string(),
+        body: "A report would help us fix this. Select for details.".into(),
+        heading: "Help us fix this".into(),
+        detail: format!(
+            "{what}. It's nothing you did, and your taskbar is fine.\n\n\
+             A report usually tells us why. It has your Windows version, PimpMyShell's logs and settings, and the layout of \
+             your taskbar. It leaves out your Windows user name and what your notifications say.\n\n\
+             Select Save report to see it. Nothing is sent: you decide whether to post it.\n\nDetails: {error}"
+        ),
+        fix: Some(("Save report", REPORT.to_string())),
+        keep_native: false,
+        hint: "To help us fix it, select Save a report in PimpMyShell's menu in the system tray.".into(),
+        again: None,
+    }
+}
+
+/// Saves a report on the config at `config` and shows it in File Explorer. Every way to a report ends here, so this is
+/// where its owner hears what posting it means, and GitHub opens only if they choose it.
+pub fn save_report(config: &Path) {
+    match crate::system::write_report(config) {
+        Ok(file) => {
+            crate::log(format!("report saved: {}", file.display()));
+            let _ = std::process::Command::new("explorer.exe").arg("/select,").arg(&file).spawn();
+            if wants_to_post() {
+                let _ = crate::toasts::open(NEW_ISSUE);
+            }
+        }
+        Err(e) => crate::log(format!("couldn't save a report: {e}")),
+    }
+}
+
+/// What posting a report means, and whether to go ahead.
+pub fn wants_to_post() -> bool {
+    let text = "It's in the folder that just opened, and it hasn't been sent anywhere.\n\n\
+                GitHub issues are public: anyone can read and download what you attach, and search engines can find it. The \
+                report leaves out your Windows user name and what your notifications say, but it does have your settings, \
+                the names of apps that sent notifications, and your Windows version. Read it first, and remove anything \
+                you'd rather not share.\n\nYou need a GitHub account to post it.";
+    crate::tray::explain("Your report is saved", text, &["Open GitHub"]).is_some()
+}
+
 /// What PimpMyShell works with, in the README.
 const SUPPORTED: &str = "https://github.com/bungholesurfers/PimpMyShell#what-it-works-with";
 
@@ -110,9 +161,10 @@ pub fn toasts_refused(error: &str, around: &[&str]) -> Notice {
         detail: format!(
             "PimpMyShell couldn't show a notification in the taskbar, so notifications went back to standard pop-ups. \
              The ones that failed are in notification center. We'll try the taskbar again in a few minutes.\n\n\
-             {why}Details: {error}"
+             {why}A report would help us fix this. Select Save report to see it. Nothing is sent: you decide whether to \
+             post it.\n\nDetails: {error}"
         ),
-        fix: None,
+        fix: Some(("Save report", REPORT.to_string())),
         keep_native: false,
         hint: "They appear as standard pop-ups for now. The ones that failed are in notification center.".into(),
         again: None,
@@ -247,6 +299,9 @@ pub fn explain(n: &Notice) {
         Choice::KeepNative => crate::tray::queue(crate::tray::Command::KeepNativeToasts),
         Choice::Fix => {
             let Some((_, target)) = &n.fix else { return };
+            if target == REPORT {
+                return crate::tray::queue(crate::tray::Command::SaveReport);
+            }
             let opened = if target.contains(':') && !Path::new(target).is_absolute() {
                 crate::toasts::open(target)
             } else {

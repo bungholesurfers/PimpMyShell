@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(px[3], 0);
         assert_eq!(px[(24 * 48 + 24) * 4 + 3], 255);
         // The tall wizard picture into a thumbnail: filled, in the thumbnail's shape.
-        let (w, h, _) = decode(&png(&format!("{dir}/installer/art/wizard-164x314.png"), 96, 54, Fit::Cover).unwrap());
+        let (w, h, _) = decode(&png(&format!("{dir}/installer/art/wizard-202x386.png"), 96, 54, Fit::Cover).unwrap());
         assert_eq!((w, h), (96, 54));
         assert!(png(&format!("{dir}/nothing-here.png"), 48, 48, Fit::Contain).is_err());
     }

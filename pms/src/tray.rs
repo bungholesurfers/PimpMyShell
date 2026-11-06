@@ -44,6 +44,12 @@ pub enum Command {
     UpdateConsent(bool),
     /// Turn the taskbar's toasts off, notifications staying Windows' (asked from a notice: notices.rs).
     KeepNativeToasts,
+    /// *Shut up, computer*: stop asking before a notification opens something.
+    StopConfirmingClicks,
+    /// A notification did what it was clicked for: out of the notification center, as Windows does.
+    RemoveToast(u32),
+    /// Save what a developer would need to see, and show where it went.
+    SaveReport,
     Exit,
 }
 
@@ -89,6 +95,7 @@ const ID_PAUSE: usize = 2;
 const ID_RETRY: usize = 3;
 const ID_AUTOSTART: usize = 4;
 const ID_LOG: usize = 5;
+const ID_REPORT: usize = 50;
 const ID_EXIT: usize = 6;
 const ID_UPDATE: usize = 7;
 const ID_CHECK: usize = 8;
@@ -175,6 +182,12 @@ pub fn update_question(latest: bool) -> bool {
 /// Windows App Runtime: the button pressed, 1 for the first, or 0 for the window closed without one. None where
 /// there's no such window (no pms-gui.exe here, no runtime): ask another way.
 fn modern(heading: &str, text: &str, link: Option<&str>, buttons: &[&str]) -> Option<u32> {
+    modern_with(heading, text, link, buttons, None, &[])
+}
+
+/// `modern`, with a checkbox and the note it shows once it's checked (being checked adds `CHECKED` to the answer), and
+/// rows of exact details, each a label and a value.
+fn modern_with(heading: &str, text: &str, link: Option<&str>, buttons: &[&str], check: Option<(&str, &str)>, rows: &[(String, String)]) -> Option<u32> {
     let exe = std::env::current_exe().ok()?.with_file_name("pms-gui.exe");
     if !exe.is_file() {
         return None;
@@ -186,6 +199,12 @@ fn modern(heading: &str, text: &str, link: Option<&str>, buttons: &[&str]) -> Op
     }
     for b in buttons {
         ask.args(["--button", b]);
+    }
+    if let Some((label, note)) = check {
+        ask.args(["--check", label, "--check-note", note]);
+    }
+    for (label, value) in rows {
+        ask.args(["--row", label, value]);
     }
     // Its window comes up in front: the daemon may give it the foreground (it can't take it itself).
     let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
@@ -219,6 +238,30 @@ fn modern(heading: &str, text: &str, link: Option<&str>, buttons: &[&str]) -> Op
         }
     };
     status.code().and_then(|c| u32::try_from(c).ok()).filter(|&c| c < 255)
+}
+
+/// What `pms-gui --ask` adds to its answer for a checked box.
+const CHECKED: u32 = 16;
+
+/// The answer to `ask_click`.
+pub struct ClickAnswer {
+    pub yes: bool,
+    /// *Shut up, computer*: don't ask again.
+    pub quiet: bool,
+}
+
+/// Asks whether a notification may do what clicking it does: `question`, what it's about, and each thing it would
+/// touch, as `rows`. Waits for the answer; closing the question says no. Where it can't be a WinUI window, a task dialog
+/// asks, without the checkbox.
+pub fn ask_click(about: &str, question: &str, rows: &[(String, String)]) -> ClickAnswer {
+    let from = about;
+    match modern_with(question, from, None, &["YES", "NO"], Some(("SHUT UP, COMPUTER", "PIMP HAND!")), rows) {
+        Some(answer) => ClickAnswer { yes: answer % CHECKED == 1, quiet: answer >= CHECKED },
+        None => {
+            let details: Vec<String> = rows.iter().map(|(label, value)| format!("{label}:\n{value}")).collect();
+            ClickAnswer { yes: explain(question, &format!("{from}\n\n{}", details.join("\n\n")), &["YES"]).is_some(), quiet: false }
+        }
+    }
 }
 
 /// What the question about software update says; `url` is the first request's (a link, in a task dialog).
@@ -559,6 +602,7 @@ fn menu(hwnd: HWND) {
         None => item(MF_STRING, ID_CHECK, "Check for updates"),
     }
     item(MF_STRING, ID_LOG, "Open log");
+    item(MF_STRING, ID_REPORT, "Save a report");
     item(MF_SEPARATOR, 0, "");
     item(MF_STRING, ID_EXIT, "Exit");
     let _ = unsafe { SetMenuDefaultItem(menu, ID_SETTINGS as u32, 0) };
@@ -591,6 +635,7 @@ fn menu(hwnd: HWND) {
             None => {}
         },
         ID_LOG => spawn("notepad.exe", &[pms_tap::logfile::Log::Daemon.path().into_os_string()]),
+        ID_REPORT => queue(Command::SaveReport),
         ID_EXIT => queue(Command::Exit),
         _ => {}
     }

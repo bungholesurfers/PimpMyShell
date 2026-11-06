@@ -274,10 +274,11 @@ impl Drop for DownloadLock {
 }
 
 /// Runs the downloaded installer of `version` silently, on its own: it stops the daemon, installs, and starts it
-/// again if it was running. Its log goes beside it, and `tried` names the version first. The file is hashed once more first, against
+/// again if it was running. `settings_open` is for settings about to close for it, which it can't see, to come back.
+/// Its log goes beside it, and `tried` names the version first. The file is hashed once more first, against
 /// the signed manifest's `sha256`: it sat in %TEMP% since the download, and is run only as it was checked. The
 /// updater's own test variable isn't handed on.
-pub fn install(path: &Path, version: &str, sha256: &str) -> Result<(), String> {
+pub fn install(path: &Path, version: &str, sha256: &str, settings_open: bool) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -298,6 +299,7 @@ pub fn install(path: &Path, version: &str, sha256: &str) -> Result<(), String> {
     let log = path.with_extension("log");
     let started = std::process::Command::new(path)
         .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        .args(settings_open.then_some("/SETTINGS=1"))
         .arg(format!("/LOG={}", log.display()))
         .env_remove("PMS_UPDATE_SOURCE")
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)

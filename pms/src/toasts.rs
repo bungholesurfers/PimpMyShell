@@ -35,14 +35,15 @@ use windows::UI::Notifications::Management::{UserNotificationListener, UserNotif
 use windows::UI::Notifications::{KnownNotificationBindings, NotificationKinds, UserNotification};
 use windows::Win32::Foundation::{ERROR_SUCCESS, SIZE};
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::Com::{CLSCTX_LOCAL_SERVER, CLSIDFromString, CoCreateInstance};
+use windows::Win32::System::Com::{CLSCTX_LOCAL_SERVER, CLSIDFromString, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::System::Registry::*;
 use windows::Win32::UI::Notifications::INotificationActivationCallback;
 use windows::Win32::UI::Shell::{
-    AO_NONE, ApplicationActivationManager, IApplicationActivationManager, IShellItemImageFactory, QUNS_ACCEPTS_NOTIFICATIONS,
+    AO_NONE, ASSOCF_NONE, ASSOCSTR_EXECUTABLE, ApplicationActivationManager, AssocQueryStringW, IApplicationActivationManager, IShellItem2, IShellItemImageFactory, QUNS_ACCEPTS_NOTIFICATIONS,
     SHCreateItemFromParsingName, SHLoadIndirectString, SHQueryUserNotificationState, SIIGBF_ICONONLY, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::Win32::Foundation::PROPERTYKEY;
 use windows_core::{GUID, HSTRING, PCWSTR, w};
 
 use pms_tap::data_dir;
@@ -136,7 +137,7 @@ impl Incoming {
 
     /// `toast show` arguments for the TAP.
     /// `toast show` for this card, over `ms` (0: it has no time limit).
-    pub fn command(&self, ms: u32, pimped: bool) -> String {
+    pub fn command(&self, ms: u32, pimped: bool, asks: &[String]) -> String {
         let q = crate::quote;
         let path = |p: &Option<PathBuf>| p.as_ref().map_or(String::new(), |p| p.display().to_string());
         let mut fields = vec![
@@ -153,6 +154,7 @@ impl Incoming {
         ];
         fields.extend(self.progress.map(|p| format!("progress={p}")));
         fields.extend(pimped.then(|| "style=pimped".to_string()));
+        fields.extend(asks.iter().map(|a| format!("ask={a}")));
         fields.extend(self.actions.iter().map(|a| format!("b={}", a.label)));
         std::iter::once("toast show".to_string()).chain(fields.iter().map(|f| q(f))).collect::<Vec<_>>().join(" ")
     }
@@ -554,10 +556,121 @@ pub fn activate(t: &Incoming, args: &str, kind: Activation) -> Result<String, St
                 unsafe { mgr.ActivateApplication(&HSTRING::from(&t.aumid), &HSTRING::from(args), AO_NONE) }.map_err(e)?;
                 return Ok(format!("launched {} with the toast's arguments", t.app));
             }
-            // No activator: the app only hears about clicks while it runs. Show the real one.
-            open("ms-actioncenter:").map(|()| format!("{} has no activator; opened the notification center", t.app))
+            // No activator: the app has no way to be told about a click from outside, so it's started, as its Start
+            // menu entry would. Only what has no entry falls back on showing the real notification.
+            match open(&format!(r"shell:AppsFolder\{}", t.aumid)) {
+                Ok(()) => Ok(format!("started {}", t.app)),
+                Err(_) => open("ms-actioncenter:").map(|()| format!("{} can't be started; opened the notification center", t.app)),
+            }
         }
     }
+}
+
+/// What a click would do, for the question before it's done (`activate` is what does it): the question, and each thing
+/// it would touch, exactly.
+pub struct Plan {
+    pub question: String,
+    /// The line under the question: what this is about.
+    pub about: String,
+    pub rows: Vec<(String, String)>,
+}
+
+/// Launch arguments for reading. Apps often pack them as `key`, `value` on lines of their own (Firefox does): those
+/// become `key: value`. Anything else is as it came.
+fn readable(args: &str) -> String {
+    let lines: Vec<&str> = args.lines().collect();
+    let keys = lines.iter().step_by(2).all(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    if lines.len() < 2 || !lines.len().is_multiple_of(2) || !keys {
+        return args.to_string();
+    }
+    lines.chunks(2).map(|kv| format!("{}: {}", kv[0], kv[1])).collect::<Vec<_>>().join("\n")
+}
+
+impl Plan {
+    /// The one line a card has room for: what it opens, and the program by its file name.
+    fn line(&self) -> String {
+        let mut rows = self.rows.iter();
+        let first = rows.next().map_or("", |(_, v)| v.as_str());
+        match rows.find(|(label, _)| label == "Opens in") {
+            Some((_, exe)) => format!("{first} · {}", exe.rsplit('\\').next().unwrap_or(exe)),
+            None => first.to_string(),
+        }
+    }
+}
+
+impl Incoming {
+    /// What the card itself asks before each thing that can be clicked on it: `<what's clicked>`, the question and the
+    /// line under it, for `toast show`'s `ask=`.
+    pub fn asks(&self) -> Vec<String> {
+        let targets = std::iter::once(("open".to_string(), self.launch.0.as_str(), self.launch.1))
+            .chain(self.actions.iter().enumerate().map(|(i, a)| (format!("action {i}"), a.args.as_str(), a.kind)));
+        targets.filter_map(|(what, args, kind)| plan(self, args, kind).map(|p| format!("{what}\u{1f}{}\u{1f}{}", p.question, p.line()))).collect()
+    }
+}
+
+/// None: it has nothing to ask about (a dismiss).
+pub fn plan(t: &Incoming, args: &str, kind: Activation) -> Option<Plan> {
+    let row = |label: &str, value: String| (label.to_string(), value);
+    let arguments = || Some(args).filter(|a| !a.is_empty()).map(|a| row("Arguments", readable(a)));
+    let open_app = format!("Open {}?", t.app);
+    let from = format!("From {}", t.app);
+    // The question names the app, so what's left to say is which notification this is.
+    let about = if t.title.is_empty() || t.title == t.app { from.clone() } else { t.title.clone() };
+    match kind {
+        Activation::Dismiss => None,
+        Activation::Protocol => {
+            let mut rows = vec![row("Link", args.to_string())];
+            rows.extend(handler(args).map(|exe| row("Opens in", exe)));
+            Some(Plan { question: "Open this link?".into(), about: from, rows })
+        }
+        Activation::App => {
+            let mut rows = Vec::new();
+            if let Some(clsid) = activator(t) {
+                rows.extend(server(&clsid).map(|exe| row("Program", exe)));
+                rows.push(row("Notification activator", format!("{{{clsid:?}}}")));
+                rows.extend(arguments());
+            } else if let Some(p) = &t.package {
+                rows.push(row("App", t.aumid.clone()));
+                rows.push(row("Installed in", p.installed.display().to_string()));
+                rows.extend(arguments());
+            } else {
+                rows.push(row("Program", target(&t.aumid).unwrap_or_else(|| format!(r"shell:AppsFolder\{}", t.aumid))));
+            }
+            Some(Plan { question: open_app, about, rows })
+        }
+    }
+}
+
+/// The program a link's scheme opens with.
+fn handler(uri: &str) -> Option<String> {
+    let scheme = HSTRING::from(uri.split(':').next()?);
+    let mut size = 1024u32;
+    let mut path = vec![0u16; size as usize];
+    unsafe { AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_EXECUTABLE, &scheme, None, Some(windows_core::PWSTR(path.as_mut_ptr())), &mut size) }.ok().ok()?;
+    Some(String::from_utf16_lossy(&path[..(size as usize).saturating_sub(1)]))
+}
+
+/// The file behind a COM class, as the registry has it: an exe, or a DLL hosted in a surrogate process, as Firefox's is.
+fn server(clsid: &GUID) -> Option<String> {
+    ["LocalServer32", "InProcServer32"].iter().find_map(|kind| {
+        let key = format!(r"CLSID\{{{clsid:?}}}\{kind}");
+        let mut text = [0u16; 1024];
+        let mut size = size_of_val(&text) as u32;
+        let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+        unsafe { RegGetValueW(HKEY_CLASSES_ROOT, &HSTRING::from(key), PCWSTR::null(), flags, None, Some(text.as_mut_ptr().cast()), Some(&mut size)) }.ok().ok()?;
+        Some(String::from_utf16_lossy(&text[..text.iter().position(|&c| c == 0)?]).trim_matches('"').to_string())
+    })
+}
+
+/// What a Start menu entry points to.
+fn target(aumid: &str) -> Option<String> {
+    // PKEY_Link_TargetParsingPath.
+    let key = PROPERTYKEY { fmtid: GUID::from_u128(0xB9B4B3FC_2B51_4A42_B5D8_324146AFCF25), pid: 2 };
+    let item: IShellItem2 = unsafe { SHCreateItemFromParsingName(&HSTRING::from(format!(r"shell:AppsFolder\{aumid}")), None) }.ok()?;
+    let path = unsafe { item.GetString(&key) }.ok()?;
+    let text = unsafe { path.to_string() }.ok();
+    unsafe { CoTaskMemFree(Some(path.0 as _)) };
+    text
 }
 
 /// `shell:AppsFolder\<AUMID>` rendered at 64px (crisp at 32 DIPs on high-DPI), as PNG.
@@ -898,6 +1011,15 @@ fn collect_apps(key: HKEY, prefix: &str, out: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arguments_read_as_pairs_where_they_are_pairs() {
+        use super::readable;
+        assert_eq!(readable("program\nfirefox\nprofile\nC:\\x"), "program: firefox\nprofile: C:\\x");
+        assert_eq!(readable("https://example.com"), "https://example.com");
+        assert_eq!(readable("one\ntwo\nthree"), "one\ntwo\nthree");
+        assert_eq!(readable("not a key\nvalue"), "not a key\nvalue");
+    }
+
     #[test]
     fn what_stays_until_answered() {
         use super::stays;

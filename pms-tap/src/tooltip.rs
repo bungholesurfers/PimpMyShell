@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 
 use pms_xaml::{
-    Border, Canvas, CornerRadius, FrameworkElement, PointerEventHandler, Rectangle, SolidColorBrush, TextBlock, Thickness, UIElement,
+    Border, Canvas, CornerRadius, FontFamily, FrameworkElement, PointerEventHandler, Rectangle, SolidColorBrush, TextBlock, Thickness, UIElement,
 };
 use pms_xaml::Popup;
 use windows::Foundation::{Point, Rect, Size};
@@ -82,6 +82,8 @@ fn build(ctx: &Ctx) -> R<Tips> {
 
     let text = TextBlock::new().map_err(w)?;
     text.SetFontSize(12.0).map_err(w)?;
+    // Fixed-width: readings are padded to line up and to stay put as they change.
+    text.SetFontFamily(&FontFamily::CreateInstanceWithName(&HSTRING::from("Cascadia Mono, Consolas")).map_err(w)?).map_err(w)?;
     text.SetForeground(&brush(TEXT)?).map_err(w)?;
     let border = Border::new().map_err(w)?;
     border.SetBackground(&brush(BACKGROUND)?).map_err(w)?;

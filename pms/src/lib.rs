@@ -2,6 +2,7 @@
 //! daemon is built from (config, perf-counter sampler, microphone watcher).
 
 pub mod config;
+mod layers;
 pub mod daemon;
 mod devices;
 mod expr;
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use pms_tap::ipc::quote;
 /// The question software update asks once (examples/dialogs.rs shows it).
-pub use tray::update_question;
+pub use tray::{ask_click, update_question};
 use pms_tap::ipc::{PIPE_NAME, read_frame, write_frame};
 use pms_tap::{CLSID_PMS_TAP, data_dir, xamlom::InitializeXamlDiagnosticsExFn};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY};
@@ -37,7 +38,7 @@ use windows_core::{HSTRING, PCWSTR, s, w};
 
 static LOG_TO_FILE: AtomicBool = AtomicBool::new(false);
 
-/// Also append log lines to `%LOCALAPPDATA%\PimpMyShell\daemon.log` (the windowless daemon has no
+/// Also append log lines to `%APPDATA%\PimpMyShell\logs\daemon.log` (the windowless daemon has no
 /// console), which `pms_tap::logfile` keeps to three files of 1 MB.
 pub fn log_to_file() {
     LOG_TO_FILE.store(true, Ordering::Release);

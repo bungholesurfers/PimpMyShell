@@ -4,7 +4,8 @@
 //!   bill in front of it. Into assets/icon: pms.ico (16 to 256 pixels) and a PNG of each size; the build puts the
 //!   .ico into every shipped exe (pms-res), the tray and the notifications show it.
 //! - The installer's box: a glassy cube, words on one face and the logo on the other. And the installer's pictures:
-//!   the box on dollar signs tiled over the dark, and in the pages' corner. Into installer/art.
+//!   the settings' tile of bills as the window's background, and the box on it and in the pages' corner. Into
+//!   installer/art.
 //!
 //! The window shows them all as they'll be, with knobs (they go to eleven) for the crab, the bill, the box and the
 //! wallpaper of dollars; Save keeps the design in art/design.json and renders every file.
@@ -15,6 +16,8 @@
 #![windows_subsystem = "windows"]
 
 mod art;
+#[path = "../../pms-gui/src/flag.rs"]
+mod flag;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -92,7 +95,7 @@ impl Customizer {
     }
 
     /// Render the previews from the design: the logo, big and at the small sizes as they'll really look, the box,
-    /// and the wizard's picture.
+    /// and the wizard's background.
     fn render(&mut self, ctx: &egui::Context) -> Result<(), String> {
         let d = &self.design;
         let tex = |name: &str, svg: &str, w: u32, h: u32, crisp: bool| -> Result<TextureHandle, String> {
@@ -100,14 +103,15 @@ impl Customizer {
             let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
             Ok(ctx.load_texture(name, image, if crisp { TextureOptions::NEAREST } else { TextureOptions::LINEAR }))
         };
-        let logo = art::logo_svg(d, &self.crab);
-        let boxed = art::box_svg(d, &art::b64(&art::png(&logo, 256, 256)?));
-        let wizard = art::wizard_svg(d, &art::b64(&art::png(&boxed, 512, 512)?));
+        let logo = art::logo_svg(d, &self.crab, d.icon_bill)?;
+        let on_box = art::logo_svg(d, &self.crab, d.box_bill)?;
+        let boxed = art::box_svg(d, &on_box);
+        let wizard = art::backdrop_svg(d)?;
         self.previews = Some(Previews {
             logo: tex("logo", &logo, 256, 256, false)?,
             small: [16, 24, 32, 48].iter().map(|&s| tex(&format!("logo{s}"), &logo, s, s, true).map(|t| (s, t))).collect::<Result<_, _>>()?,
             boxed: tex("box", &boxed, 256, 256, false)?,
-            wizard: tex("wizard", &wizard, 328, 628, false)?,
+            wizard: tex("wizard", &wizard, 596, 432, false)?,
         });
         self.shown = Some(self.design.clone());
         Ok(())
@@ -164,6 +168,16 @@ fn knob_row(ui: &mut egui::Ui, name: &str, help: &str, value: &mut f32, min: f32
     ui.end_row();
 }
 
+/// Which bill a picture has. The settings' comes with the next build of the settings, which reads the design.
+fn bill_row(ui: &mut egui::Ui, name: &str, value: &mut art::Bill) {
+    ui.label(name);
+    ui.horizontal(|ui| {
+        ui.selectable_value(value, art::Bill::Classic, "Original");
+        ui.selectable_value(value, art::Bill::Flag, "Flag");
+    });
+    ui.end_row();
+}
+
 fn color_row(ui: &mut egui::Ui, name: &str, value: &mut String) {
     ui.label(name);
     ui.horizontal(|ui| color(ui, value));
@@ -202,19 +216,38 @@ impl eframe::App for Customizer {
                     knob_row(ui, "height", "where the bill's middle is: up over the crab, or down below it", &mut d.bill_y, 120.0, 230.0);
                     color_row(ui, "color", &mut d.bill_color);
                 });
+                section(ui, "Layers", |ui| {
+                    ui.label("on top");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut d.crab_on_top, false, "Cash");
+                        ui.selectable_value(&mut d.crab_on_top, true, "Crab");
+                    });
+                    ui.end_row();
+                });
+                section(ui, "Bills", |ui| {
+                    bill_row(ui, "main icon", &mut d.icon_bill);
+                    bill_row(ui, "installer box", &mut d.box_bill);
+                    bill_row(ui, "installer background", &mut d.backdrop_bill);
+                    bill_row(ui, "settings background", &mut d.settings_bill);
+                });
                 section(ui, "Box", |ui| {
                     color_row(ui, "glass", &mut d.glass);
                     ui.label("words");
-                    ui.add(egui::TextEdit::singleline(&mut d.face_text).desired_width(150.0));
+                    ui.add(egui::TextEdit::multiline(&mut d.face_text).desired_width(150.0).desired_rows(2)).on_hover_text("Enter starts a new line");
                     ui.end_row();
                     color_row(ui, "their color", &mut d.face_color);
+                    knob_row(ui, "reflection", "how strongly the glass reflects", &mut d.gloss, 0.0, 1.0);
+                    knob_row(ui, "reflection width", "how wide the reflection is", &mut d.gloss_width, 0.02, 0.5);
+                    knob_row(ui, "tape", "how strongly the tape along the top shows", &mut d.tape, 0.0, 1.0);
+                    knob_row(ui, "tape width", "how wide the tape is", &mut d.tape_width, 0.02, 0.8);
+                    color_row(ui, "tape color", &mut d.tape_color);
                 });
-                section(ui, "Installer picture", |ui| {
+                section(ui, "Installer background", |ui| {
                     color_row(ui, "background", &mut d.wizard_bg);
-                    color_row(ui, "dollar signs", &mut d.dollar_color);
-                    knob_row(ui, "strength", "how strongly the dollar signs show", &mut d.dollar_strength, 0.0, 0.6);
-                    knob_row(ui, "size", "how big each dollar sign's tile is", &mut d.dollar_size, 10.0, 60.0);
-                    knob_row(ui, "tilt", "how the rows of dollar signs slant", &mut d.dollar_tilt, -45.0, 45.0);
+                    color_row(ui, "bills", &mut d.dollar_color);
+                    knob_row(ui, "strength", "how strongly the bills show", &mut d.dollar_strength, 0.0, 0.6);
+                    knob_row(ui, "size", "how big the tile of bills is (22 is as in the settings)", &mut d.dollar_size, 10.0, 60.0);
+                    knob_row(ui, "tilt", "how the rows of bills slant", &mut d.dollar_tilt, -45.0, 45.0);
                 });
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
@@ -262,8 +295,8 @@ impl eframe::App for Customizer {
                 });
                 ui.add_space(16.0);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("Installer picture").strong());
-                    ui.image((p.wizard.id(), egui::vec2(328.0, 628.0)));
+                    ui.label(RichText::new("Installer background").strong());
+                    ui.image((p.wizard.id(), egui::vec2(596.0, 432.0)));
                 });
             });
         });

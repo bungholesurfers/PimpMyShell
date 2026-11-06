@@ -158,8 +158,7 @@ fn installer(no_build: bool, pgo: bool, install: bool) -> Result {
     println!("built {}", setup.display());
     if install {
         step("install");
-        // No wizard and no questions; the tasks are those chosen last time (start at sign-in, ticked to begin with),
-        // and a daemon the installer stopped is started again.
+        // No wizard and no questions; start at sign-in stays as it is, and what the installer stopped is started again.
         let log = std::env::temp_dir().join("pms-setup.log");
         println!("installing (log: {})", log.display());
         run(Command::new(&setup).args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]).arg(format!("/LOG={}", log.display())))?;

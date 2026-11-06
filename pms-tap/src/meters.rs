@@ -304,6 +304,9 @@ struct Mic {
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Fit {
     h: f64,
+    /// Meters of bars have a height of their own, and at full height stop just short of the edges (`BAR_EDGE`).
+    bar_h: f64,
+    bar_edge: bool,
     spacing: f64,
     graph: f64,
     text: f64,
@@ -318,6 +321,7 @@ struct Strip {
     meters: Vec<Meter>,
     mic: Option<Mic>,
     height_mode: f64,
+    bar_mode: f64,
     fit: Option<Fit>,
     pending_sep: bool,
     /// The panel glides when the strip's width changes (attached after its first placement).
@@ -353,16 +357,18 @@ pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
     match arg(0) {
         Some("clear") | Some("off") => clear(ctx),
         Some("height") => {
-            let mode = match arg(1) {
-                Some("compact") => 0.75,
-                Some("tall") | None => 0.875,
-                Some("full") => 1.0,
-                Some(other) => return Err(format!("unknown height `{other}` (compact|tall|full)")),
+            let mode = |word: Option<&str>| match word {
+                Some("compact") => Ok(0.75),
+                Some("tall") | None => Ok(0.875),
+                Some("full") => Ok(1.0),
+                Some(other) => Err(format!("unknown height `{other}` (compact|tall|full)")),
             };
+            // height <meters> [<bars>]: without the second, bars go by the first.
+            let (meters, bars) = (mode(arg(1))?, mode(arg(2).or(arg(1)))?);
             strip(ctx)?;
-            with_strip(|s| s.height_mode = mode);
+            with_strip(|s| (s.height_mode, s.bar_mode) = (meters, bars));
             refit(true);
-            Ok(format!("meter height {}", arg(1).unwrap_or("tall")))
+            Ok(format!("meter height {}, bars {}", arg(1).unwrap_or("tall"), arg(2).or(arg(1)).unwrap_or("tall")))
         }
         Some("add") => add(ctx, &args[1..]),
         Some("sep") => {
@@ -489,7 +495,7 @@ fn strip(ctx: &Ctx) -> R<StackPanel> {
     let panel = StackPanel::new().map_err(w)?;
     panel.SetOrientation(Orientation::Horizontal).map_err(w)?;
     stage::stage(ctx)?.Children().map_err(w)?.Append(&ui(&panel)?).map_err(w)?;
-    STRIP.with_borrow_mut(|s| *s = Some(Strip { panel: panel.clone(), meters: Vec::new(), mic: None, height_mode: 0.875, fit: None, pending_sep: false, panel_glides: false }));
+    STRIP.with_borrow_mut(|s| *s = Some(Strip { panel: panel.clone(), meters: Vec::new(), mic: None, height_mode: 0.875, bar_mode: 1.0, fit: None, pending_sep: false, panel_glides: false }));
     Ok(panel)
 }
 
@@ -637,21 +643,27 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
 // ---------------------------------------------------------------------------------------------
 // Fitting
 
+/// How much of a chosen bar width shows in the gaps between bars.
+const GAP_FOLLOWS_WIDTH: f64 = 0.1;
+
 /// Cores bars: (bar width, gaps between threads, cores, L3 groups, NUMA nodes) at a graphic scale.
 fn core_geometry(threads: usize, barw: Option<f64>, graph: f64) -> (f64, [f64; 4]) {
-    let base = barw.unwrap_or(match threads {
+    let usual = match threads {
         0..=16 => 5.0,
         17..=32 => 3.4,
         33..=64 => 2.4,
         _ => 1.6,
-    });
+    };
     // Whole physical pixels, so every gap of a kind is the same width on screen: one pixel between
     // the threads of a core, wider steps between cores, L3 groups and NUMA nodes.
     let px = PX.get();
-    let bar = (base * graph * px).round().max(1.0);
-    let core = (bar * 0.8).round().max(2.0);
-    let l3 = (bar * 1.6).round().max(core + 1.0);
-    let numa = (bar * 2.8).round().max(l3 + 1.0);
+    let bar = (barw.unwrap_or(usual) * graph * px).round().max(1.0);
+    // The gaps go by the usual bar, with just a touch of a chosen width: thicker bars aren't bars further apart.
+    let usual = usual * graph * px;
+    let step = usual + (bar - usual) * GAP_FOLLOWS_WIDTH;
+    let core = (step * 0.8).round().max(2.0);
+    let l3 = (step * 1.6).round().max(core + 1.0);
+    let numa = (step * 2.8).round().max(l3 + 1.0);
     (bar / px, [1.0 / px, core / px, l3 / px, numa / px])
 }
 
@@ -796,11 +808,11 @@ impl Strip {
 
     /// The least squeezing that fits `avail`: knobs first; if even fully squeezed it doesn't fit,
     /// drop one meter from the end and start the knobs over (dropping frees room to relax them).
-    fn solve(&self, avail: f64, h: f64) -> Fit {
+    fn solve(&self, avail: f64, (h, bar_h, bar_edge): (f64, f64, bool)) -> Fit {
         let present = self.meters.iter().filter(|m| visible(m.presence)).count();
         let mut dropped = 0;
         loop {
-            match self.squeeze_to(avail, h, dropped) {
+            match self.squeeze_to(avail, (h, bar_h, bar_edge), dropped) {
                 Ok(fit) => return fit,
                 Err(fit) if dropped >= present => return fit,
                 Err(_) => dropped += 1,
@@ -810,8 +822,8 @@ impl Strip {
 
     /// Squeeze stage by stage with `dropped` meters hidden: Ok(least squeezing that fits), or
     /// Err(fully squeezed) if nothing does.
-    fn squeeze_to(&self, avail: f64, h: f64, dropped: usize) -> Result<Fit, Fit> {
-        let mut fit = Fit { h, spacing: SPACING.1, graph: 1.0, text: 1.0, dropped, pies_inside: false };
+    fn squeeze_to(&self, avail: f64, (h, bar_h, bar_edge): (f64, f64, bool), dropped: usize) -> Result<Fit, Fit> {
+        let mut fit = Fit { h, bar_h, bar_edge, spacing: SPACING.1, graph: 1.0, text: 1.0, dropped, pies_inside: false };
         if self.total(&fit) <= avail {
             return Ok(fit);
         }
@@ -851,9 +863,27 @@ impl Strip {
     }
 }
 
-fn target(snap: &Snapshot, s: &Strip) -> (f64, f64) {
-    let avail = snap.free.last().map_or(0.0, |&(a, b)| (b - a - 2.0 * EDGE_MARGIN) as f64);
-    (avail, (snap.height.max(32.0) as f64 * s.height_mode).round())
+fn target(at: &Snapshot, s: &Strip) -> (f64, (f64, f64, bool)) {
+    let avail = at.free.last().map_or(0.0, |&(a, b)| (b - a - 2.0 * EDGE_MARGIN) as f64);
+    // On whole pixels, at any display scale: a DIP isn't one at 125%.
+    let height = |mode: f64| snap(at.height.max(32.0) as f64 * mode);
+    (avail, (height(s.height_mode), height(s.bar_mode), s.bar_mode >= 1.0))
+}
+
+/// How high a cell for this meter is.
+fn cell_h(m: &Spec, fit: &Fit) -> f64 {
+    if matches!(m.style, Style::Cores | Style::Engines) { fit.bar_h } else { fit.h }
+}
+
+/// A full-height bar's gap to the cell's top and bottom edges (DIPs): clear of the taskbar's top line and the screen.
+const BAR_EDGE: f64 = 1.0;
+
+/// A bar's full height and its bottom edge, in a cell `h` tall with `margin` left above and below it. In DIPs, like
+/// everything here, but worked out in whole physical pixels: at 125% a DIP is 1.25 of them, and an edge between two
+/// pixels draws soft, or a pixel off from its neighbours. The margin is at least a pixel at any scale.
+fn bar_extent(h: f64, margin: f64, px: f64) -> (f64, f64) {
+    let (cell, gap) = ((h * px).round(), (margin * px).round().max(1.0));
+    ((cell - 2.0 * gap) / px, (cell - gap) / px)
 }
 
 /// Re-solve the fit for the current free space; rebuild the cells if it changed (or `force`).
@@ -862,11 +892,11 @@ fn refit(force: bool) {
     STRIP.with(|cell| {
         let Ok(mut state) = cell.try_borrow_mut() else { return };
         let Some(s) = state.as_mut() else { return };
-        let (avail, h) = target(&snap, s);
-        let fit = s.solve(avail, h);
         if let Ok(scale) = s.panel.XamlRoot().and_then(|r| r.RasterizationScale()) {
             PX.set(scale.max(0.5));
         }
+        let (avail, h) = target(&snap, s);
+        let fit = s.solve(avail, h);
         if !force && s.fit == Some(fit) {
             return;
         }
@@ -903,7 +933,7 @@ fn squeeze(t: &TextBlock, scale: f64) -> R<()> {
 }
 
 fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
-    let h = fit.h;
+    let h = cell_h(m, fit);
     let width = cell_width(m, fit);
     let root = Canvas::new().map_err(w)?;
     root.SetWidth(width).map_err(w)?;
@@ -1008,8 +1038,7 @@ fn core_bars(canvas: &Canvas, m: &Spec, x0: f64, h: f64, fit: &Fit, pad_y: f64) 
     if m.topo.is_empty() {
         return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
-    let full = h - 4.0 - 2.0 * pad_y;
-    let bottom = 2.0 + pad_y + full;
+    let (full, bottom) = bar_extent(h, if fit.bar_edge { BAR_EDGE } else { 2.0 + pad_y }, PX.get());
     let mut x = x0;
     // Columns first (x, height, which node, which bar of it); then one bar layer holding each column's track, kernel
     // and user sprites.
@@ -1044,7 +1073,7 @@ fn core_bars(canvas: &Canvas, m: &Spec, x0: f64, h: f64, fit: &Fit, pad_y: f64) 
                 x += if ci > 0 { cg } else { 0.0 };
                 let n: usize = core.trim_start_matches('e').parse().map_err(|_| format!("bad core `{core}` in topology"))?;
                 // Efficiency cores: a little shorter.
-                let height = if core.starts_with('e') { full * 0.78 } else { full };
+                let height = if core.starts_with('e') { snap(full * 0.78) } else { full };
                 for t in 0..n {
                     x += if t > 0 { tg } else { 0.0 };
                     columns.push((x, height, ni, nth));
@@ -1734,7 +1763,8 @@ fn position(snapshot: &Snapshot) {
             let stage_el = ui(&s.panel.Parent().map_err(w)?)?;
             let origin = bounds(&stage_el, 0.0, 0.0)?;
             Canvas::SetLeft(&panel, (x - origin.X) as f64).map_err(w)?;
-            Canvas::SetTop(&panel, ((snapshot.height as f64 - fit.h) / 2.0).round() - origin.Y as f64).map_err(w)?;
+            // The tallest cell decides; the panel centers the others.
+            Canvas::SetTop(&panel, snap((snapshot.height as f64 - fit.h.max(fit.bar_h)) / 2.0) - origin.Y as f64).map_err(w)?;
             panel.SetVisibility(Visibility::Visible).map_err(w)?;
             if !s.panel_glides {
                 glide_on_move(&panel)?;
@@ -1821,13 +1851,24 @@ pub fn tip_text(i: usize, bar: Option<usize>, device: Option<usize>) -> Option<S
         if !m.spec.tooltip {
             return None;
         }
-        if let Some(tip) = device.and_then(|d| m.spec.devtips.get(d)) {
+        // Fixed-width (tooltip.rs), and padded to the widest a reading gets, so that nothing moves as values change.
+        let pct = |v: f64| format!("{:>3.0}%", v.clamp(0.0, 1.0) * 100.0);
+        let v = |k: usize| m.values.get(k).copied().unwrap_or(0.0);
+        let device_tip = device.and_then(|d| m.spec.devtips.get(d));
+        // A GPU's engine: the one under the pointer, then the GPU. Disks and adapters say it all themselves.
+        if let (Some(tip), Some(j)) = (device_tip, bar.filter(|_| m.spec.style == Style::Engines && m.spec.bar_tips.is_empty())) {
+            let engine = m.spec.labels.get(j)?;
+            let engine = engine.rsplit(" — ").next().unwrap_or(engine);
+            return Some(format!("{engine}  {}\n\n{tip}", pct(v(j))));
+        }
+        if let Some(tip) = device_tip {
             return Some(tip.clone());
         }
-        let pct = |v: f64| format!("{:.0}%", v.clamp(0.0, 1.0) * 100.0);
-        let v = |k: usize| m.values.get(k).copied().unwrap_or(0.0);
         Some(match (m.spec.style, bar) {
-            (Style::Cores, Some(j)) => format!("{}\nuser {} · kernel {}", cpu_name(&m.spec.topo, j), pct(v(2 * j)), pct(v(2 * j + 1))),
+            (Style::Cores, Some(j)) => {
+                let (user, kernel) = (v(2 * j), v(2 * j + 1));
+                format!("{}\n\nuser mode    {}\nkernel mode  {}\ntotal        {}", cpu_name(&m.spec.topo, j).replace(" · ", "\n"), pct(user), pct(kernel), pct(user + kernel))
+            }
             // Plain bars carry their own reading (NET up: 1.2 MB/s); GPU engines show their load.
             (Style::Engines, Some(j)) => match m.spec.bar_tips.get(j) {
                 Some(tip) => format!("{} {}\n{tip}", m.spec.label, m.spec.labels.get(j)?),
@@ -1839,7 +1880,7 @@ pub fn tip_text(i: usize, bar: Option<usize>, device: Option<usize>) -> Option<S
     })
 }
 
-/// "CPU 5 · core 2, thread 1 · efficiency core · L3 group 0", from the topology string.
+/// "Logical processor 5 · core 2, SMT thread 1 · E-core · L3 cache group 0", from the topology string.
 fn cpu_name(topo: &str, cpu: usize) -> String {
     let (nodes, l3s) = (topo.split('|').count(), topo.split(['|', '/']).count());
     let (mut logical, mut core, mut l3) = (0, 0, 0);
@@ -1848,15 +1889,15 @@ fn cpu_name(topo: &str, cpu: usize) -> String {
             for c in group.split(',') {
                 let n: usize = c.trim_start_matches('e').parse().unwrap_or(1);
                 if cpu < logical + n {
-                    let mut s = format!("CPU {cpu} · core {core}");
+                    let mut s = format!("Logical processor {cpu} · core {core}");
                     if n > 1 {
-                        s += &format!(", thread {}", cpu - logical);
+                        s += &format!(", SMT thread {}", cpu - logical);
                     }
                     if c.starts_with('e') {
-                        s += " · efficiency core";
+                        s += " · E-core";
                     }
                     if l3s > nodes {
-                        s += &format!(" · L3 group {l3}");
+                        s += &format!(" · L3 cache group {l3}");
                     }
                     if nodes > 1 {
                         s += &format!(" · NUMA node {ni}");
@@ -1869,7 +1910,7 @@ fn cpu_name(topo: &str, cpu: usize) -> String {
             l3 += 1;
         }
     }
-    format!("CPU {cpu}")
+    format!("Logical processor {cpu}")
 }
 
 thread_local! {
@@ -2188,4 +2229,35 @@ fn pie_glow(glow: &Glow, lit: &Cell<(f32, f32)>, f: f64, pressure: f64) -> R<()>
     ease(glow.sprite.cast().map_err(w)?, "Opacity", opacity)?;
     ease(glow.mid.cast().map_err(w)?, "Offset", mid)?;
     ease(glow.outer.cast().map_err(w)?, "Offset", outer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows' display scales, and what a 48 DIP taskbar comes to: bars stay crisp and even at all of them.
+    #[test]
+    fn bars_land_on_whole_pixels_at_every_scale() {
+        for px in [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5] {
+            for (h, margin) in [(48.0, BAR_EDGE), (42.0, 2.0), (36.0, 2.0), (40.0, BAR_EDGE)] {
+                let (full, bottom) = bar_extent(h, margin, px);
+                let whole = |v: f64| ((v * px) - (v * px).round()).abs() < 1e-9;
+                assert!(whole(full) && whole(bottom), "{h} at {px}: {full} to {bottom}");
+                let (above, below) = (bottom - full, h - bottom);
+                assert!((above * px - (below * px).round()).abs() < 0.51, "even gaps at {px}: {above} and {below}");
+                assert!(above * px >= 1.0 - 1e-9, "at least a pixel at {px}");
+            }
+        }
+    }
+
+    #[test]
+    fn full_is_46_at_100_percent_and_keeps_its_proportions() {
+        assert_eq!(bar_extent(48.0, BAR_EDGE, 1.0), (46.0, 47.0));
+        // 1.25 pixels a DIP: 60 of them, a one pixel gap.
+        assert_eq!(bar_extent(48.0, BAR_EDGE, 1.25).0 * 1.25, 58.0);
+        assert_eq!(bar_extent(48.0, BAR_EDGE, 1.5).0 * 1.5, 68.0);
+        assert_eq!(bar_extent(48.0, BAR_EDGE, 2.0).0 * 2.0, 92.0);
+        // What tall has always been at 100%.
+        assert_eq!(bar_extent(42.0, 2.0, 1.0), (38.0, 40.0));
+    }
 }

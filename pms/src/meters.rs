@@ -45,6 +45,56 @@ fn pdh(status: u32, what: &str) -> Result<(), String> {
     if status == 0 { Ok(()) } else { Err(format!("{what}: PDH status {status:#010x}")) }
 }
 
+/// A GPU that isn't there, for `pms demo`: to see how meters look with hardware this PC doesn't have.
+struct DemoGpu {
+    name: &'static str,
+    luid: String,
+    memory: f64,
+}
+
+static DEMO: std::sync::OnceLock<Vec<DemoGpu>> = std::sync::OnceLock::new();
+
+/// The demos' makers, with a current model of each. Snapdragon's graphics share system memory, as integrated ones do: no
+/// dedicated memory, so no memory pie.
+pub const DEMO_GPUS: [(&str, &str, f64); 4] =
+    [("nvidia", "NVIDIA GeForce RTX 5090", 32.0), ("radeon", "AMD Radeon RX 7900 XTX", 24.0), ("intel", "Intel(R) Arc(TM) A770 Graphics", 16.0), ("snapdragon", "Qualcomm(R) Adreno(TM) X1-85 GPU", 0.0)];
+
+/// From now on the sampler sees these GPUs (`intel+radeon`) instead of the real ones. Nothing real changes.
+pub fn demo(which: &str) -> Result<Vec<&'static str>, String> {
+    let mut gpus = Vec::new();
+    for (i, want) in which.split('+').enumerate() {
+        let (_, name, memory) = DEMO_GPUS.iter().find(|(key, ..)| *key == want).ok_or_else(|| format!("no demo GPU called `{want}`"))?;
+        gpus.push(DemoGpu { name, luid: format!("0x00000000_0x0000d{i:03x}"), memory: memory * 1024.0 * 1024.0 * 1024.0 });
+    }
+    let names = gpus.iter().map(|g| g.name).collect();
+    DEMO.set(gpus).map_err(|_| "already a demo".to_string())?;
+    Ok(names)
+}
+
+fn demo_gpus() -> Option<&'static [DemoGpu]> {
+    DEMO.get().map(Vec::as_slice)
+}
+
+/// The demo's clock: every reading is a slow wave, so that the meters have something to show.
+fn demo_wave(phase: f64) -> f64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let t = START.get_or_init(Instant::now).elapsed().as_secs_f64();
+    ((t * 0.8 + phase).sin() + 1.0) / 2.0
+}
+
+/// What the demo's GPUs are doing, as `engine_utilization` would say it: the engines a real one has, each with its load.
+fn demo_engines() -> HashMap<EngineKey, f64> {
+    const ENGINES: [(u32, &str, f64); 5] = [(0, "3D", 85.0), (1, "Copy", 35.0), (2, "Copy", 20.0), (3, "VideoDecode", 55.0), (4, "VideoEncode", 40.0)];
+    let mut out = HashMap::new();
+    for (g, gpu) in demo_gpus().unwrap_or_default().iter().enumerate() {
+        for (engine, kind, most) in ENGINES {
+            let load = 4.0 + most * demo_wave(g as f64 * 1.9 + f64::from(engine) * 0.9);
+            out.insert((gpu.luid.clone(), 0, engine, kind.to_string()), load);
+        }
+    }
+    out
+}
+
 /// Meters with `per_gpu = true`, one per graphics adapter with dedicated memory: each gets a counter of its
 /// adapter's dedicated memory in use (`vram_gpuN`), a builtin of its size (`vram_total_gpuN`), its maker's color,
 /// and the adapter's name after its label (for the tooltip). None if no meter asks for it.
@@ -55,7 +105,10 @@ fn per_gpu(config: &Config, builtins: &mut HashMap<String, f64>) -> Option<Confi
     // The least memory an adapter needs for its own meter: the strictest any per_gpu meter asks.
     let least = config.meters.iter().filter(|m| m.per_gpu == Some(true)).map(|m| m.min_memory_mb.unwrap_or(1024)).max().unwrap_or(1024) as usize * 1024 * 1024;
     let mut adapters = Vec::new();
-    if let Ok(factory) = unsafe { CreateDXGIFactory1::<IDXGIFactory1>() } {
+    if let Some(gpus) = demo_gpus() {
+        let dedicated = gpus.iter().enumerate().filter(|(_, g)| g.memory >= least as f64);
+        adapters.extend(dedicated.map(|(i, g)| (g.name.to_string(), 0, 0xd000 + i as u32, g.memory)));
+    } else if let Ok(factory) = unsafe { CreateDXGIFactory1::<IDXGIFactory1>() } {
         for i in 0.. {
             let Ok(adapter) = (unsafe { factory.EnumAdapters1(i) }) else { break };
             let Ok(d) = (unsafe { adapter.GetDesc1() }) else { continue };
@@ -362,7 +415,7 @@ const CORE_COLORS: [&str; 2] = ["#66BB6A", "#E040FB"];
 const DISK_COLORS: [&str; 2] = ["#FFD54F", "#FFA726"];
 const NIC_COLORS: [&str; 2] = ["#F06292", "#4DB6AC"];
 const DISK_PARTS: [&str; 2] = ["write", "read"];
-const NIC_PARTS: [&str; 2] = ["up", "down"];
+const NIC_PARTS: [&str; 2] = ["sent", "received"];
 
 impl Meter {
     fn colors(&self, i: usize) -> Vec<String> {
@@ -401,8 +454,10 @@ pub struct Sampler {
 
 impl Sampler {
     pub fn new(config: &Config) -> Result<Sampler, String> {
-        if !["compact", "tall", "full"].contains(&config.meter_height.as_str()) {
-            return Err(format!("meter_height = \"{}\": use \"compact\", \"tall\" or \"full\"", config.meter_height));
+        for (key, value) in [("meter_height", &config.meter_height), ("bar_height", &config.bar_height)] {
+            if !["compact", "tall", "full"].contains(&value.as_str()) {
+                return Err(format!("{key} = \"{value}\": use \"compact\", \"tall\" or \"full\""));
+            }
         }
         let mut builtins = builtins();
         let expanded = per_gpu(config, &mut builtins);
@@ -599,6 +654,11 @@ impl Sampler {
         self.meters.is_empty()
     }
 
+    /// The meters on the strip: not always the config's (`per_gpu`).
+    pub fn len(&self) -> usize {
+        self.meters.len()
+    }
+
     pub fn describe(&self) -> String {
         let intervals: Vec<String> = self.groups.iter().map(|g| format!("{}ms x{}", g.interval.as_millis(), g.meters.len())).collect();
         format!("{} meter(s) [{}]", self.meters.len(), intervals.join(", "))
@@ -606,14 +666,14 @@ impl Sampler {
 
     /// TAP commands that (re)create the strip: height, then each meter, with a separator wherever
     /// the group changes.
-    pub fn define(&mut self, height: &str) -> Vec<String> {
+    pub fn define(&mut self, height: &str, bars: &str) -> Vec<String> {
         let q = crate::quote;
         // A fresh strip knows nothing: presence has to be decided (and said) again.
         for m in &mut self.meters {
             (m.shown, m.absent_since) = (None, None);
             m.states_sent.clear();
         }
-        let mut out = vec!["meters clear".to_string(), format!("meters height {height}")];
+        let mut out = vec!["meters clear".to_string(), format!("meters height {height} {bars}")];
         let mut group: Option<&str> = None;
         for (i, m) in self.meters.iter_mut().enumerate() {
             let this = m.spec.group.as_deref();
@@ -775,7 +835,11 @@ impl Sampler {
                 (Some((u, k)), Some(cycles)) => Some(core_values(cpus, u, k, cycles)),
                 _ => None,
             };
-            let engines = self.groups[gi].engines.map(engine_utilization);
+            let engines = self.groups[gi].engines.map(|h| if demo_gpus().is_some() { demo_engines() } else { engine_utilization(h) });
+            // The demo's memory pies: their counters are of adapters that aren't there.
+            for (k, gpu) in demo_gpus().unwrap_or_default().iter().filter(|g| g.memory > 0.0).enumerate() {
+                env.insert(format!("vram_gpu{k}"), gpu.memory * (0.15 + 0.7 * demo_wave(k as f64)));
+            }
             if engines.is_some() && self.gpus_checked.elapsed() >= GPU_REFRESH {
                 self.gpus = gpu_names(self.software_gpus);
                 self.gpus_checked = Instant::now();
@@ -883,7 +947,7 @@ impl Sampler {
                 absent = !values.iter().any(|v| v.is_finite());
                 let scale = max.unwrap_or_else(|| m.recent.iter().copied().fold(0.0, f64::max) * 1.1);
                 // Each bar's own reading, for its tooltip.
-                let tips: Vec<String> = values.iter().map(|v| q(&format_value(*v, &m.spec))).collect();
+                let tips: Vec<String> = values.iter().map(|v| q(&tip_value(*v, &m.spec))).collect();
                 let tip = tips.join(" ");
                 if tip != m.tip {
                     pre.push(format!("meters bartips {i} {tip}"));
@@ -897,15 +961,15 @@ impl Sampler {
                 let parts = |j: usize| m.spec.names.get(j).cloned().unwrap_or_else(|| (if is_disk { DISK_PARTS } else { NIC_PARTS })[j].to_string());
                 // Each device: its label, whether it's the one that always shows, and what its tooltip says beyond
                 // its readings.
-                let about = |inst: &str| -> (String, bool, Vec<String>) {
+                let about = |inst: &str| -> (String, bool, Vec<String>, String) {
                     if is_disk {
                         match disks.iter().find(|d| d.instance == inst) {
                             Some(d) => {
                                 let mut lines = vec![d.model.clone()];
                                 lines.extend(d.volumes.iter().filter(|v| v.2 > 0).map(|(l, free, total)| format!("{l} {}", crate::devices::space(*free, *total))));
-                                (d.label.clone(), d.system, lines)
+                                (d.label.clone(), d.system, lines, d.id.clone())
                             }
-                            None => (inst.to_string(), false, Vec::new()),
+                            None => (inst.to_string(), false, Vec::new(), inst.to_string()),
                         }
                     } else {
                         match nics.iter().find(|n| n.instance == inst) {
@@ -915,9 +979,14 @@ impl Sampler {
                                 let v6 = n.addresses.iter().filter(|a| a.contains(':')).take(1);
                                 let link = std::iter::once(crate::devices::link_speed(n.speed)).filter(|s| !s.is_empty());
                                 lines.push(link.chain(v4.chain(v6).cloned()).collect::<Vec<_>>().join(" · "));
-                                (n.label.clone(), n.internet, lines)
+                                // Why it isn't eth0, and why those aren't on the bar beside it.
+                                if !n.earlier.is_empty() {
+                                    lines.push("\nInterfaces with a lower LUID index and no PDH instance:".to_string());
+                                    lines.extend(n.earlier.iter().cloned());
+                                }
+                                (n.label.clone(), n.internet, lines, if n.id.is_empty() { n.label.clone() } else { n.id.clone() })
                             }
-                            None => (inst.to_string(), false, Vec::new()),
+                            None => (inst.to_string(), false, Vec::new(), inst.to_string()),
                         }
                     }
                 };
@@ -944,7 +1013,7 @@ impl Sampler {
                 }
                 absent = order.is_empty();
                 let scale = max.unwrap_or_else(|| m.recent.iter().copied().fold(0.0, f64::max) * 1.1);
-                let tips: Vec<String> = flat.iter().map(|v| q(&format_value(*v, &m.spec))).collect();
+                let tips: Vec<String> = flat.iter().map(|v| q(&tip_value(*v, &m.spec))).collect();
                 let tip = tips.join(" ");
                 if tip != m.tip {
                     pre.push(format!("meters bartips {i} {tip}"));
@@ -955,17 +1024,17 @@ impl Sampler {
                     .iter()
                     .zip(&pairs)
                     .map(|(k, r)| {
-                        let (label, pinned, more) = about(k);
+                        let (_, pinned, more, id) = about(k);
                         let why = match (pinned, is_disk) {
-                            (true, true) => " · Windows is on it",
-                            (true, false) => " · the route to the internet",
+                            (true, true) => " · boot disk",
+                            (true, false) => " · default route",
                             (false, _) => "",
                         };
-                        let mut lines = vec![format!("{} {label}{why}", m.spec.label)];
-                        lines.push((0..2).map(|j| format!("{} {}", parts(j), format_value(r[j], &m.spec))).collect::<Vec<_>>().join(" · "));
+                        let mut lines = vec![format!("{id}{why}")];
+                        lines.push(tip_rows((0..2).map(|j| (parts(j).to_string(), tip_value(r[j], &m.spec))).collect()));
                         lines.extend(more.into_iter().filter(|l| !l.is_empty()));
                         if !pinned {
-                            lines.push(if hold.is_zero() { "here since it was busy".into() } else { format!("here while busy; leaves {}s after", hold.as_secs()) });
+                            lines.push(if hold.is_zero() { "shown while active".into() } else { format!("shown while active; hidden after {} s idle", hold.as_secs()) });
                         }
                         lines.join("\n")
                     })
@@ -1050,22 +1119,22 @@ impl Sampler {
                         let name = gpus.get(*luid).map_or("GPU", String::as_str);
                         let mut head = name.to_string();
                         if let Some(s) = states.get(j).filter(|s| !s.is_empty()) {
-                            head += &format!(" · power state {s}");
+                            head += &format!("\nP-state {s}");
                         }
                         let mut busy: Vec<(&EngineKey, f64)> = util.iter().filter(|(k, v)| k.0 == *luid && **v >= ENGINE_BUSY).map(|(k, v)| (k, *v)).collect();
                         busy.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.2.cmp(&b.0.2)));
                         let kinds = |kind: &str| util.keys().filter(|k| k.0 == *luid && k.3 == kind).count();
-                        let work: Vec<String> = busy
+                        let work: Vec<(String, String)> = busy
                             .iter()
                             .take(8)
                             .map(|(k, v)| {
                                 let kind = if k.3.is_empty() { "engine".to_string() } else { k.3.replace('_', " ") };
                                 let kind = if kinds(&k.3) > 1 { format!("{kind} {}", k.2) } else { kind };
-                                format!("{kind} {v:.0}%")
+                                (kind, tip_percent(*v))
                             })
                             .collect();
-                        let work = if work.is_empty() { "idle".to_string() } else { work.join(" · ") };
-                        format!("{head}\n{work}")
+                        let work = if work.is_empty() { "idle".to_string() } else { tip_rows(work) };
+                        format!("{head}\n\n{work}")
                     })
                     .collect();
                 if devtips != m.devtips {
@@ -1102,17 +1171,18 @@ impl Sampler {
             absent |= !m.gate_open;
         }
 
-        // Pies explain themselves in the tooltip: named slices, and what they are out of.
-        if m.spec.style == Style::Pie && (!m.spec.names.is_empty() || max.is_some()) {
-            let mut parts: Vec<String> = if m.spec.names.is_empty() {
-                vec![format_value(v0, &m.spec)]
+        // A reading explains itself in the tooltip: named slices, each's share, and what they are out of.
+        if matches!(m.spec.style, Style::Pie | Style::Bar | Style::History) && (!m.spec.names.is_empty() || max.is_some()) {
+            let share = |v: f64| max.filter(|mx| *mx > 0.0 && m.spec.unit != "%").map_or(String::new(), |mx| format!("  {}", tip_percent(v / mx * 100.0)));
+            let mut rows: Vec<(String, String)> = if m.spec.names.is_empty() {
+                vec![(if max.is_some() { "used" } else { "current" }.to_string(), format!("{}{}", tip_value(v0, &m.spec), share(v0)))]
             } else {
-                m.spec.names.iter().zip(&values).map(|(n, v)| format!("{n} {}", format_value(*v, &m.spec))).collect()
+                m.spec.names.iter().zip(&values).map(|(n, v)| (n.clone(), format!("{}{}", tip_value(*v, &m.spec), share(*v)))).collect()
             };
             if let Some(mx) = max {
-                parts.push(format!("of {}", format_value(mx, &m.spec)));
+                rows.push(("total".to_string(), tip_value(mx, &m.spec)));
             }
-            let tip = parts.join(" · ");
+            let tip = tip_rows(rows);
             if tip != m.tip {
                 pre.push(format!("meters tip {i} {}", q(&tip)));
                 m.tip = tip;
@@ -1195,6 +1265,9 @@ fn skipped_gpu(luid: &str) -> bool {
 /// Adapter names by LUID, spelled like GPU Engine instance names (`0x00000000_0x0000d1e4`); and, unless
 /// `software_gpus`, the software adapters noted to be left out.
 fn gpu_names(software_gpus: bool) -> HashMap<String, String> {
+    if let Some(gpus) = demo_gpus() {
+        return gpus.iter().map(|g| (g.luid.clone(), g.name.to_string())).collect();
+    }
     let mut out = HashMap::new();
     let mut software = Vec::new();
     let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else { return out };
@@ -1369,6 +1442,44 @@ fn format_value(v: f64, spec: &MeterSpec) -> String {
     }
 }
 
+/// A percentage for a tooltip: always four characters.
+fn tip_percent(v: f64) -> String {
+    if v.is_finite() { format!("{:>3.0}%", v.clamp(0.0, 100.0)) } else { "   –".into() }
+}
+
+/// An amount for a tooltip: hundredths, at most `999.99`, then the unit, so that a reading always takes the same room.
+/// (A bigger unit from 1000 up, not from 1024: that's what keeps it to six characters.)
+fn tip_amount(v: f64, base: f64, units: &[&str]) -> String {
+    let width = units.iter().map(|u| u.len()).max().unwrap_or(0);
+    let (mut v, mut unit) = (v.max(0.0), 0);
+    while v >= 999.995 && unit + 1 < units.len() {
+        v /= base;
+        unit += 1;
+    }
+    format!("{v:>6.2} {:>width$}", units[unit])
+}
+
+/// A reading for a tooltip, padded to the widest it can be.
+fn tip_value(v: f64, spec: &MeterSpec) -> String {
+    if !v.is_finite() {
+        return format!("{:>6}", "–");
+    }
+    match spec.unit.as_str() {
+        "%" => tip_percent(v),
+        "bytes" => tip_amount(v, 1024.0, &["B", "KB", "MB", "GB", "TB"]),
+        "bytes/s" => tip_amount(v, 1024.0, &["B/s", "KB/s", "MB/s", "GB/s"]),
+        "bits/s" => tip_amount(v * 8.0, 1000.0, &["b/s", "Kb/s", "Mb/s", "Gb/s"]),
+        "" => format!("{v:>6.2}"),
+        suffix => format!("{v:>6.2}{suffix}"),
+    }
+}
+
+/// Rows of a tooltip: the names padded to line their values up.
+fn tip_rows(rows: Vec<(String, String)>) -> String {
+    let width = rows.iter().map(|(name, _)| name.chars().count()).max().unwrap_or(0);
+    rows.iter().map(|(name, value)| format!("{name:<width$}  {value}")).collect::<Vec<_>>().join("\n")
+}
+
 /// `pms meters <file>`: just the sampler, in the foreground.
 pub fn run(path: &str) -> Result<(), String> {
     let config = config::load(path.as_ref())?;
@@ -1382,7 +1493,7 @@ pub fn run(path: &str) -> Result<(), String> {
 
         // The TAP may have been re-injected (meters gone) or be absent; keep trying.
         if !defined {
-            match sampler.define(&config.meter_height).iter().try_for_each(|l| crate::send(l).map(drop)) {
+            match sampler.define(&config.meter_height, &config.bar_height).iter().try_for_each(|l| crate::send(l).map(drop)) {
                 Ok(()) => defined = true,
                 Err(e) => {
                     eprintln!("waiting for TAP: {e}");
@@ -1433,6 +1544,28 @@ mod tests {
         assert_eq!(t.cpus.len(), si.dwNumberOfProcessors as usize, "layout {}", t.layout);
         let threads: usize = t.layout.split(['|', '/', ',']).map(|c| c.trim_start_matches('e').parse::<usize>().unwrap()).sum();
         assert_eq!(threads, t.cpus.len());
+    }
+
+    #[test]
+    fn tooltip_readings_keep_their_width() {
+        let spec = |unit: &str| MeterSpec { unit: unit.to_string(), ..toml::from_str("label = \"X\"").unwrap() };
+        for v in [0.0, 5.0, 100.0] {
+            assert_eq!(tip_percent(v).len(), 4, "{v}");
+        }
+        assert_eq!(tip_percent(100.0), "100%");
+        let bytes = spec("bytes");
+        for v in [0.0, 999.0, 1000.0, 1024.0, 1.5e6, 999.0e9, 1023.0 * 1024.0 * 1024.0, 3.2e10] {
+            assert_eq!(tip_value(v, &bytes).len(), 9, "{v}: {:?}", tip_value(v, &bytes));
+        }
+        assert_eq!(tip_value(32.0 * 1024.0 * 1024.0 * 1024.0, &bytes), " 32.00 GB");
+        assert_eq!(tip_value(1000.0 * 1024.0 * 1024.0, &bytes), "  0.98 GB", "not 1000.00 MB");
+        assert_eq!(tip_value(5.0, &bytes), "  5.00  B");
+        assert_eq!(tip_value(1.5e6, &spec("bytes/s")).len(), 11);
+    }
+
+    #[test]
+    fn tooltip_rows_line_up() {
+        assert_eq!(tip_rows(vec![("in use".into(), " 1.00 GB".into()), ("of".into(), " 2.00 GB".into())]), "in use   1.00 GB\nof       2.00 GB");
     }
 
     /// show_when: hidden until `at`, then shown until under `until` - a level wavering between the two doesn't

@@ -1,4 +1,4 @@
-//! The daemon without a console window, for autostart. Logs to %LOCALAPPDATA%\PimpMyShell\daemon.log.
+//! The daemon without a console window, for autostart. Logs to %APPDATA%\PimpMyShell\logs\daemon.log.
 //!
 //!   pmsd [config]      (default %APPDATA%\PimpMyShell\pms.toml, where one in %LOCALAPPDATA%\PimpMyShell, its
 //!                       place before 0.1.3, moves the first time)

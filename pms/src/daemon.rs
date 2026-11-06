@@ -78,6 +78,10 @@ const REFUSALS_ALLOWED: u32 = 2;
 /// How long they stay with Windows before we try the taskbar again, doubling while it goes on refusing.
 const REFUSED_RETRY: Duration = Duration::from_secs(5 * 60);
 const REFUSED_RETRY_MAX: Duration = Duration::from_secs(60 * 60);
+/// That the welcome has been offered, here. Nobody should sit through it twice.
+const WELCOMED: &str = "welcomed.txt";
+/// How many times in a row the meters may fail before we ask for a report.
+const METER_FAILURES: u32 = 3;
 /// Whose replaced taskbar we've explained: once is plenty, not at every sign-in.
 const TOLD: &str = "taskbar-told.txt";
 
@@ -166,6 +170,10 @@ struct Daemon {
     no_taskbar_since: Option<Instant>,
     told_replaced: bool,
     next_shell_check: Instant,
+    /// The taskbar's failures in a row (`failed`).
+    meter_failures: u32,
+    /// The welcome window is up.
+    welcoming: Arc<std::sync::atomic::AtomicBool>,
     /// What PimpMyShell has to tell the user itself (notices.rs).
     notices: Notices,
     /// The config didn't load at the start: this one is empty (a stock taskbar), until a save that loads.
@@ -450,7 +458,7 @@ impl Daemon {
                     self.sent_level = -1.0;
                     self.sent_tide = -1.0;
                 }
-                cmds.extend(self.sampler.define(&self.config.meter_height));
+                cmds.extend(self.sampler.define(&self.config.meter_height, &self.config.bar_height));
                 let batch = std::iter::once("batch".to_string()).chain(cmds.iter().map(|c| crate::quote(c))).collect::<Vec<_>>().join(" ");
                 match send(&batch) {
                     Ok(r) if !r.lines().any(|l| l.starts_with("error")) => self.sync_mic(),
@@ -640,7 +648,7 @@ impl Daemon {
         // A TAP that keeps failing goes inert for good (until a retry injects a fresh one).
         let _ = send("detach");
         if let Some(t) = &self.tray {
-            t.notify("PimpMyShell stopped", &format!("{why}. Your taskbar is back to normal. To try again, select Try again in the PimpMyShell menu in the system tray."));
+            t.notify("PimpMyShell stopped", &format!("{why}. Your taskbar is back to normal. To try again, select Try again in the PimpMyShell menu in the system tray. Select Save a report there to help us fix this."));
         }
     }
 
@@ -688,6 +696,7 @@ impl Daemon {
             && !self.stand_in
             && !self.updates.asked
             && self.updates.since.elapsed() >= UPDATE_QUESTION_AFTER
+            && !self.welcoming.load(Ordering::Acquire)
             && let Some(t) = &self.tray
         {
             self.updates.asked = true;
@@ -781,7 +790,7 @@ impl Daemon {
     fn install_update(&mut self) {
         let Some(update::Status::Ready { version, path, sha256 }) = self.updates.found.clone() else { return };
         log(format!("update: installing {version} from {}, as asked", path.display()));
-        if let Err(e) = update::install(&path, &version, &sha256) {
+        if let Err(e) = update::install(&path, &version, &sha256, false) {
             log(format!("update: {e}"));
             self.updates.found = None;
             self.sync_tray();
@@ -789,7 +798,7 @@ impl Daemon {
                 t.notify(&format!("PimpMyShell {version} didn't install"), &e);
             }
         }
-        // Otherwise the installer stops this daemon, installs, and starts the new one.
+        // Otherwise the installer stops this daemon, installs, and starts the new one, and settings it found open.
     }
 
     /// The answer to the question whether software update may check by itself: kept in the config.
@@ -802,6 +811,45 @@ impl Daemon {
         }
         if yes {
             self.updates.next = update::next_check();
+        }
+    }
+
+    /// A first run: all defaults, in the usual place, and no welcome yet. Its window asks the first questions, among them
+    /// software update's, which waits for it. A config that isn't new has been through all this.
+    fn welcome(&mut self) {
+        let mark = pms_tap::data_dir().join(WELCOMED);
+        if mark.exists() || !config::is_default(&self.path) {
+            return;
+        }
+        let Some(exe) = std::env::current_exe().ok().map(|e| e.with_file_name("pms-gui.exe")).filter(|_| config::untouched(&self.config)) else {
+            let _ = std::fs::write(&mark, "");
+            return;
+        };
+        let (waiting, config) = (self.welcoming.clone(), self.path.clone());
+        waiting.store(true, Ordering::Release);
+        std::thread::spawn(move || {
+            if let Err(e) = std::process::Command::new(exe).arg("--welcome").arg(config).status() {
+                log(format!("no welcome: {e}"));
+            }
+            let _ = std::fs::write(&mark, "");
+            waiting.store(false, Ordering::Release);
+        });
+    }
+
+    /// Something on the taskbar failed. Once it's clearly not a blip, a notice asks for a report.
+    fn failed(&mut self, what: &str, error: &str) {
+        self.meter_failures += 1;
+        if self.meter_failures == METER_FAILURES {
+            log(format!("{what}, {METER_FAILURES} times in a row: asking for a report"));
+            self.notices.raise(notices::problem(what, error));
+        }
+    }
+
+    /// *Shut up, computer*: clicks on notifications go ahead without asking, from now on.
+    fn stop_confirming_clicks(&mut self) {
+        match config::set_in_table(&self.path, "toasts", "confirm_clicks", "\"off\"") {
+            Ok(()) => log("notification clicks won't ask any more"),
+            Err(e) => log(format!("couldn't stop asking about notification clicks: {e}")),
         }
     }
 
@@ -840,6 +888,16 @@ impl Daemon {
                 tray::Command::InstallUpdate => self.install_update(),
                 tray::Command::UpdateConsent(yes) => self.set_update_consent(yes),
                 tray::Command::KeepNativeToasts => self.keep_native_toasts(),
+                tray::Command::StopConfirmingClicks => self.stop_confirming_clicks(),
+                tray::Command::SaveReport => {
+                    let config = self.path.clone();
+                    std::thread::spawn(move || notices::save_report(&config));
+                }
+                tray::Command::RemoveToast(id) => {
+                    if let Some(l) = self.toasts.as_ref().and_then(|f| f.listener.as_ref()) {
+                        l.remove(id);
+                    }
+                }
             }
         }
         false
@@ -911,7 +969,8 @@ impl Daemon {
         let want = |b: bool| if b { "on" } else { "off" };
         let drifted = field(&status, "backdrop") != Some(want(self.config.backdrop.is_some()))
             || field(&status, "alert") != Some(want(self.alert_shown))
-            || field(&status, "meters") != Some(&self.config.meters.len().to_string());
+            // The sampler's count, not the config's: `per_gpu` makes a meter per GPU with dedicated memory, or none.
+            || field(&status, "meters") != Some(&self.sampler.len().to_string());
         if self.applied.as_deref() == Some(key.as_str()) && !drifted {
             return;
         }
@@ -934,7 +993,7 @@ impl Daemon {
         cmds.extend(self.config.start_glow.iter().map(|g| g.command()));
         cmds.extend(self.config.app_glow.iter().map(|g| g.command()));
         if !self.sampler.is_empty() {
-            cmds.extend(self.sampler.define(&self.config.meter_height));
+            cmds.extend(self.sampler.define(&self.config.meter_height, &self.config.bar_height));
         }
         for cmd in &cmds {
             let r = send(cmd);
@@ -945,6 +1004,8 @@ impl Daemon {
             } {
                 self.applied = None;
                 self.retry_apply = Instant::now() + APPLY_BACKOFF;
+                let what = if cmd.starts_with("meters") { "The meters couldn't start" } else { "PimpMyShell couldn't set up your taskbar" };
+                self.failed(what, &e);
                 return self.note(format!("applying config: `{cmd}` -> {e}"));
             }
         }
@@ -962,6 +1023,7 @@ impl Daemon {
         log(format!("applied config to {key}"));
         self.last_note.clear();
         self.applied = Some(key);
+        self.meter_failures = 0;
         self.unhooked_since = None;
         if !self.stale_tap && std::mem::take(&mut self.toasts_parked) {
             self.toasts = toast_feed(&self.config);
@@ -1288,6 +1350,24 @@ impl Daemon {
             let events = send("toast events").unwrap_or_default();
             for ev in events.lines() {
                 let Some((id, what)) = ev.split_once(' ') else { continue };
+                match what {
+                    // A card asking stays until it's answered, as long as that takes.
+                    "asking" => {
+                        let asking = id.parse().ok();
+                        if let Some(n) = f.deck.iter_mut().find(|n| Some(n.id) == asking) {
+                            n.sticky = true;
+                        }
+                        if front == asking {
+                            f.showing_until = None;
+                        }
+                        continue;
+                    }
+                    "quiet" => {
+                        tray::queue(tray::Command::StopConfirmingClicks);
+                        continue;
+                    }
+                    _ => {}
+                }
                 let Some(t) = id.parse().ok().and_then(|id| f.take(id)) else { continue };
                 // One of our own: a click explains (the explanation waits for its answer, so off the loop).
                 if Notices::is_ours(t.id) {
@@ -1314,11 +1394,26 @@ impl Daemon {
                     log(format!("toast from {} {how}; it stays in the notification center", t.app));
                     continue;
                 };
-                if let Some(l) = &f.listener {
+                // On a card, that's been asked and answered by now.
+                let confirm = cfg.confirm_clicks == "window";
+                if let Some(l) = f.listener.as_ref().filter(|_| !confirm) {
                     l.remove(t.id);
                 }
                 std::thread::spawn(move || {
                     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+                    if confirm {
+                        if let Some(plan) = toasts::plan(&t, &args, kind) {
+                            let answer = tray::ask_click(&plan.about, &plan.question, &plan.rows);
+                            if answer.quiet {
+                                tray::queue(tray::Command::StopConfirmingClicks);
+                            }
+                            if !answer.yes {
+                                log(format!("toast from {}: you said no; it stays in the notification center", t.app));
+                                return;
+                            }
+                        }
+                        tray::queue(tray::Command::RemoveToast(t.id));
+                    }
                     match toasts::activate(&t, &args, kind) {
                         Ok(how) => log(format!("toast click: {how}")),
                         Err(e) => log(format!("toast click on {}: {e}", t.app)),
@@ -1373,7 +1468,8 @@ impl Daemon {
         let mut refused = None;
         while let Some(n) = f.queue.pop_front() {
             let ms = front_ms(cfg, &n, 1);
-            match send(&n.command(ms, cfg.pimped())) {
+            let asks = if cfg.confirm_clicks == "card" && !Notices::is_ours(n.id) { n.asks() } else { Vec::new() };
+            match send(&n.command(ms, cfg.pimped(), &asks)) {
                 Ok(r) if !r.starts_with("error") => {
                     f.shown(&mut self.notices);
                     f.showing_until = time_up(now, ms);
@@ -1424,16 +1520,23 @@ impl Daemon {
         match r {
             Ok(r) if r.lines().any(|l| l.starts_with("error")) => {
                 self.note(format!("meters push -> {r}"));
+                self.failed("The meters keep failing", &r);
                 self.applied = None;
             }
-            Ok(_) => {}
+            Ok(_) => self.meter_failures = 0,
             Err(e) => self.note(format!("meters push: {e}")),
         }
     }
 }
 
 pub fn run(path: &Path) -> Result<(), String> {
+    pms_tap::logfile::move_old();
     let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+    match config::adopt_layers(&path) {
+        Ok(true) => log(format!("{} now holds only what's been changed; the whole file is kept as .toml.full.bak", path.display())),
+        Ok(false) => {}
+        Err(e) => log(format!("keeping the config as it is: {e}")),
+    }
     // A config that doesn't load doesn't stop us: a stock taskbar (an empty config) meanwhile, a notice saying what's
     // wrong, and the next save that loads takes over.
     let (config, sampler, broken) = match config::load(&path).and_then(|c| Sampler::new(&c).map(|s| (c, s))) {
@@ -1506,6 +1609,8 @@ pub fn run(path: &Path) -> Result<(), String> {
         taskbar_software: Vec::new(),
         no_taskbar_since: None,
         told_replaced: false,
+        meter_failures: 0,
+        welcoming: Arc::default(),
         next_shell_check: Instant::now() + SHELL_CHECK,
         notices: Notices::default(),
         stand_in: broken.is_some(),
@@ -1520,6 +1625,7 @@ pub fn run(path: &Path) -> Result<(), String> {
     d.toasts_parked = true;
     d.tray = Tray::start(&d.path).map_err(|e| log(format!("no tray icon: {e}"))).ok();
     d.sync_tray();
+    d.welcome();
     log(format!("PimpMyShell {} on {}", crate::version::CURRENT, system::windows_version()));
     log(format!(
         "daemon up (pid {}): {}; backdrop {}; hot-mic {}; toasts {}; meters: {}",
