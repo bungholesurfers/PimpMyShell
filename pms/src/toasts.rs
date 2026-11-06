@@ -97,8 +97,10 @@ pub struct Incoming {
     pub actions: Vec<Action>,
     /// 0..1, or negative for indeterminate.
     pub progress: Option<f64>,
-    /// `duration="long"`, or a scenario Windows keeps on screen (reminder, alarm, incomingCall, urgent).
+    /// `duration="long"`: Windows' long time on screen.
     pub long: bool,
+    /// A kind Windows keeps on screen until it's answered (see `stays`): no time limit.
+    pub sticky: bool,
     /// Packaged apps resolve ms-appx/ms-appdata URIs and activators through their package.
     package: Option<Package>,
 }
@@ -110,8 +112,7 @@ struct Package {
 }
 
 impl Incoming {
-    /// A card of PimpMyShell's own (notices.rs), under its name and logo, kept up as long as Windows keeps a
-    /// reminder.
+    /// A card of PimpMyShell's own (notices.rs), under its name and logo, up for Windows' long time.
     pub fn own(id: u32, title: &str, body: &str, logo: Option<PathBuf>) -> Incoming {
         Incoming {
             id,
@@ -128,12 +129,14 @@ impl Incoming {
             actions: Vec::new(),
             progress: None,
             long: true,
+            sticky: false,
             package: None,
         }
     }
 
     /// `toast show` arguments for the TAP.
-    pub fn command(&self, ms: u32) -> String {
+    /// `toast show` for this card, over `ms` (0: it has no time limit).
+    pub fn command(&self, ms: u32, pimped: bool) -> String {
         let q = crate::quote;
         let path = |p: &Option<PathBuf>| p.as_ref().map_or(String::new(), |p| p.display().to_string());
         let mut fields = vec![
@@ -149,6 +152,7 @@ impl Incoming {
             format!("circle={}", self.circle as u8),
         ];
         fields.extend(self.progress.map(|p| format!("progress={p}")));
+        fields.extend(pimped.then(|| "style=pimped".to_string()));
         fields.extend(self.actions.iter().map(|a| format!("b={}", a.label)));
         std::iter::once("toast show".to_string()).chain(fields.iter().map(|f| q(f))).collect::<Vec<_>>().join(" ")
     }
@@ -207,6 +211,11 @@ impl Listener {
         Ok(out)
     }
 
+    /// Whether notification `id` was still there at the last poll (an app takes back a call that ended).
+    pub fn holds(&self, id: u32) -> bool {
+        self.seen.contains(&id)
+    }
+
     /// Take it out of the notification center, as Windows does after an activation.
     pub fn remove(&self, id: u32) {
         if let Err(err) = self.inner.RemoveNotification(id) {
@@ -243,6 +252,7 @@ impl Listener {
             actions: Vec::new(),
             progress: None,
             long: false,
+            sticky: false,
             package,
         };
         if let Err(err) = payload(id).and_then(|(xml, data)| t.read_payload(&xml, &data)) {
@@ -261,6 +271,17 @@ impl Listener {
             t.title = t.app.clone();
         }
         Some(t)
+    }
+}
+
+/// Whether Windows keeps a toast on screen until it's dismissed, going by the toast schema: alarms and incoming calls,
+/// and reminders that have a button (without one, the scenario is ignored). `urgent` is about getting past do not
+/// disturb, not about staying.
+fn stays(scenario: &str, buttons: usize) -> bool {
+    match scenario {
+        "alarm" | "incomingCall" => true,
+        "reminder" => buttons > 0,
+        _ => false,
     }
 }
 
@@ -319,7 +340,9 @@ impl Incoming {
         let launch = attr(&toast, "launch");
         let kind = Activation::parse(&attr(&toast, "activationType"), &launch).unwrap_or(Activation::App);
         self.launch = (launch, kind);
-        self.long = attr(&toast, "duration") == "long" || ["reminder", "alarm", "incomingCall", "urgent"].contains(&attr(&toast, "scenario").as_str());
+        self.long = attr(&toast, "duration") == "long";
+        let buttons = elements(&toast, "actions/action").iter().filter(|a| attr(a, "placement") != "contextmenu").count();
+        self.sticky = stays(&attr(&toast, "scenario"), buttons);
         if let Some(h) = elements(&toast, "header").first() {
             self.attribution = attr(h, "title");
         }
@@ -510,14 +533,15 @@ fn activator(t: &Incoming) -> Option<GUID> {
 
 pub(crate) fn open(uri: &str) -> Result<(), String> {
     let r = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(uri), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
-    if r.0 as usize > 32 { Ok(()) } else { Err(format!("ShellExecute({uri}) failed ({})", r.0 as usize)) }
+    // Only the scheme, for the log: the rest of a toast's link can say who it's about.
+    if r.0 as usize > 32 { Ok(()) } else { Err(format!("ShellExecute({}:) failed ({})", uri.split(':').next().unwrap_or(""), r.0 as usize)) }
 }
 
 /// Do what clicking `args` on the real toast would. Returns how it went, for the log.
 pub fn activate(t: &Incoming, args: &str, kind: Activation) -> Result<String, String> {
     match kind {
         Activation::Dismiss => Ok("dismissed".into()),
-        Activation::Protocol => open(args).map(|()| format!("opened {args}")),
+        Activation::Protocol => open(args).map(|()| format!("opened {}'s link", t.app)),
         Activation::App => {
             if let Some(clsid) = activator(t) {
                 let cb: INotificationActivationCallback = unsafe { CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER) }.map_err(e)?;
@@ -874,6 +898,15 @@ fn collect_apps(key: HKEY, prefix: &str, out: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn what_stays_until_answered() {
+        use super::stays;
+        assert!(stays("alarm", 0) && stays("incomingCall", 0));
+        // Windows ignores a reminder's scenario unless it has a button.
+        assert!(stays("reminder", 1) && !stays("reminder", 0));
+        assert!(!stays("urgent", 2) && !stays("", 2));
+    }
+
     use super::*;
 
     #[test]

@@ -61,6 +61,33 @@ pub(crate) fn element(ctx: &Ctx, h: InstanceHandle) -> R<FrameworkElement> {
     insp.ok_or("null element")?.cast().map_err(|e| e.to_string())
 }
 
+/// The Grid to lay things over the taskbar in: the nearest one above `from`. It's normally `from`'s parent, but what
+/// sits between them differs between Windows builds and taskbar mods; when it isn't, the log says what's there. The
+/// error names every element above `from`, for a report from a taskbar we haven't seen.
+pub(crate) fn grid_above(ctx: &Ctx, from: InstanceHandle) -> R<pms_xaml::Panel> {
+    let mut above = Vec::new();
+    {
+        let tree = lock(&crate::TREE);
+        let mut at = tree.get(&from).map(|n| n.parent);
+        while let Some(h) = at.filter(|h| *h != 0) {
+            let Some(n) = tree.get(&h) else { break };
+            above.push((h, n.ty.clone()));
+            at = Some(n.parent);
+        }
+    }
+    let names = |n: usize| above.iter().take(n).map(|(_, ty)| ty.as_str()).collect::<Vec<_>>().join(" < ");
+    for (i, (h, _)) in above.iter().enumerate() {
+        let Ok(e) = element(ctx, *h) else { continue };
+        if e.cast::<pms_xaml::Grid>().is_ok() {
+            if i > 0 {
+                crate::log(format!("the taskbar isn't laid out as usual: going up to a Grid past {}", names(i)));
+            }
+            return e.cast().map_err(|e| e.to_string());
+        }
+    }
+    Err(format!("no Grid to show this in, above the tray: {}", names(above.len())))
+}
+
 /// Start tracking (idempotent). Must run on the UI thread.
 pub fn ensure_tracking(ctx: &Ctx) -> R<()> {
     if TRACKER.with_borrow(Option::is_some) {

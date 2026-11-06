@@ -30,6 +30,7 @@ use crate::config::{self, Config};
 use crate::hotmic::{self, MicWatch};
 use crate::meters::Sampler;
 use crate::notices::{self, Notices};
+use crate::system;
 use crate::toasts::{self, Banners, Incoming, Listener};
 use crate::tray::{self, Tray};
 use crate::watchdog::Watchdog;
@@ -65,6 +66,20 @@ const LISTEN_RETRY: Duration = Duration::from_secs(15);
 /// How long a config that didn't load waits before its notice shows: a save that writes the file in two goes
 /// (truncated, then filled) loads at the second, and the notice never comes.
 const CONFIG_NOTICE_AFTER: Duration = Duration::from_secs(3);
+/// How long a shell can go without its XAML taskbar before we say why we can't help: with software that can replace
+/// it, and without (where it might just be a slow start, so longer).
+const REPLACED_AFTER: Duration = Duration::from_secs(30);
+const NO_TASKBAR_AFTER: Duration = Duration::from_secs(120);
+/// How often to look for a bar of someone else's over a hidden taskbar.
+const SHELL_CHECK: Duration = Duration::from_secs(60);
+/// How many toasts in a row the taskbar may refuse before they all go back to Windows: one is a glitch, or one app's odd
+/// toast, and not reason enough to give up on the taskbar.
+const REFUSALS_ALLOWED: u32 = 2;
+/// How long they stay with Windows before we try the taskbar again, doubling while it goes on refusing.
+const REFUSED_RETRY: Duration = Duration::from_secs(5 * 60);
+const REFUSED_RETRY_MAX: Duration = Duration::from_secs(60 * 60);
+/// Whose replaced taskbar we've explained: once is plenty, not at every sign-in.
+const TOLD: &str = "taskbar-told.txt";
 
 static STOP: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -144,6 +159,13 @@ struct Daemon {
     /// The TAP in explorer is of another build and wouldn't be swapped: it gets the rest of the config, but not the
     /// toasts (its protocol may differ); native banners stay until explorer restarts.
     stale_tap: bool,
+    /// The explorer we've put in the log (`survey_shell`), and the taskbar software around it.
+    surveyed: Option<u32>,
+    taskbar_software: Vec<&'static system::Known>,
+    /// Since when the shell has been up without the XAML taskbar we hook, and whether we've said why.
+    no_taskbar_since: Option<Instant>,
+    told_replaced: bool,
+    next_shell_check: Instant,
     /// What PimpMyShell has to tell the user itself (notices.rs).
     notices: Notices,
     /// The config didn't load at the start: this one is empty (a stock taskbar), until a save that loads.
@@ -208,6 +230,12 @@ struct ToastFeed {
     /// Apps that could notify, being listed on a worker thread (`toasts::notifiers`).
     scan: Option<std::sync::mpsc::Receiver<Vec<String>>>,
     next_scan: Instant,
+    /// The toasts the taskbar has refused in a row.
+    refusals: u32,
+    /// Toasts are back with Windows (`give_back`) until then, and notices can't come through here meanwhile.
+    given_back_until: Option<Instant>,
+    /// How long the next `give_back` lasts.
+    give_back_for: Duration,
 }
 
 impl ToastFeed {
@@ -224,7 +252,10 @@ impl ToastFeed {
                     log("listening for notifications at last: they come to the taskbar");
                 }
                 notices.clear("notification access");
-                notices.clear("toasts");
+                // A taskbar that was refusing toasts has yet to show one: `shown` says when it's over.
+                if self.refusals == 0 {
+                    notices.clear("toasts");
+                }
             }
             Err(e) => {
                 self.next_listen = now + LISTEN_RETRY;
@@ -247,6 +278,39 @@ impl ToastFeed {
         notices.raise(notices::notification_access());
     }
 
+    /// The taskbar took a toast: whatever it was refusing before, that's over.
+    fn shown(&mut self, notices: &mut Notices) {
+        if self.refusals > 0 {
+            self.refusals = 0;
+            self.give_back_for = REFUSED_RETRY;
+            notices.clear("toasts");
+        }
+    }
+
+    /// The taskbar refused a toast. Should that go on, whether it's time to `give_back`: once it has, the first
+    /// refusal after a retry is enough.
+    fn refused(&mut self) -> bool {
+        self.refusals += 1;
+        self.refusals >= REFUSALS_ALLOWED
+    }
+
+    /// The taskbar won't take toasts: with native banners off they'd go missing, so they go back to Windows for a while.
+    fn give_back(&mut self, error: &str, around: &[&str], notices: &mut Notices, now: Instant) {
+        log(format!("the taskbar won't show toasts, so they're back to Windows for {} min: {error}", self.give_back_for.as_secs() / 60));
+        self.given_back_until = Some(now + self.give_back_for);
+        self.give_back_for = (self.give_back_for * 2).min(REFUSED_RETRY_MAX);
+        self.listener = None;
+        self.scan = None;
+        self.queue.clear();
+        self.deck.clear();
+        self.showing_until = None;
+        self.banners.restore();
+        let _ = send("toast hide");
+        if !notices.is_raised("toasts") {
+            notices.raise(notices::toasts_refused(error, around));
+        }
+    }
+
     /// Clicks may still come: a card shows, or one left only just now.
     fn wants_events(&self, now: Instant) -> bool {
         !self.deck.is_empty() || self.gone.iter().any(|(_, at)| now.duration_since(*at) < LATE_CLICKS)
@@ -262,14 +326,20 @@ impl ToastFeed {
     }
 }
 
-/// How long a card that comes forward stays: shorter while more wait behind it, Windows' long time for the kinds
-/// it keeps up (reminders, calls, ...).
+/// How long a card that comes forward stays: shorter while more wait behind it, Windows' long time for those that
+/// ask for it, and 0 (no limit) for the kinds it keeps up until they're answered (alarms, calls, reminders).
 fn front_ms(cfg: &crate::config::Toasts, n: &Incoming, deck: usize) -> u32 {
-    match (n.long, deck > 1) {
-        (true, _) => cfg.duration_ms.max(LONG_TOAST_MS),
-        (false, true) => cfg.duration_ms.min(QUEUED_TOAST_MS),
-        (false, false) => cfg.duration_ms,
+    match (n.sticky, n.long, deck > 1) {
+        (true, ..) => 0,
+        (_, true, _) => cfg.duration_ms.max(LONG_TOAST_MS),
+        (_, false, true) => cfg.duration_ms.min(QUEUED_TOAST_MS),
+        (_, false, false) => cfg.duration_ms,
     }
+}
+
+/// When a card shown now for `ms` leaves: never, for 0.
+fn time_up(now: Instant, ms: u32) -> Option<Instant> {
+    (ms > 0).then(|| now + Duration::from_millis(ms as u64))
 }
 
 /// List the apps that could notify, off the main loop.
@@ -303,6 +373,9 @@ fn toast_feed(config: &Config) -> Option<ToastFeed> {
         next_poll: now,
         scan: None,
         next_scan: now,
+        refusals: 0,
+        given_back_until: None,
+        give_back_for: REFUSED_RETRY,
     })
 }
 
@@ -415,8 +488,10 @@ impl Daemon {
         }
         if taskbar_pid().is_none() {
             self.note("waiting for the taskbar".into());
+            self.no_taskbar();
             return;
         }
+        self.no_taskbar_since = None;
         self.last_inject = Some(Instant::now());
         match inject() {
             Ok(msg) => {
@@ -435,6 +510,66 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// Puts the shell's versions and what's around it in the log, once per explorer: a report starts with these.
+    fn survey_shell(&mut self) {
+        let Some(pid) = system::shell_pid().filter(|&pid| self.surveyed != Some(pid)) else { return };
+        self.surveyed = Some(pid);
+        system::shell_report(pid).iter().for_each(log);
+        self.taskbar_software = system::taskbar_software(pid);
+    }
+
+    /// The shell is up, but without the XAML taskbar we hook. We go on waiting (switched back, it just works), and
+    /// once it's clear this isn't a slow start, say why nothing's happening.
+    fn no_taskbar(&mut self) {
+        let Some(pid) = system::shell_pid() else {
+            self.no_taskbar_since = None;
+            return;
+        };
+        let waited = self.no_taskbar_since.get_or_insert_with(Instant::now).elapsed();
+        if self.told_replaced || waited < REPLACED_AFTER {
+            return;
+        }
+        let replacer = system::taskbar_software(pid).into_iter().find(|k| k.role == system::Role::Replaces);
+        if replacer.is_some() || waited >= NO_TASKBAR_AFTER {
+            self.tell_replaced(replacer.map(|k| k.name));
+        }
+    }
+
+    /// A bar of someone else's over a hidden taskbar: cards and meters would go on a taskbar nobody sees, so we stop.
+    fn check_taskbar_hidden(&mut self, now: Instant) {
+        if now < self.next_shell_check {
+            return;
+        }
+        self.next_shell_check = now + SHELL_CHECK;
+        if !self.active() || !system::taskbar_hidden() {
+            return;
+        }
+        let Some(pid) = system::shell_pid() else { return };
+        if let Some(k) = system::taskbar_software(pid).into_iter().find(|k| k.role == system::Role::Hides) {
+            self.watchdog.bench(format!("{} has the keys to your taskbar", k.name));
+            self.quiet();
+            let _ = send("detach");
+            self.tell_replaced(Some(k.name));
+        }
+    }
+
+    /// Explains that `name` runs the taskbar: in the log each run, on screen the first time (for that name).
+    fn tell_replaced(&mut self, name: Option<&str>) {
+        self.told_replaced = true;
+        let who = name.unwrap_or("unknown");
+        log(format!("no Windows 11 taskbar to hook (running it: {who})"));
+        let told = pms_tap::data_dir().join(TOLD);
+        if std::fs::read_to_string(&told).is_ok_and(|t| t.trim() == who) {
+            return;
+        }
+        let _ = std::fs::write(&told, who);
+        let notice = notices::taskbar_replaced(name);
+        std::thread::spawn(move || {
+            let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            notices::explain(&notice);
+        });
     }
 
     /// Keep the watchdog on the explorer we're talking to, whether or not we injected it: a daemon started while a TAP
@@ -505,7 +640,7 @@ impl Daemon {
         // A TAP that keeps failing goes inert for good (until a retry injects a fresh one).
         let _ = send("detach");
         if let Some(t) = &self.tray {
-            t.notify("PimpMyShell stopped hooking explorer", &format!("{why}. The taskbar is back to stock; the PimpMyShell icon's menu can try again."));
+            t.notify("PimpMyShell stopped", &format!("{why}. Your taskbar is back to normal. To try again, select Try again in the PimpMyShell menu in the system tray."));
         }
     }
 
@@ -556,7 +691,7 @@ impl Daemon {
             && let Some(t) = &self.tray
         {
             self.updates.asked = true;
-            t.ask_update_consent();
+            t.ask_update_consent(self.config.latest_channel());
         }
         let waiting = matches!(self.updates.found, Some(update::Status::Ready { .. }));
         if self.config.update_check == Some(true) && !self.updates.busy && !waiting && now >= self.updates.next {
@@ -574,23 +709,27 @@ impl Daemon {
                     update::Status::Ready { version, .. } => Some((
                         version.clone(),
                         format!("PimpMyShell {version} is ready to install"),
-                        "Downloaded from GitHub, and its signature checks out. Install it from the PimpMyShell icon's menu: it asks first.".to_string(),
+                        "It's downloaded and verified. To install it, select Install in the PimpMyShell menu in the system tray.".to_string(),
                     )),
                     update::Status::Available { version } => Some((
                         version.clone(),
-                        format!("PimpMyShell {version} is out"),
-                        "This copy isn't the installed one, so it can't update itself: the PimpMyShell icon's menu opens the new version's page.".to_string(),
+                        format!("PimpMyShell {version} is available"),
+                        "This copy can't install updates. To get it, select it in the PimpMyShell menu in the system tray.".to_string(),
                     )),
                     // Only a check by itself finds this (one asked for downloads it again).
                     update::Status::Stuck { version } => Some((
                         version.clone(),
                         format!("PimpMyShell {version} didn't install"),
-                        "Its installer ran before, but this is still the older version. Check again from the settings, or get it from the releases page.".to_string(),
+                        "You still have the earlier version. To try again, check for updates in settings, or download it from the releases page.".to_string(),
                     )),
                     update::Status::UpToDate { stable } if manual => Some((
                         String::new(),
-                        "PimpMyShell is up to date".to_string(),
-                        format!("This is PimpMyShell {}; the {} release is {stable}.", crate::version::CURRENT, if self.config.latest_channel() { "latest" } else { "stable" }),
+                        "You're up to date".to_string(),
+                        format!(
+                            "You have PimpMyShell {}. The latest {} is {stable}.",
+                            crate::version::CURRENT,
+                            if self.config.latest_channel() { "release" } else { "stable version" }
+                        ),
                     )),
                     _ => None,
                 };
@@ -600,7 +739,7 @@ impl Daemon {
             Err(e) => {
                 self.updates.next = now + update::random_secs(update::RETRY);
                 log(format!("update: the check failed: {e}"));
-                manual.then(|| (String::new(), "PimpMyShell couldn't check for updates".to_string(), e))
+                manual.then(|| (String::new(), "We couldn't check for updates".to_string(), e))
             }
         };
         self.sync_tray();
@@ -621,7 +760,9 @@ impl Daemon {
     fn pump_notices(&mut self) {
         let unhooked = self.unhooked_since.is_some_and(|s| s.elapsed() >= TOAST_GRACE);
         let deck_coming = self.config.toasts().is_some() && self.active() && !self.stale_tap && !unhooked;
-        if self.toasts.is_some() && !unhooked || deck_coming {
+        let refused = self.toasts.as_ref().is_some_and(|f| f.given_back_until.is_some());
+        let no_taskbar = self.no_taskbar_since.is_some_and(|s| s.elapsed() >= TOAST_GRACE);
+        if !refused && !no_taskbar && (self.toasts.is_some() && !unhooked || deck_coming) {
             return;
         }
         let now = Instant::now();
@@ -664,7 +805,7 @@ impl Daemon {
         }
     }
 
-    /// The notice about notification access was answered *Keep Windows' notifications*: `[toasts]` off in the config
+    /// The notice about notification access was answered *Keep Windows notifications*: `[toasts]` off in the config
     /// (`enabled = false`, its settings kept). The reload that follows takes the feed down; the notice is over.
     fn keep_native_toasts(&mut self) {
         match config::set_in_table(&self.path, "toasts", "enabled", "false") {
@@ -1069,6 +1210,15 @@ impl Daemon {
     fn pump_toasts(&mut self) {
         let (Some(cfg), Some(f)) = (self.config.toasts(), self.toasts.as_mut()) else { return };
         let now = Instant::now();
+        match f.given_back_until {
+            Some(until) if now < until => return,
+            Some(_) => {
+                log("trying the taskbar for toasts again");
+                f.given_back_until = None;
+                f.next_listen = now;
+            }
+            None => {}
+        }
         if f.listener.is_none() && now >= f.next_listen {
             f.listen(cfg, &mut self.notices, now);
         }
@@ -1102,9 +1252,25 @@ impl Daemon {
                         } else if !toasts::windows_accepts_toasts() {
                             log(format!("toast from {} held back by Windows (do not disturb, full screen, ...)", n.app));
                         } else {
-                            log(format!("toast from {}: {}", n.app, n.title));
+                            // The app alone: a toast's words are often someone's name, and logs get sent to people.
+                            log(format!("toast from {}", n.app));
                             f.queue.push_back(n);
                         }
+                    }
+                    // A card with no time limit whose notification is gone (a call that ended) goes too.
+                    let taken_back: Vec<u32> = f.deck.iter().filter(|n| n.sticky && !f.listener.as_ref().is_some_and(|l| l.holds(n.id))).map(|n| n.id).collect();
+                    for id in taken_back {
+                        let was_front = f.deck.last().is_some_and(|n| n.id == id);
+                        let Some(n) = f.take(id) else { continue };
+                        log(format!("toast from {} taken back by the app", n.app));
+                        let next = f.deck.last().filter(|_| was_front).map(|m| front_ms(cfg, m, f.deck.len()));
+                        if let Err(e) = send(&format!("toast drop id={id}{}", next.map(|ms| format!(" ms={ms}")).unwrap_or_default())) {
+                            log(format!("toast drop: {e}"));
+                        }
+                        if was_front {
+                            f.showing_until = next.and_then(|ms| time_up(now, ms));
+                        }
+                        f.gone.push_back((n, now));
                     }
                 }
                 Err(e) if !toasts::access_allowed() => {
@@ -1171,7 +1337,7 @@ impl Daemon {
                 if let Some(n) = f.deck.last() {
                     let ms = front_ms(cfg, n, f.deck.len());
                     match send(&format!("toast front id={} ms={ms}", n.id)) {
-                        Ok(r) if !r.starts_with("error") => f.showing_until = Some(now + Duration::from_millis(ms as u64)),
+                        Ok(r) if !r.starts_with("error") => f.showing_until = time_up(now, ms),
                         Ok(e) | Err(e) => log(format!("toast front: {e}")),
                     }
                 }
@@ -1187,7 +1353,7 @@ impl Daemon {
                 if let Err(e) = send(&cmd) {
                     log(format!("toast drop: {e}"));
                 }
-                f.showing_until = next.map(|ms| now + Duration::from_millis(ms as u64));
+                f.showing_until = next.and_then(|ms| time_up(now, ms));
                 f.gone.push_back((n, now));
             }
         }
@@ -1204,24 +1370,38 @@ impl Daemon {
             }
         }
         // New toasts go on top, in front of the ones still showing.
+        let mut refused = None;
         while let Some(n) = f.queue.pop_front() {
-            let ms = if n.long { cfg.duration_ms.max(LONG_TOAST_MS) } else { cfg.duration_ms };
-            match send(&n.command(ms)) {
+            let ms = front_ms(cfg, &n, 1);
+            match send(&n.command(ms, cfg.pimped())) {
                 Ok(r) if !r.starts_with("error") => {
-                    f.showing_until = Some(now + Duration::from_millis(ms as u64));
+                    f.shown(&mut self.notices);
+                    f.showing_until = time_up(now, ms);
                     // A card with the same id (a notice come again) is replaced: in front now.
                     f.deck.retain(|d| d.id != n.id);
                     f.deck.push(n);
                     if f.deck.len() > DECK_MAX {
-                        let old = f.deck.remove(0);
+                        // The oldest, sparing what waits for an answer.
+                        let old = f.deck.remove(f.deck.iter().position(|d| !d.sticky).unwrap_or(0));
                         if let Err(e) = send(&format!("toast drop id={}", old.id)) {
                             log(format!("toast drop: {e}"));
                         }
                         f.gone.push_back((old, now));
                     }
                 }
-                Ok(e) | Err(e) => log(format!("showing toast from {}: {e}", n.app)),
+                Ok(e) => {
+                    log(format!("showing toast from {}: {e}", n.app));
+                    if f.refused() {
+                        refused = Some(e);
+                        break;
+                    }
+                }
+                Err(e) => log(format!("showing toast from {}: {e}", n.app)),
             }
+        }
+        if let Some(e) = refused {
+            let around: Vec<&str> = self.taskbar_software.iter().map(|k| k.name).collect();
+            f.give_back(&e, &around, &mut self.notices, now);
         }
     }
 
@@ -1322,6 +1502,11 @@ pub fn run(path: &Path) -> Result<(), String> {
         tap_build: std::env::current_exe().ok().and_then(|e| pms_tap::build_of(&e.with_file_name("pms_tap.dll"))),
         swaps: 0,
         stale_tap: false,
+        surveyed: None,
+        taskbar_software: Vec::new(),
+        no_taskbar_since: None,
+        told_replaced: false,
+        next_shell_check: Instant::now() + SHELL_CHECK,
         notices: Notices::default(),
         stand_in: broken.is_some(),
     };
@@ -1335,6 +1520,7 @@ pub fn run(path: &Path) -> Result<(), String> {
     d.toasts_parked = true;
     d.tray = Tray::start(&d.path).map_err(|e| log(format!("no tray icon: {e}"))).ok();
     d.sync_tray();
+    log(format!("PimpMyShell {} on {}", crate::version::CURRENT, system::windows_version()));
     log(format!(
         "daemon up (pid {}): {}; backdrop {}; hot-mic {}; toasts {}; meters: {}",
         std::process::id(),
@@ -1371,6 +1557,8 @@ pub fn run(path: &Path) -> Result<(), String> {
             next_status = Instant::now() + STATUS_EVERY;
             d.pump_updates();
             d.pump_notices();
+            d.survey_shell();
+            d.check_taskbar_hidden(Instant::now());
         }
         if active {
             d.pump_toasts();
@@ -1428,12 +1616,18 @@ const RUN_VALUE: PCWSTR = w!("PimpMyShell");
 /// folder stays, for the user to remove.
 pub fn migrate() {
     let Some(base) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else { return };
-    let (old, new) = (base.join("SeaShell"), pms_tap::data_dir());
-    if old.join("seashell.toml").is_file() && !new.join("pms.toml").exists() {
-        let _ = std::fs::create_dir_all(&new);
-        for (from, to) in [("seashell.toml", "pms.toml"), ("banners.txt", "banners.txt")] {
-            if old.join(from).is_file() && std::fs::copy(old.join(from), new.join(to)).is_ok() {
-                log(format!("carried over {} from SeaShell", to));
+    let old = base.join("SeaShell");
+    // Only where PimpMyShell has no config of its own yet, in either place it has kept one (the old folder stays
+    // after the first carry-over, so this is asked every start). Not `default_path()`: that would move a config.
+    let config = config::config_dir().join("pms.toml");
+    if old.join("seashell.toml").is_file() && !config.exists() && !config::legacy_path().exists() {
+        let banners = pms_tap::data_dir().join("banners.txt");
+        for (from, to) in [(old.join("seashell.toml"), &config), (old.join("banners.txt"), &banners)] {
+            if let Some(dir) = to.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if from.is_file() && std::fs::copy(&from, to).is_ok() {
+                log(format!("carried over {} from SeaShell", to.display()));
             }
         }
     }
@@ -1446,26 +1640,38 @@ pub fn migrate() {
         }
     }
     let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, w!(r"Software\Classes\AppUserModelId\SeaShell")) };
+    // Start at sign-in as the settings wrote it before 0.1.3: with the config's path, its old place. The daemon takes
+    // that as the default anyway (config::given), but the path goes, so the entry names the exe alone, as the
+    // installer's does. Its exe stays as it is (another copy's entry isn't pointed at this one); only that exact form
+    // is touched.
+    if let Some(cmd) = read_run()
+        && let Some(plain) = without_legacy_config(&cmd, &config::legacy_path())
+    {
+        match write_run(&HSTRING::from(&plain)) {
+            Ok(()) => log(format!("start at sign-in: {plain} (it named the config's old place, {})", config::legacy_path().display())),
+            Err(e) => log(format!("start at sign-in: {e}")),
+        }
+    }
 }
 
 pub fn autostart(args: &[String]) -> Result<String, String> {
     match args.first().map(String::as_str) {
         Some("on") => {
-            let config = args.get(1).map(PathBuf::from).unwrap_or_else(config::default_path);
+            let config = config::given(args.get(1).map(Into::into));
             let config = std::path::absolute(&config).map_err(|e| e.to_string())?;
             config::load(&config)?;
             let exe = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("pmsd.exe");
             if !exe.is_file() {
                 return Err(format!("{} not found; `cargo build --release` builds it", exe.display()));
             }
-            let cmd = HSTRING::from(format!("\"{}\" \"{}\"", exe.display(), config.display()));
-            let bytes = unsafe { std::slice::from_raw_parts(cmd.as_ptr() as *const u8, (cmd.len() + 1) * 2) };
-            let err = unsafe {
-                RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, REG_SZ.0, Some(bytes.as_ptr() as _), bytes.len() as u32)
+            // The default config goes unnamed (pmsd finds it), as in the installer's entry: one that names it would
+            // outlive a move of it.
+            let cmd = if config::is_default(&config) {
+                HSTRING::from(format!("\"{}\"", exe.display()))
+            } else {
+                HSTRING::from(format!("\"{}\" \"{}\"", exe.display(), config.display()))
             };
-            if err != ERROR_SUCCESS {
-                return Err(format!("writing Run key: {}", err.to_hresult().message()));
-            }
+            write_run(&cmd)?;
             Ok(format!("at logon: {cmd}"))
         }
         Some("off") => {
@@ -1475,20 +1681,38 @@ pub fn autostart(args: &[String]) -> Result<String, String> {
             }
             Ok("autostart off".into())
         }
-        Some("status") | None => {
-            let mut buf = [0u16; 2048];
-            let mut size = (buf.len() * 2) as u32;
-            let err = unsafe {
-                RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as _), Some(&mut size))
-            };
-            Ok(if err == ERROR_SUCCESS {
-                format!("at logon: {}", String::from_utf16_lossy(&buf[..(size as usize / 2).saturating_sub(1)]))
-            } else {
-                "autostart off".into()
-            })
-        }
+        Some("status") | None => Ok(match read_run() {
+            Some(cmd) => format!("at logon: {cmd}"),
+            None => "autostart off".into(),
+        }),
         Some(other) => Err(format!("unknown autostart subcommand `{other}` (on [config]|off|status)")),
     }
+}
+
+/// The start-at-sign-in entry's command line (HKCU Run, value PimpMyShell), if there's one.
+fn read_run() -> Option<String> {
+    let mut buf = [0u16; 2048];
+    let mut size = (buf.len() * 2) as u32;
+    let err = unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as _), Some(&mut size)) };
+    (err == ERROR_SUCCESS).then(|| String::from_utf16_lossy(&buf[..(size as usize / 2).saturating_sub(1)]))
+}
+
+/// Writes the start-at-sign-in entry's command line.
+fn write_run(cmd: &HSTRING) -> Result<(), String> {
+    let bytes = unsafe { std::slice::from_raw_parts(cmd.as_ptr() as *const u8, (cmd.len() + 1) * 2) };
+    let err = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, REG_SZ.0, Some(bytes.as_ptr() as _), bytes.len() as u32) };
+    if err != ERROR_SUCCESS {
+        return Err(format!("writing Run key: {}", err.to_hresult().message()));
+    }
+    Ok(())
+}
+
+/// A start-at-sign-in command line as the settings wrote it before 0.1.3, `"<exe>" "<config>"` with `<config>` the old
+/// default (`legacy`): the same without it, `"<exe>"`. Anything else: None (left as it is).
+fn without_legacy_config(cmd: &str, legacy: &Path) -> Option<String> {
+    let (exe, rest) = cmd.strip_prefix('"')?.split_once('"')?;
+    let config = rest.trim().strip_prefix('"')?.strip_suffix('"')?;
+    Path::new(config).as_os_str().eq_ignore_ascii_case(legacy.as_os_str()).then(|| format!("\"{exe}\""))
 }
 
 /// Windows' light mode for the shell (taskbar, Start): what the taskbar's own look follows.
@@ -1518,4 +1742,21 @@ fn on_battery() -> bool {
     let mut status = SYSTEM_POWER_STATUS::default();
     // ACLineStatus 0 = offline; BatteryFlag 128 = no battery, 255 = unknown.
     unsafe { GetSystemPowerStatus(&mut status) }.is_ok() && status.ACLineStatus == 0 && status.BatteryFlag != 128 && status.BatteryFlag != 255
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_in_entry_loses_the_old_config_path() {
+        let legacy = Path::new(r"C:\Users\U\AppData\Local\PimpMyShell\pms.toml");
+        let exe = r#""C:\Users\U\AppData\Local\Programs\PimpMyShell\pmsd.exe""#;
+        // As the settings wrote it before 0.1.3 (any case): the exe alone.
+        assert_eq!(without_legacy_config(&format!(r#"{exe} "C:\Users\U\AppData\Local\PimpMyShell\pms.toml""#), legacy).as_deref(), Some(exe));
+        assert_eq!(without_legacy_config(&format!(r#"{exe} "c:\users\u\appdata\local\pimpmyshell\PMS.TOML""#), legacy).as_deref(), Some(exe));
+        // Already plain (the installer's), or another config: left alone.
+        assert_eq!(without_legacy_config(exe, legacy), None);
+        assert_eq!(without_legacy_config(&format!(r#"{exe} "D:\mine.toml""#), legacy), None);
+        assert_eq!(without_legacy_config("pmsd.exe", legacy), None);
+    }
 }

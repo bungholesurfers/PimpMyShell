@@ -21,8 +21,17 @@ use crate::{signing, version};
 
 /// Where the releases live.
 pub const REPO: &str = "bungholesurfers/PimpMyShell";
+/// The latest release's page; the latest channel reads its tag off where this redirects (a HEAD request).
 pub const RELEASES_PAGE: &str = "https://github.com/bungholesurfers/PimpMyShell/releases/latest";
-const STABLE_URL: &str = "https://raw.githubusercontent.com/bungholesurfers/PimpMyShell/main/update/stable.txt";
+/// What the stable channel reads first: the tag of the version it moves copies to.
+pub const STABLE_URL: &str = "https://raw.githubusercontent.com/bungholesurfers/PimpMyShell/main/update/stable.txt";
+
+/// The first request a check makes, on the stable or the latest channel: what the update question shows. Only
+/// when that names a version newer than the running one does the check go on, to the release's manifest
+/// (`releases/download/<tag>/pms-update.json`, its signature, then the installer).
+pub fn first_url(latest: bool) -> &'static str {
+    if latest { RELEASES_PAGE } else { STABLE_URL }
+}
 /// The only hosts a request, or a redirect, may go to.
 const HOSTS: [&str; 4] = ["github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
 const MAX_TAG: u64 = 64;

@@ -4,7 +4,8 @@
 ; It installs for the user alone, with no administrator: into %LOCALAPPDATA%\Programs\PimpMyShell, where Windows keeps
 ; per-user programs, with a Start menu shortcut to the settings and an entry in Settings > Apps. Starting at sign-in
 ; is a task, ticked to begin with; the settings' General page can switch it later. The config, in
-; %LOCALAPPDATA%\PimpMyShell, is the user's and is left on uninstall. INSTALLER.md, beside this file, says how to build it.
+; %APPDATA%\PimpMyShell (roaming), is the user's and is left on uninstall, as are banners.txt and the icons in
+; %LOCALAPPDATA%\PimpMyShell (below). INSTALLER.md, beside this file, says how to build it.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -48,7 +49,7 @@ CloseApplications=no
 
 [Tasks]
 Name: "autostart"; Description: "Start PimpMyShell when I sign in"
-Name: "desktopicon"; Description: "Create a desktop shortcut to PimpMyShell's settings"; Flags: unchecked
+Name: "desktopicon"; Description: "Add a PimpMyShell shortcut to the desktop"; Flags: unchecked
 
 [Files]
 Source: "{#Bin}\pmsd.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -85,10 +86,11 @@ Type: files; Name: "{localappdata}\PimpMyShell\tap.1.log"
 Type: files; Name: "{localappdata}\PimpMyShell\tap.2.log"
 Type: files; Name: "{localappdata}\PimpMyShell\tree.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\update-checked.txt"
+Type: files; Name: "{localappdata}\PimpMyShell\taskbar-told.txt"
 
 [Run]
 Filename: "{app}\pmsd.exe"; Description: "Start PimpMyShell now"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\pms-gui.exe"; Description: "Open PimpMyShell's settings"; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\pms-gui.exe"; Description: "Open PimpMyShell settings"; Flags: nowait postinstall skipifsilent unchecked
 
 [Code]
 var

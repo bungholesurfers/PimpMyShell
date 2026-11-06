@@ -19,8 +19,8 @@ use windows::UI::Color;
 use windows_core::{HSTRING, Interface};
 
 use crate::commands::{R, resolve_elem};
-use crate::layout::{bounds, element};
-use crate::{CTX, Ctx, lock};
+use crate::layout::bounds;
+use crate::{CTX, Ctx};
 
 const BACKGROUND: Color = Color { A: 0xF0, R: 0x2B, G: 0x2B, B: 0x2B };
 const BORDER: Color = Color { A: 0x40, R: 0xFF, G: 0xFF, B: 0xFF };
@@ -58,6 +58,7 @@ struct Tips {
 
 thread_local! {
     static TIPS: RefCell<Option<Tips>> = const { RefCell::new(None) };
+    static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn w(e: windows_core::Error) -> String {
@@ -74,8 +75,7 @@ fn brush(c: Color) -> R<SolidColorBrush> {
 
 fn build(ctx: &Ctx) -> R<Tips> {
     let tray = resolve_elem("SystemTrayFrame")?;
-    let parent_h = lock(&crate::TREE).get(&tray).map(|n| n.parent).ok_or("SystemTrayFrame has no parent")?;
-    let parent: pms_xaml::Panel = element(ctx, parent_h)?.cast().map_err(w)?;
+    let parent = crate::layout::grid_above(ctx, tray)?;
     // No background: only the zones in it catch the pointer.
     let overlay = Canvas::new().map_err(w)?;
     parent.Children().map_err(w)?.Append(&ui(&overlay)?).map_err(w)?;
@@ -154,8 +154,11 @@ pub fn set_zones(specs: Vec<ZoneSpec>) {
             Ok(())
         })
     })();
-    if let Err(e) = r {
-        crate::log(format!("tooltip zones: {e}"));
+    // This runs at every layout: a lasting problem is worth one line, not a line each time.
+    match r {
+        Err(e) if LAST_ERROR.replace(Some(e.clone())).as_ref() != Some(&e) => crate::log(format!("tooltip zones: {e}")),
+        Err(_) => {}
+        Ok(()) => LAST_ERROR.set(None),
     }
 }
 

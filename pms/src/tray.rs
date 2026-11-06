@@ -1,13 +1,13 @@
 //! The daemon's notification-area icon, in the manner of Nagare's: the logo (the crab and its dollar), and a menu.
 //!
-//!   PimpMyShell X.Y.Z | Paused: the stock taskbar | Not hooked: (why)
-//!   Settings             (also a left click)
-//!   Pause                the stock taskbar until resumed
-//!   Hook explorer again  only after the watchdog gave up (watchdog.rs)
-//!   Start at sign-in
-//!   Check for updates    or, with one found, Install PimpMyShell X… (which asks first), or its page
+//!   PimpMyShell X.Y.Z | Paused | Stopped: (why)
+//!   Settings              (also a left click)
+//!   Pause                 the standard taskbar until resumed
+//!   Try again             in Pause's place, only after the watchdog gave up (watchdog.rs)
+//!   Start when I sign in
+//!   Check for updates     or, with one found, Install PimpMyShell X… (which asks first), or its page
 //!   Open log
-//!   Exit                 stops the daemon, which puts the stock taskbar back
+//!   Exit                  stops the daemon, which puts the standard taskbar back
 //!
 //! It runs on a thread of its own with a hidden window (the shell talks to icons through one), and comes back when
 //! explorer does: explorer broadcasts "TaskbarCreated" to every top-level window when it starts. Settings, the log
@@ -143,32 +143,94 @@ impl Tray {
         }
     }
 
-    /// Asks, once, whether software update may check GitHub by itself; the answer comes back as
-    /// `Command::UpdateConsent`. As Nagare's card has it: OK, or closing the question, says yes; *No, don't check*
-    /// says no. On a thread of its own, so the daemon goes on while the question waits.
-    pub fn ask_update_consent(&self) {
-        let _ = std::thread::Builder::new().name("update question".into()).spawn(|| queue(Command::UpdateConsent(update_question())));
+    /// Asks whether software update may check GitHub by itself (the first run's question: until it's answered,
+    /// nothing is checked); the answer comes back as `Command::UpdateConsent`. As Nagare's card has it: OK, or
+    /// closing the question, says yes; *No, don't check* says no. `latest`: the channel is the latest release's (the
+    /// question shows the URL it reads first). On a thread of its own, so the daemon goes on while the question waits.
+    pub fn ask_update_consent(&self, latest: bool) {
+        let _ =
+            std::thread::Builder::new().name("update question".into()).spawn(move || queue(Command::UpdateConsent(update_question(latest))));
     }
 }
 
 /// The question whether software update may check by itself, waiting for the answer: true unless it was no. Where
 /// there's no task dialog, a Yes/No message box (which can't be closed without an answer).
-pub fn update_question() -> bool {
-    // Closing it (its x, Esc) answers as OK does.
-    match task_dialog("Software update", CONSENT_TEXT, &[(NO_CHECKS, "No, don't check")], true, IDOK.0) {
+pub fn update_question(latest: bool) -> bool {
+    let url = crate::update::first_url(latest);
+    // Closing it (its x, Esc) answers as OK does: so does a window closed without an answer (0).
+    if let Some(pressed) = modern("Check for updates automatically?", &consent_text("the address below"), Some(url), &["Check automatically", "Don't check"]) {
+        return pressed != 2;
+    }
+    let content = consent_text(&format!("<a href=\"{url}\">{url}</a>"));
+    match task_dialog("Check for updates automatically?", &content, &[(NO_CHECKS, "Don't check")], true, IDOK.0, true) {
         Ok(pressed) => pressed != NO_CHECKS,
         Err(e) => {
             log(format!("tray: no task dialog ({e}); a message box instead"));
-            message_box(&format!("{CONSENT_TEXT}\n\nCheck for updates by itself?"), true)
+            message_box(&format!("{}\n\nCheck for updates by itself?", consent_text(url)), true)
         }
     }
 }
 
-/// What the question about software update says.
-const CONSENT_TEXT: &str = "PimpMyShell checks GitHub for a newer version every day or two and downloads it, then asks you \
-                            before installing it. It installs only what PimpMyShell's release key signed, and nothing \
-                            about you or your PC is sent, only the requests themselves.\n\n\
-                            You can turn this off at any time in the settings, under software update.";
+/// A question as a WinUI 3 window, the settings' look (`pms-gui --ask`, beside this exe), where the PC has the
+/// Windows App Runtime: the button pressed, 1 for the first, or 0 for the window closed without one. None where
+/// there's no such window (no pms-gui.exe here, no runtime): ask another way.
+fn modern(heading: &str, text: &str, link: Option<&str>, buttons: &[&str]) -> Option<u32> {
+    let exe = std::env::current_exe().ok()?.with_file_name("pms-gui.exe");
+    if !exe.is_file() {
+        return None;
+    }
+    let mut ask = std::process::Command::new(exe);
+    ask.args(["--ask", "--heading", heading, "--text", text]);
+    if let Some(link) = link {
+        ask.args(["--link", link]);
+    }
+    for b in buttons {
+        ask.args(["--button", b]);
+    }
+    // Its window comes up in front: the daemon may give it the foreground (it can't take it itself).
+    let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    let mut child = match ask.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            log(format!("tray: pms-gui --ask: {e}"));
+            return None;
+        }
+    };
+    // Waiting, this thread goes on handling its windows' messages, as a message box's would: the tray's thread asks
+    // too (Install), and its icon must stay alive meanwhile.
+    use std::os::windows::io::AsRawHandle;
+    let process = HANDLE(child.as_raw_handle());
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                log(format!("tray: pms-gui --ask: {e}"));
+                return None;
+            }
+        }
+        unsafe {
+            MsgWaitForMultipleObjects(Some(&[process]), false, u32::MAX, QS_ALLINPUT);
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    };
+    status.code().and_then(|c| u32::try_from(c).ok()).filter(|&c| c < 255)
+}
+
+/// What the question about software update says; `url` is the first request's (a link, in a task dialog).
+fn consent_text(url: &str) -> String {
+    format!(
+        "PimpMyShell can check GitHub for new versions shortly after it starts, then every day or two. New versions \
+         download in the background, and you choose when to install them. We only install versions signed with \
+         PimpMyShell's release key.\n\n\
+         Each check starts by reading {url}. We don't send any information about you or your PC.\n\n\
+         We won't check until you choose. You can change this anytime in Settings > General."
+    )
+}
 
 /// The question's button that says no.
 const NO_CHECKS: i32 = 100;
@@ -177,10 +239,15 @@ const NO_CHECKS: i32 = 100;
 /// it's put away: the button pressed, by its place in `choices`, or None for Close. Where there's no task dialog, a
 /// message box, which offers the first.
 pub fn explain(instruction: &str, content: &str, choices: &[&str]) -> Option<usize> {
+    let mut buttons = choices.to_vec();
+    buttons.push("Close");
+    if let Some(pressed) = modern(instruction, content, None, &buttons) {
+        return (pressed as usize).checked_sub(1).filter(|&i| i < choices.len());
+    }
     const FIRST: i32 = 101;
     let buttons: Vec<(i32, &str)> = choices.iter().enumerate().map(|(i, c)| (FIRST + i as i32, *c)).collect();
     let default = if choices.is_empty() { IDCLOSE.0 } else { FIRST };
-    match task_dialog(instruction, content, &buttons, false, default) {
+    match task_dialog(instruction, content, &buttons, false, default, false) {
         Ok(pressed) => usize::try_from(pressed - FIRST).ok().filter(|&i| i < choices.len()),
         Err(e) => {
             log(format!("tray: no task dialog ({e}); a message box instead"));
@@ -202,11 +269,12 @@ fn message_box(text: &str, ask: bool) -> bool {
 }
 
 /// A task dialog under PimpMyShell's name and logo: `instruction` over `content`, `buttons` (id, label) beside the
-/// common OK (`ok`; otherwise Close), `default` the one Enter presses. It waits, and gives the id pressed (closing it
-/// with its x or Esc presses the common button). Err where there's no task dialog (comctl32 before version 6, which
-/// the daemon's manifest asks for; it's looked up rather than imported, so that an exe without that manifest, a
-/// test's, still starts).
-fn task_dialog(instruction: &str, content: &str, buttons: &[(i32, &str)], ok: bool, default: i32) -> Result<i32, String> {
+/// common OK (`ok`; otherwise Close), `default` the one Enter presses; `links`: the content's `<a href="...">`s are
+/// links, opened in the browser when clicked. It waits, and gives the id pressed (closing it with its x or Esc
+/// presses the common button). Err where there's no task dialog (comctl32 before version 6, which the daemon's
+/// manifest asks for; it's looked up rather than imported, so that an exe without that manifest, a test's, still
+/// starts).
+fn task_dialog(instruction: &str, content: &str, buttons: &[(i32, &str)], ok: bool, default: i32, links: bool) -> Result<i32, String> {
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
     use windows::Win32::UI::Controls::*;
     use windows_core::{BOOL, HRESULT};
@@ -228,7 +296,10 @@ fn task_dialog(instruction: &str, content: &str, buttons: &[(i32, &str)], ok: bo
     let config = TASKDIALOGCONFIG {
         cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
         hInstance: module.into(),
-        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | if logo.is_invalid() { TASKDIALOG_FLAGS(0) } else { TDF_USE_HICON_MAIN },
+        // Links only where asked for: a config error's line could look like one.
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION
+            | if logo.is_invalid() { TASKDIALOG_FLAGS(0) } else { TDF_USE_HICON_MAIN }
+            | if links { TDF_ENABLE_HYPERLINKS } else { TASKDIALOG_FLAGS(0) },
         dwCommonButtons: if ok { TDCBF_OK_BUTTON } else { TDCBF_CLOSE_BUTTON },
         pszWindowTitle: w!("PimpMyShell"),
         Anonymous1: TASKDIALOGCONFIG_0 { hMainIcon: logo },
@@ -249,18 +320,27 @@ fn task_dialog(instruction: &str, content: &str, buttons: &[(i32, &str)], ok: bo
     Ok(pressed)
 }
 
-/// A task dialog comes up in front, as a message box with MB_TOPMOST and MB_SETFOREGROUND does.
+/// A task dialog comes up in front, as a message box with MB_TOPMOST and MB_SETFOREGROUND does; its links open in
+/// the browser (only https ones: ours).
 unsafe extern "system" fn on_top(
     hwnd: HWND,
     msg: windows::Win32::UI::Controls::TASKDIALOG_NOTIFICATIONS,
     _: WPARAM,
-    _: LPARAM,
+    lparam: LPARAM,
     _: isize,
 ) -> windows_core::HRESULT {
-    if msg == windows::Win32::UI::Controls::TDN_CREATED {
+    use windows::Win32::UI::Controls::{TDN_CREATED, TDN_HYPERLINK_CLICKED};
+    if msg == TDN_CREATED {
         unsafe {
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             let _ = SetForegroundWindow(hwnd);
+        }
+    } else if msg == TDN_HYPERLINK_CLICKED && lparam.0 != 0 {
+        let href = unsafe { PCWSTR(lparam.0 as *const u16).to_string() }.unwrap_or_default();
+        if href.starts_with("https://")
+            && let Err(e) = crate::toasts::open(&href)
+        {
+            log(format!("tray: {e}"));
         }
     }
     windows_core::HRESULT(0)
@@ -269,12 +349,15 @@ unsafe extern "system" fn on_top(
 /// Asks whether to install the downloaded `version` now: the menu's Install item.
 fn confirm_install(hwnd: HWND, version: &str) -> bool {
     let text = format!(
-        "Install PimpMyShell {version} now? (This is PimpMyShell {}.)\n\n\
-         It was downloaded from GitHub, and its signature checks out. While it installs, the taskbar goes back to \
-         stock for a moment; then PimpMyShell starts again by itself.",
+        "You have PimpMyShell {}. Version {version} is downloaded and verified.\n\n\
+         While it installs, your taskbar returns to normal for a moment. Then PimpMyShell starts again.",
         crate::version::CURRENT
     );
-    let answer = unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), w!("PimpMyShell: software update"), MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND) };
+    if let Some(pressed) = modern(&format!("Install PimpMyShell {version}?"), &text, None, &["Install", "Not now"]) {
+        return pressed == 1;
+    }
+    let text = format!("Install PimpMyShell {version}?\n\n{text}");
+    let answer = unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), w!("PimpMyShell"), MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND) };
     answer == IDYES
 }
 
@@ -349,8 +432,8 @@ fn wide<const N: usize>(s: &str) -> [u16; N] {
 fn tooltip() -> String {
     let s = shared().state.lock().unwrap();
     match (&s.benched, s.paused) {
-        (Some(_), _) => "PimpMyShell: not hooked into explorer".into(),
-        (None, true) => "PimpMyShell: paused".into(),
+        (Some(_), _) => "PimpMyShell (stopped)".into(),
+        (None, true) => "PimpMyShell (paused)".into(),
         (None, false) => "PimpMyShell".into(),
     }
 }
@@ -452,8 +535,8 @@ fn menu(hwnd: HWND) {
     let autostart = crate::daemon::autostart(&["status".into()]).is_ok_and(|s| s.starts_with("at logon"));
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else { return };
     let status = match (&state.benched, state.paused) {
-        (Some(why), _) => format!("Not hooked: {why}"),
-        (None, true) => "Paused: the stock taskbar".into(),
+        (Some(why), _) => format!("Stopped: {why}"),
+        (None, true) => "Paused".into(),
         (None, false) => format!("PimpMyShell {}", crate::version::CURRENT),
     };
     let item = |flags: MENU_ITEM_FLAGS, id: usize, text: &str| {
@@ -465,14 +548,14 @@ fn menu(hwnd: HWND) {
     item(MF_SEPARATOR, 0, "");
     item(MF_STRING, ID_SETTINGS, "Settings");
     if state.benched.is_some() {
-        item(MF_STRING, ID_RETRY, "Hook explorer again");
+        item(MF_STRING, ID_RETRY, "Try again");
     } else {
-        item(MF_STRING | check(state.paused), ID_PAUSE, "Pause (stock taskbar)");
+        item(MF_STRING | check(state.paused), ID_PAUSE, "Pause");
     }
-    item(MF_STRING | check(autostart), ID_AUTOSTART, "Start at sign-in");
+    item(MF_STRING | check(autostart), ID_AUTOSTART, "Start when I sign in");
     match &state.update {
         Some(Offer { version, ready: true }) => item(MF_STRING, ID_UPDATE, &format!("Install PimpMyShell {version}…")),
-        Some(Offer { version, ready: false }) => item(MF_STRING, ID_UPDATE, &format!("PimpMyShell {version} is out: open its page")),
+        Some(Offer { version, ready: false }) => item(MF_STRING, ID_UPDATE, &format!("PimpMyShell {version} is available…")),
         None => item(MF_STRING, ID_CHECK, "Check for updates"),
     }
     item(MF_STRING, ID_LOG, "Open log");

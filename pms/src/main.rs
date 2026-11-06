@@ -11,7 +11,6 @@
 //!                                     run the windowless daemon (pmsd.exe) at logon
 
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
 use std::time::Duration;
 
 use pms::{config, daemon, quote, send};
@@ -67,8 +66,8 @@ fn main() -> Result<()> {
         Some("daemon") if arg(1) == Some("stop") => daemon::stop().map(|s| println!("{s}")).map_err(Into::into),
         Some("daemon") => {
             daemon::migrate();
-            let path = arg(1).map(PathBuf::from).unwrap_or_else(config::default_path);
-            if arg(1).is_none() {
+            let path = config::given(arg(1).map(Into::into));
+            if config::is_default(&path) {
                 config::ensure(&path)?;
             }
             if !path.is_file() {

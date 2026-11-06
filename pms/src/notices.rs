@@ -31,7 +31,7 @@ pub struct Notice {
     pub detail: String,
     /// The fix: a button's label, and what it opens (a URI or a file).
     pub fix: Option<(&'static str, String)>,
-    /// A second button, "Keep Windows' notifications": the taskbar's toasts off, so the notice is over too.
+    /// A second button, "Keep Windows notifications": the taskbar's toasts off, so the notice is over too.
     pub keep_native: bool,
     /// One line on what to do, for where there's only a Windows notification to say it.
     pub hint: String,
@@ -43,38 +43,95 @@ pub struct Notice {
 pub fn notification_access() -> Notice {
     Notice {
         key: "notification access",
-        title: "Notifications can't come to the taskbar".into(),
-        body: "Windows doesn't let PimpMyShell read them. Click for how to fix it.".into(),
+        title: "Notifications can't appear in the taskbar".into(),
+        body: "Windows isn't letting PimpMyShell read notifications. Select to fix it.".into(),
         heading: "Let PimpMyShell read your notifications".into(),
-        detail: "PimpMyShell shows notifications in the taskbar by reading them as they come. Windows lets apps do that \
-                 only while Settings > Privacy & security > Notifications allows it, and now it doesn't: your \
-                 notifications pop up as usual, from Windows.\n\n\
-                 Turn on \"Notification access\" and \"Let apps access your notifications\" there. They come to the \
-                 taskbar within seconds; nothing needs restarting.\n\n\
-                 Or keep Windows' notifications: PimpMyShell's taskbar ones turn off (the settings' Toasts page turns \
-                 them on again), and this reminder stops."
+        detail: "To show notifications in the taskbar, PimpMyShell needs to read them as they arrive. Windows doesn't \
+                 allow that right now, so your notifications appear as standard pop-ups.\n\n\
+                 To fix this, go to Settings > Privacy & security > Notifications, and turn on Notification access and \
+                 Let apps access your notifications. Your notifications move to the taskbar within a few seconds.\n\n\
+                 If you'd rather keep standard pop-ups, select Keep Windows notifications. We'll turn off taskbar \
+                 notifications and stop reminding you."
             .into(),
         fix: Some(("Open notification settings", "ms-settings:privacy-notifications".into())),
         keep_native: true,
-        hint: "Turn on notification access under Settings > Privacy & security > Notifications.".into(),
+        hint: "To fix this, turn on notification access in Settings > Privacy & security > Notifications.".into(),
         again: Some(AGAIN),
     }
 }
 
 /// Toasts couldn't start, for a reason other than notification access.
-pub fn toasts_failed(error: &str) -> Notice {
+/// What PimpMyShell works with, in the README.
+const SUPPORTED: &str = "https://github.com/bungholesurfers/PimpMyShell#what-it-works-with";
+
+/// Something else runs the taskbar (`name`, if we know it), so there's nothing for us to hook. Nothing's wrong, and
+/// nothing we can do: this one's said kindly, and a little jive.
+pub fn taskbar_replaced(name: Option<&str>) -> Notice {
+    let (who, running) = match name {
+        Some(n) => (n.to_string(), format!("We dig {n}, but it's running your taskbar right now")),
+        None => ("Something else".to_string(), "Something other than Windows seems to be running your taskbar right now".to_string()),
+    };
+    let way_back = match name {
+        Some(n) => format!("Switch back to the Windows 11 taskbar in {n}'s settings"),
+        None => "Switch back to the Windows 11 taskbar".to_string(),
+    };
+    Notice {
+        key: "taskbar replaced",
+        title: format!("{who} has the keys to your taskbar"),
+        body: "PimpMyShell only rolls with the Windows 11 taskbar. Select for details.".into(),
+        heading: "PimpMyShell only rolls with the Windows 11 taskbar".into(),
+        detail: format!(
+            "{running}, and PimpMyShell can only work with the one that comes with Windows 11. Meters, taskbar \
+             notifications and the rest have nowhere to live, so PimpMyShell is laying low. Your PC is cool, and \
+             nothing's been changed.\n\nWant to get pimped? {way_back}, and PimpMyShell will be right there with \
+             you. Happy with your ride? That's cool too: you can exit PimpMyShell from its menu in the system tray. \
+             We won't bring this up again."
+        ),
+        fix: Some(("See what's supported", SUPPORTED.to_string())),
+        keep_native: false,
+        hint: format!("{way_back} to use PimpMyShell. Until then, it's laying low."),
+        again: None,
+    }
+}
+
+/// The taskbar wouldn't take a toast: notifications went back to Windows, so that none go missing. `around`: what else
+/// changes the taskbar here, which may well be why.
+pub fn toasts_refused(error: &str, around: &[&str]) -> Notice {
+    let why = if around.is_empty() {
+        String::new()
+    } else {
+        format!("{} also changes your taskbar, which may be why. Turning that off and restarting Windows Explorer may help.\n\n", around.join(" and "))
+    };
     Notice {
         key: "toasts",
-        title: "Notifications can't come to the taskbar".into(),
-        body: "Windows wouldn't let PimpMyShell listen for them. Click for more.".into(),
-        heading: "Notifications stay with Windows".into(),
+        title: "Notifications can't appear in the taskbar".into(),
+        body: "They're back to standard pop-ups. Select for details.".into(),
+        heading: "Notifications appear as standard pop-ups for now".into(),
         detail: format!(
-            "PimpMyShell couldn't start listening for notifications, so they pop up as usual, from Windows.\n\n\
-             What Windows said: {error}\n\nIt keeps trying; once it works, they come to the taskbar."
+            "PimpMyShell couldn't show a notification in the taskbar, so notifications went back to standard pop-ups. \
+             The ones that failed are in notification center. We'll try the taskbar again in a few minutes.\n\n\
+             {why}Details: {error}"
         ),
         fix: None,
         keep_native: false,
-        hint: "They pop up as usual, from Windows; PimpMyShell keeps trying.".into(),
+        hint: "They appear as standard pop-ups for now. The ones that failed are in notification center.".into(),
+        again: None,
+    }
+}
+
+pub fn toasts_failed(error: &str) -> Notice {
+    Notice {
+        key: "toasts",
+        title: "Notifications can't appear in the taskbar".into(),
+        body: "Windows didn't let PimpMyShell listen for them. Select for details.".into(),
+        heading: "Notifications appear as standard pop-ups for now".into(),
+        detail: format!(
+            "PimpMyShell couldn't start listening for notifications, so they appear as standard pop-ups. We'll keep \
+             trying, and they'll move to the taskbar once it works.\n\nDetails: {error}"
+        ),
+        fix: None,
+        keep_native: false,
+        hint: "They appear as standard pop-ups for now. We'll keep trying.".into(),
         again: None,
     }
 }
@@ -85,16 +142,16 @@ pub fn config(path: &Path, error: &str, kept: bool) -> Notice {
     let name = path.file_name().map_or("pms.toml".into(), |n| n.to_string_lossy().into_owned());
     // The error starts with the path, which the heading already names.
     let error = concise(error.strip_prefix(&format!("{}: ", path.display())).unwrap_or(error).trim_end());
-    let now = if kept { "The taskbar keeps the config that last loaded." } else { "PimpMyShell started with a stock taskbar." };
+    let now = if kept { "PimpMyShell is still using your last working settings." } else { "PimpMyShell started with the standard taskbar." };
     Notice {
         key: "config",
-        title: format!("{name} didn't load"),
-        body: format!("{now} Click for what's wrong."),
-        heading: format!("{name} didn't load"),
-        detail: format!("{now}\n\n{error}\n\nFix it and save: it takes effect as soon as it loads."),
-        fix: Some(("Open the config", path.display().to_string())),
+        title: "We couldn't load your settings".into(),
+        body: format!("{now} Select to see what's wrong."),
+        heading: format!("There's a problem in {name}"),
+        detail: format!("{now}\n\n{error}\n\nFix the problem and save the file. Your changes take effect right away."),
+        fix: Some(("Open settings file", path.display().to_string())),
         keep_native: false,
-        hint: format!("{now} Fix {name} and save: it takes effect at once."),
+        hint: format!("{now} Fix {name} and save it. Your changes take effect right away."),
         again: None,
     }
 }
@@ -208,7 +265,7 @@ pub fn explain(n: &Notice) {
 pub enum Choice {
     /// Its fix (`fix`).
     Fix,
-    /// *Keep Windows' notifications* (`keep_native`).
+    /// *Keep Windows notifications* (`keep_native`).
     KeepNative,
     /// Close, its x, Esc.
     Close,
@@ -216,7 +273,7 @@ pub enum Choice {
 
 /// The notice's explanation, waiting for its answer (examples/dialogs.rs shows them so; `explain` acts on it).
 pub fn choose(n: &Notice) -> Choice {
-    const KEEP_NATIVE: &str = "Keep Windows' notifications";
+    const KEEP_NATIVE: &str = "Keep Windows notifications";
     let mut choices: Vec<&str> = n.fix.iter().map(|(label, _)| *label).collect();
     if n.keep_native {
         choices.push(KEEP_NATIVE);

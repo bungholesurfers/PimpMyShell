@@ -23,6 +23,18 @@ the SHA-256 of each file in `SHA256SUMS.txt`.
 
 [releases]: https://github.com/bungholesurfers/PimpMyShell/releases/latest
 
+## What it works with
+
+The taskbar that comes with Windows 11, and that's the whole list. PimpMyShell draws inside that taskbar's own XAML, so
+it needs the real thing to be there.
+
+- **Taskbar replacements** can't work with it: ExplorerPatcher or StartAllBack with their classic taskbar on, Start11's
+  taskbar, or a bar of its own like RetroBar, Cairo or Seelen UI. There's nothing to hook, and nothing we can do about
+  that. PimpMyShell tells you so once and lays low. Switch back to the Windows 11 taskbar and it picks up by itself.
+- **Those same tools with their taskbar off**, used for a Start menu, say, are fine.
+- **Mods of the Windows 11 taskbar**, like Windhawk's or TranslucentTB, often get along with it, but they hook the same
+  thing we do. If something's off, try without them. We can't promise this one either.
+
 ## What you get
 
 - **Meters** by the tray, from any Windows performance counter, with math over them:
@@ -41,7 +53,9 @@ the SHA-256 of each file in `SHA256SUMS.txt`.
   the apps, with sonar rings and the mic's loudness rising in the background.
 - **Toasts in the taskbar.** Notifications show inside the taskbar instead of popping up. Their buttons work. The
   card glows in the app icon's color, rings ripple across the taskbar, and the clock stays in sight. New ones stack
-  on top of the ones still showing, and you can flick a card off to the right to dismiss it.
+  on top of the ones still showing, and you can flick a card off to the right to dismiss it. They stay as long as
+  Windows would keep them: alarms, calls and reminders wait for your answer. Set `style = "pimped"` under `[toasts]`
+  for gold cards with a sheen.
 - **Your own backdrop.** Blur, tint and grain, with knobs. One look for dark mode, one for light, following Windows.
 - **Glowing buttons.** Start and every app button glow when you point at them, brighter when pressed. Each app glows
   in its icon's color.
@@ -54,26 +68,33 @@ the SHA-256 of each file in `SHA256SUMS.txt`.
 
 ## Using it
 
-Your settings live in `%LOCALAPPDATA%\PimpMyShell\pms.toml`. The first run writes it from `pms.example.toml`, which
-explains every option. Edit it by hand or in the settings window (left-click the tray icon). The daemon picks up
-changes within a second.
+Your settings live in `%APPDATA%\PimpMyShell\pms.toml`, in the roaming profile, so they follow you to another PC. The
+first run writes it from `pms.example.toml`, which explains every option. Edit it by hand or in the settings window
+(left-click the tray icon). The daemon picks up changes within a second. (Before 0.1.3 it lived in
+`%LOCALAPPDATA%\PimpMyShell`; one there moves over by itself the first time.)
+
+The settings window is a WinUI 3 one (the Settings app's look: a pane of pages and a card per setting, over acrylic with dollar bills and sound investment advice drifting through the pane and blurred behind the settings, which, per the General page, is not investment advice) wherever the
+PC has Microsoft's Windows App Runtime, which many PCs have from Store apps; PimpMyShell doesn't install it. Without it,
+the same `pms-gui.exe` shows the classic (egui) window, which edits the same settings the same way; `pms-gui --egui`
+asks for that one anyway, and each window has a button that opens the other. PimpMyShell's questions (software update's,
+a notice's explanation, *Install X*) come as small windows of the same look where it can, else as task dialogs.
 
 The tray icon's menu:
 
 | Item | What it does |
 | --- | --- |
 | Settings | opens the settings (a left click does too) |
-| Pause (stock taskbar) | puts the stock taskbar and native notifications back until you resume |
-| Hook explorer again | in Pause's place, only after the watchdog backed off (below) |
-| Start at sign-in | the HKCU Run value, on or off |
-| Check for updates | checks now; once a new version is downloaded and checked, *Install PimpMyShell X…* (asks first); a portable copy offers *PimpMyShell X is out: open its page* |
+| Pause | puts the standard taskbar and notifications back until you resume |
+| Try again | in Pause's place, only after the watchdog backed off (below) |
+| Start when I sign in | the HKCU Run value, on or off |
+| Check for updates | checks now; once a new version is downloaded and checked, *Install PimpMyShell X…* (asks first); a portable copy offers *PimpMyShell X is available…*, which opens its page |
 | Open log | `daemon.log` in Notepad |
-| Exit | stops the daemon, which puts the stock taskbar back |
+| Exit | stops the daemon, which puts the standard taskbar back |
 
 Toasts need notification access. Windows asks the first time; it lives under Settings > Privacy & security >
 Notifications. While it's off, notifications stay Windows', and a card of PimpMyShell's own in the taskbar says so
 every 5 minutes; click it for the fix. They come to the taskbar within seconds of turning it on. Or click *Keep
-Windows' notifications* there: the taskbar's toasts go off (`enabled = false` under `[toasts]`; the settings' Toasts
+Windows notifications* there: the taskbar's toasts go off (`enabled = false` under `[toasts]`; the settings' Notifications
 page turns them on again), and so does the reminder.
 
 The same kind of card tells you of the few other troubles that need you: a `pms.toml` that didn't load (click it for
@@ -101,27 +122,33 @@ What it touches, all under your own user (no admin, no services, no drivers):
   notified, Windows has filled the key in and it stays, as it would have anyway.
 - **`HKCU\Control Panel\NotifyIconSettings`**: on the first start of each copy (each exe path), the tray icon is
   promoted out of the overflow, once (`tray-pinned.txt` remembers). Hide it again and it stays hidden.
-- **`%LOCALAPPDATA%\PimpMyShell`**: `pms.toml`, the logs (`daemon.log` and `tap.log`, each rotated at 1 MB with two
+- **`%APPDATA%\PimpMyShell`**: `pms.toml`, and `pms.toml.bak` (the settings window's copy of it from before its first
+  save).
+- **`%LOCALAPPDATA%\PimpMyShell`**: this PC's own files: the logs (`daemon.log` and `tap.log`, each rotated at 1 MB with two
   older generations kept, `daemon.1.log` and `daemon.2.log`; about 3 MB each at most), `banners.txt`, `tree.txt` (a
-  dump of the taskbar's visual tree), `update-checked.txt` (when updates were last checked), `pms-128.png`,
+  dump of the taskbar's visual tree), `update-checked.txt` (when updates were last checked), `taskbar-told.txt` (whose
+  replaced taskbar we've explained, so that it's only once), `pms-128.png`,
   `tray-pinned.txt`, and `pms_tap-<stamp>.dll` copies (see below).
 - **`%TEMP%\pms-update`**: a downloaded update, until it's installed.
 
 It reads, but never writes, the notification database (`wpndatabase.db`), to get a toast's full content.
 
 The only network traffic is the update check, and none happens until you answer. A minute into the first run,
-PimpMyShell asks whether it may check by itself: *OK*, or closing the question, lets it check every day or two; *No,
-don't check* turns that off (`update_check` in the config, or the settings' *software update*, changes it later). You
-can also check from the tray or the settings. It sends nothing but the requests themselves.
+PimpMyShell asks whether it may check by itself: *OK*, or closing the question, lets it check a while after each start
+and then every day or two; *No, don't check* turns that off (`update_check` in the config, or the settings' *software
+update*, changes it later; on is the default). You can also check from the tray or the settings. A check starts by
+reading `https://raw.githubusercontent.com/bungholesurfers/PimpMyShell/main/update/stable.txt` (on the latest channel,
+`https://github.com/bungholesurfers/PimpMyShell/releases/latest`), and goes on to the release only when that names a
+newer version. It sends nothing but the requests themselves.
 
 **Turning it off:** tray > *Pause* for a stock taskbar right now, tray > *Exit* to stop. `pms daemon stop` does the
 same from a console.
 
 **Uninstalling:** Settings > Apps > PimpMyShell. The uninstaller stops the daemon (stock taskbar and banners back),
 removes the Run value and its Task Manager startup mark, the notification registration, `%TEMP%\pms-update`, and the
-logs, `tree.txt` and `update-checked.txt` (each by its exact name). It keeps `pms.toml` (your config) and
-`banners.txt` in `%LOCALAPPDATA%\PimpMyShell`, along with small leftovers (`pms-128.png`, `tray-pinned.txt`, the
-`pms_tap-*.dll` copies). Delete that folder by hand if you want it gone. A TAP copy stays loaded, inert, in the running explorer until explorer restarts or you sign out.
+logs, `tree.txt`, `update-checked.txt` and `taskbar-told.txt` (each by its exact name). It keeps `pms.toml` (your config, in
+`%APPDATA%\PimpMyShell`), and `banners.txt` in `%LOCALAPPDATA%\PimpMyShell`, along with small leftovers (`pms-128.png`,
+`tray-pinned.txt`, the `pms_tap-*.dll` copies). Delete those folders by hand if you want them gone. A TAP copy stays loaded, inert, in the running explorer until explorer restarts or you sign out.
 
 ## How it diddles Explorer
 
@@ -146,7 +173,7 @@ taskbar's element tree from inside.
 | `pms` | the daemon (`pmsd.exe`, windowless; `pms.exe daemon` in a console), the `pms` command line, config, sampler, watchdog, tray, updater |
 | `pms-tap` | `pms_tap.dll`, the TAP loaded into explorer. Draws everything in the taskbar and serves the pipe |
 | `pms-xaml` | a `windows-bindgen` projection of the slice of `Windows.UI.Xaml` it needs. windows-rs stopped shipping XAML, but its metadata still describes it |
-| `pms-gui` | the settings (egui) |
+| `pms-gui` | the settings: WinUI 3 (windows-reactor) where the Windows App Runtime is installed, else egui, over one model; and `--ask`, the daemon's questions as WinUI 3 windows |
 | `pms-ui` | widgets the settings and the art tool share (the knobs) |
 | `pms-art` | renders the icons and the installer's pictures from `art\` |
 | `pms-res` | puts the icon and version info into the exes |
@@ -342,6 +369,20 @@ and feeds them to the alert. Apps that mute themselves (Discord, Teams) still re
   (images, buttons, launch arguments) is read from the notification platform's `wpndatabase.db` by the same id,
   read-only. Without access (or once it's taken away), no banner is turned off, a notice says so, and the daemon
   tries again every 15 seconds.
+- **How long a card stays.** `duration_ms`, or at most 4 seconds when a card comes forward with more behind it.
+  `duration="long"` gets at least 25 seconds. The `alarm` and `incomingCall` scenarios, and `reminder` with a button
+  (Windows ignores the scenario without one), have no time limit, as in Windows: they stay until you answer them, or
+  until the app takes the notification back. `urgent` only gets past do not disturb, so it times out like any other.
+- **When the taskbar won't take a toast.** With native banners off it would go missing. One refusal may be a glitch or
+  one app's odd toast, but two in a row give every banner back to Windows, and a notice says so, as a Windows
+  notification. The taskbar gets another try after 5 minutes, then after twice as long each time it refuses, up to an
+  hour; the first toast it shows ends all that. Cards and meter tooltips go in the nearest Grid above the tray, which is normally its parent; if not, the
+  TAP's log names what's between them.
+- **Reports.** The daemon's log starts with the Windows version, then, for each explorer, the versions of what we hook
+  (`explorer.exe`, `Taskbar.dll`, `Taskbar.View.dll`, `Windows.UI.Xaml.dll`), the taskbar software it knows, and every
+  third-party DLL in explorer. File names and versions only, not paths. Both logs leave out your Windows user name
+  (paths show `%USERPROFILE%` or `<user>` instead) and what your notifications say: a toast is logged by its app's name
+  alone, and a link it opened by nothing more than its scheme.
 - **Native banners out of the way.** `ShowBanner=0` under an app's `Notifications\Settings\<AUMID>` key takes effect
   live: the notification still reaches the center (and the listener), but the popup is gone. Set ahead of an app's
   first notification, it holds that one back too. So the daemon sets it for every app that has notified, and also for
@@ -387,7 +428,7 @@ people do that on purpose. A **crash** is another matter. The daemon holds a han
    after a crash, never after it was ended.
 
 **Benched** means: `reset` to the stock taskbar, native banners restored, the TAP told to `detach`, and no more
-hooking for the rest of this run. You get a notification saying why, and the tray menu offers *Hook explorer again*,
+hooking for the rest of this run. You get a notification saying why, and the tray menu offers *Try again*,
 which forgets the strikes and starts over.
 
 ### The updater

@@ -9,6 +9,7 @@ mod hotmic;
 pub mod meters;
 mod nvml;
 pub mod signing;
+pub mod system;
 pub mod notices;
 mod toasts;
 mod tray;
@@ -44,7 +45,7 @@ pub fn log_to_file() {
 
 pub fn log(msg: impl AsRef<str>) {
     let t = unsafe { GetLocalTime() };
-    let line = format!("{:02}:{:02}:{:02} {}", t.wHour, t.wMinute, t.wSecond, msg.as_ref());
+    let line = pms_tap::logfile::redact(&format!("{:02}:{:02}:{:02} {}", t.wHour, t.wMinute, t.wSecond, msg.as_ref()));
     eprintln!("{line}");
     if LOG_TO_FILE.load(Ordering::Acquire) {
         pms_tap::logfile::append(pms_tap::logfile::Log::Daemon, &line);

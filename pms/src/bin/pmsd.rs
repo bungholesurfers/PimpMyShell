@@ -1,15 +1,14 @@
 //! The daemon without a console window, for autostart. Logs to %LOCALAPPDATA%\PimpMyShell\daemon.log.
 //!
-//!   pmsd [config]      (default %LOCALAPPDATA%\PimpMyShell\pms.toml)
+//!   pmsd [config]      (default %APPDATA%\PimpMyShell\pms.toml, where one in %LOCALAPPDATA%\PimpMyShell, its
+//!                       place before 0.1.3, moves the first time)
 
 #![windows_subsystem = "windows"]
-
-use std::path::PathBuf;
 
 fn main() {
     pms::log_to_file();
     pms::daemon::migrate();
-    let path = std::env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(pms::config::default_path);
+    let path = pms::config::given(std::env::args_os().nth(1));
     if let Err(e) = pms::config::ensure(&path) {
         pms::log(format!("no config: {e}"));
     }

@@ -7,8 +7,73 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Where the user's settings live: `%APPDATA%\PimpMyShell`, the roaming profile, so they follow the user to another
+/// PC (as VS Code's settings.json does). The machine's own files - logs, the TAP's copies, icons, the banners it
+/// switched off, update state - stay in `pms_tap::data_dir()`, `%LOCALAPPDATA%\PimpMyShell`.
+pub fn config_dir() -> PathBuf {
+    match std::env::var_os("APPDATA") {
+        Some(base) => PathBuf::from(base).join("PimpMyShell"),
+        None => pms_tap::data_dir(),
+    }
+}
+
+/// The config: `pms.toml` in `config_dir()`. One in the place it had before 0.1.3 (`legacy_path`) moves over the
+/// first time this is asked, with the settings' backup of it.
 pub fn default_path() -> PathBuf {
+    static MOVED: std::sync::Once = std::sync::Once::new();
+    let path = config_dir().join("pms.toml");
+    MOVED.call_once(|| move_config(&legacy_path(), &path));
+    path
+}
+
+/// Where the config was before 0.1.3: `%LOCALAPPDATA%\PimpMyShell\pms.toml`.
+pub fn legacy_path() -> PathBuf {
     pms_tap::data_dir().join("pms.toml")
+}
+
+/// The config a program was given (its first argument), or the default one. The old default (a start-at-sign-in
+/// entry written before 0.1.3 names it) means the default: the config has moved from there.
+pub fn given(arg: Option<std::ffi::OsString>) -> PathBuf {
+    match arg.map(PathBuf::from) {
+        Some(p) if !same_file_name(&p, &legacy_path()) => p,
+        _ => default_path(),
+    }
+}
+
+/// Whether `path` is the default config (`default_path`).
+pub fn is_default(path: &Path) -> bool {
+    same_file_name(path, &default_path())
+}
+
+fn same_file_name(a: &Path, b: &Path) -> bool {
+    let full = |p: &Path| std::path::absolute(p).map(|p| p.display().to_string().to_lowercase()).unwrap_or_default();
+    full(a) == full(b)
+}
+
+/// Moves the config at `old` (and its `.toml.bak`) to `path`, unless there's one at `path` already: then nothing is
+/// touched. A move it can't make (a roaming profile on another drive) copies instead; the old file then stays.
+fn move_config(old: &Path, path: &Path) {
+    if path.exists() || !old.is_file() {
+        return;
+    }
+    if let Some(dir) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        crate::log(format!("moving the config: {}: {e}", dir.display()));
+        return;
+    }
+    for (from, to) in [(old.to_path_buf(), path.to_path_buf()), (old.with_extension("toml.bak"), path.with_extension("toml.bak"))] {
+        if !from.is_file() || to.exists() {
+            continue;
+        }
+        match std::fs::rename(&from, &to) {
+            Ok(()) => crate::log(format!("moved {} to {}", from.display(), to.display())),
+            Err(e) => match std::fs::copy(&from, &to) {
+                Ok(_) => crate::log(format!("copied {} to {} (couldn't move it: {e}; the old one stays)", from.display(), to.display())),
+                Err(e) => crate::log(format!("moving {} to {}: {e}", from.display(), to.display())),
+            },
+        }
+    }
 }
 
 /// The example config, which a first run starts from.
@@ -48,8 +113,9 @@ pub struct Config {
     /// meters and `agg = "engine"` counters. Default false: they're left out.
     #[serde(default, skip_serializing_if = "is_false")]
     pub software_gpus: bool,
-    /// Software update: whether the daemon checks GitHub for a newer version by itself, every day or two, and
-    /// downloads it - installing only once asked. Unset: not asked yet (the daemon asks, once).
+    /// Software update: whether the daemon checks GitHub for a newer version by itself (a while after each start,
+    /// then every day or two) and downloads it - installing only once asked. On by default; unset means the first
+    /// run's question isn't answered yet, and until it is (OK or closing it: on; no: off), nothing is checked.
     pub update_check: Option<bool>,
     /// Which version software update offers: "stable" (default), the one the repository's update/stable.txt names,
     /// or "latest", the newest release published.
@@ -165,7 +231,12 @@ pub fn set_in_table(path: &Path, table: &str, key: &str, value: &str) -> Result<
 
 pub fn load(path: &Path) -> Result<Config, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+    parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A config from its text.
+pub fn parse(text: &str) -> Result<Config, String> {
+    toml::from_str(text).map_err(|e| e.to_string())
 }
 
 /// Write `config` to `path` (via a temporary file, so the daemon never reloads half a file).
@@ -391,11 +462,19 @@ pub struct Toasts {
     /// reminder that notification access is off offers to turn them off so: notices.rs).
     #[serde(skip_serializing_if = "is_true")]
     pub enabled: bool,
-    /// How long each toast stays in front (a card that comes forward again with more behind it: at most 4 s).
+    /// How long each toast stays in front (a card that comes forward again with more behind it: at most 4 s). One
+    /// that asks for longer gets at least 25 s, and reminders, alarms and calls stay until they're answered.
     pub duration_ms: u32,
     /// Apps that keep their native banners, matched case-insensitively against the app name or
     /// AUMID, e.g. "Teams" for incoming calls.
     pub ignore: Vec<String>,
+    /// How cards look: "standard", or "pimped" (gold, with a sheen that sweeps across).
+    #[serde(skip_serializing_if = "is_standard_card")]
+    pub style: String,
+}
+
+fn is_standard_card(style: &String) -> bool {
+    style == "standard"
 }
 
 /// A glow behind the Start button: none at rest, `hover` (opacity) while the pointer is over it, `press` while it's
@@ -455,11 +534,15 @@ impl AppGlow {
 
 impl Default for Toasts {
     fn default() -> Self {
-        Toasts { enabled: true, duration_ms: 7000, ignore: Vec::new() }
+        Toasts { enabled: true, duration_ms: 7000, ignore: Vec::new(), style: "standard".into() }
     }
 }
 
 impl Toasts {
+    pub fn pimped(&self) -> bool {
+        self.style == "pimped"
+    }
+
     pub fn ignores(&self, app: &str, aumid: &str) -> bool {
         let (app, aumid) = (app.to_lowercase(), aumid.to_lowercase());
         self.ignore.iter().map(|i| i.to_lowercase()).any(|i| app.contains(&i) || aumid.contains(&i))
@@ -531,6 +614,27 @@ mod tests {
         assert!(set_top_level(&path, "update_check", "\"maybe\"").is_err());
         assert!(std::fs::read_to_string(&path).unwrap().starts_with("update_check = false\n# mine"));
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn moves_to_roaming() {
+        let root = std::env::temp_dir().join(format!("pms-config-move-test-{}", std::process::id()));
+        let (local, roaming) = (root.join("Local"), root.join("Roaming").join("PimpMyShell"));
+        std::fs::create_dir_all(&local).unwrap();
+        let (old, new) = (local.join("pms.toml"), roaming.join("pms.toml"));
+        std::fs::write(&old, "# mine\n").unwrap();
+        std::fs::write(old.with_extension("toml.bak"), "# my backup\n").unwrap();
+        // Moved, with its backup, into a folder made for it.
+        move_config(&old, &new);
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "# mine\n");
+        assert_eq!(std::fs::read_to_string(new.with_extension("toml.bak")).unwrap(), "# my backup\n");
+        assert!(!old.exists() && !old.with_extension("toml.bak").exists());
+        // One there already: nothing is touched, either side.
+        std::fs::write(&old, "# another\n").unwrap();
+        move_config(&old, &new);
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "# mine\n");
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "# another\n");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

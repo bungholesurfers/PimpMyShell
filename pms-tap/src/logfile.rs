@@ -5,10 +5,12 @@
 //! Nothing here deletes a file outright. The oldest generation goes only by the next one being renamed over it, and
 //! the only paths ever touched are the fixed names below, in `data_dir()`, and only while each is a plain file (not
 //! a folder, nor a link to somewhere else).
+//!
+//! People send these files to others, so no line keeps the Windows user name: see `redact`.
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crate::data_dir;
 
@@ -41,8 +43,69 @@ impl Log {
 /// One process's appends and rotations, one at a time.
 static LOCK: Mutex<()> = Mutex::new(());
 
-/// Appends `line` to `log`, then starts the log over if that took it past `MAX`.
+/// `line` without the user's name: their profile folder as `%USERPROFILE%`, and the name as `<user>` wherever it's a
+/// whole part of a path (or `DOMAIN\\name`). Only there: a user called User shouldn't cost us `UserNotification`.
+pub fn redact(line: &str) -> String {
+    static ME: OnceLock<(String, String)> = OnceLock::new();
+    let (profile, user) = ME.get_or_init(|| (std::env::var("USERPROFILE").unwrap_or_default(), std::env::var("USERNAME").unwrap_or_default()));
+    redact_for(line, profile, user)
+}
+
+fn separator(c: char) -> bool {
+    c == '\\' || c == '/'
+}
+
+/// How much of `text` (in bytes) is `what`: in any case, either kind of separator, and a doubled one (a path printed
+/// with `{:?}`). None unless it ends where a name would, so that `bob` isn't found in `bobby`.
+fn starts_with_name(text: &str, what: &str) -> Option<usize> {
+    let mut rest = text;
+    for w in what.chars() {
+        let t = rest.chars().next()?;
+        if separator(w) {
+            if !separator(t) {
+                return None;
+            }
+            rest = rest.trim_start_matches(separator);
+        } else if t.to_lowercase().eq(w.to_lowercase()) {
+            rest = &rest[t.len_utf8()..];
+        } else {
+            return None;
+        }
+    }
+    // A full stop ends a sentence, unless more of the name follows (`bob.old`).
+    let mut after = rest.chars();
+    let ends = match after.next() {
+        Some('.') => !after.next().is_some_and(char::is_alphanumeric),
+        Some(c) => !(c.is_alphanumeric() || matches!(c, '_' | '-' | '$')),
+        None => true,
+    };
+    ends.then_some(text.len() - rest.len())
+}
+
+fn redact_for(line: &str, profile: &str, user: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        if let Some(n) = Some(profile).filter(|p| !p.is_empty()).and_then(|p| starts_with_name(rest, p)) {
+            out.push_str("%USERPROFILE%");
+            rest = &rest[n..];
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+        if separator(c)
+            && let Some(n) = Some(user).filter(|u| !u.is_empty()).and_then(|u| starts_with_name(rest, u))
+        {
+            out.push_str("<user>");
+            rest = &rest[n..];
+        }
+    }
+    out
+}
+
+/// Appends `line` to `log` (redacted), then starts the log over if that took it past `MAX`.
 pub fn append(log: Log, line: &str) {
+    let line = redact(line);
     let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = data_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -77,6 +140,40 @@ fn rotate(log: Log) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn redacted(line: &str) -> String {
+        redact_for(line, r"C:\Users\Bob", "Bob")
+    }
+
+    #[test]
+    fn the_profile_folder_goes() {
+        assert_eq!(redacted(r"daemon up: C:\Users\Bob\AppData\Roaming\PimpMyShell\pms.toml; meters"), r"daemon up: %USERPROFILE%\AppData\Roaming\PimpMyShell\pms.toml; meters");
+        assert_eq!(redacted(r"c:\users\BOB\x and C:/Users/bob/y"), r"%USERPROFILE%\x and %USERPROFILE%/y");
+        assert_eq!(redacted(r#"path: "C:\\Users\\Bob\\x""#), r#"path: "%USERPROFILE%\\x""#);
+        assert_eq!(redacted(r"at C:\Users\Bob"), r"at %USERPROFILE%");
+    }
+
+    #[test]
+    fn the_name_goes_from_paths_elsewhere() {
+        assert_eq!(redacted(r"D:\Users\Bob\x"), r"D:\Users\<user>\x");
+        assert_eq!(redacted(r"\\server\homes\bob, then"), r"\\server\homes\<user>, then");
+        assert_eq!(redacted(r"signed in as CORP\Bob."), r"signed in as CORP\<user>.");
+    }
+
+    #[test]
+    fn everything_else_stays() {
+        // A name that's an everyday word: it only goes as a whole part of a path.
+        let plain = r"UserNotification from Bob: C:\Users\Bobby\x, D:\Bob_old\y, C:\Windows\explorer.exe";
+        assert_eq!(redact_for(plain, r"C:\Users\Bob", "Bob"), plain);
+        assert_eq!(redact_for(r"User said C:\Users\User\x", r"C:\Users\User", "User"), r"User said %USERPROFILE%\x");
+        assert_eq!(redact_for("nothing to go on", "", ""), "nothing to go on");
+    }
+
+    #[test]
+    fn redacting_twice_changes_nothing_more() {
+        let once = redacted(r"C:\Users\Bob\x D:\Bob\y");
+        assert_eq!(redacted(&once), once);
+    }
 
     /// The names are fixed, distinct, plain file names: nothing that could reach outside the data folder.
     #[test]

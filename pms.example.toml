@@ -1,4 +1,4 @@
-# PimpMyShell config. Copy to %LOCALAPPDATA%\PimpMyShell\pms.toml, then:
+# PimpMyShell config. Copy to %APPDATA%\PimpMyShell\pms.toml, then:
 #   pms daemon                 keep it applied (foreground; Ctrl+C restores the stock taskbar)
 #   pms autostart on           run the windowless daemon at every logon
 #   pms meters <this file>     just the meters, without the daemon
@@ -30,9 +30,12 @@ theme = "auto"
 # (WARP), which Windows keeps for when there's no GPU driver, and whose "GPU" work is really CPU work.
 # software_gpus = true
 
-# Software update. update_check: whether the daemon checks GitHub for a newer version by itself, every
-# day or two, and downloads it - it installs only once you say so (unset: the daemon asks a minute in,
-# and checks nothing until answered; OK, or closing the question, is yes).
+# Software update. update_check: whether the daemon checks GitHub for a newer version by itself - a while
+# after each start (1 to 30 minutes), then every day or two - and downloads it; it installs only once you
+# say so. On by default, but the first run asks you first (a minute in), and checks nothing until you
+# answer: OK, or closing the question, is on; "No, don't check" is off. A check starts by reading
+# https://raw.githubusercontent.com/bungholesurfers/PimpMyShell/main/update/stable.txt (on the latest
+# channel, https://github.com/bungholesurfers/PimpMyShell/releases/latest).
 # update_channel: "stable" (the version the repository's update/stable.txt names) or "latest" (the
 # newest release published). Only installers signed with PimpMyShell's release key are ever run.
 # update_check   = true
@@ -65,8 +68,11 @@ ignore    = []        # e.g. ["obs64.exe"]: substrings of the app's consent-stor
 # its buttons acts like clicking the real one. New toasts stack on top of the ones showing; flick a card off to the
 # right to dismiss it. Do not disturb and full-screen apps still hold toasts back.
 [toasts]
-# enabled   = false   # off, its settings kept (what the notice about notification access's "Keep Windows' notifications" sets)
-duration_ms = 7000    # each toast in front (one that comes forward again with more behind it: at most 4 s)
+# enabled   = false   # off, its settings kept (what the notice about notification access's "Keep Windows notifications" sets)
+duration_ms = 7000    # each toast in front (one that comes forward again with more behind it: at most 4 s). Toasts that
+                      # ask for duration="long" get at least 25 s, and alarms, calls and reminders with a button stay
+                      # until you answer them, as they do in Windows
+# style     = "pimped"  # gold cards with a sheen sweeping across (default: "standard")
 ignore      = []      # apps that keep native banners (name or AUMID substring), e.g. ["Teams"]
 
 # [start_glow]: a glow behind the Start button - none at rest, `hover` (its opacity) while the pointer

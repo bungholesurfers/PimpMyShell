@@ -130,7 +130,7 @@ impl Watchdog {
         if self.hooked.as_ref().is_none_or(|h| h.pid != pid) {
             self.watch(pid, "explorer.exe");
         }
-        (self.reinjects.1 > MAX_REINJECTS).then(|| self.bench(format!("PimpMyShell's hook kept failing in explorer ({} tries)", self.reinjects.1)))
+        (self.reinjects.1 > MAX_REINJECTS).then(|| self.bench(format!("PimpMyShell couldn't stay connected to the taskbar after {} tries", self.reinjects.1)))
     }
 
     /// Watch process `pid` (whose exe is `app`) as the hooked explorer. The daemon watches explorer; a drill
@@ -146,10 +146,10 @@ impl Watchdog {
     /// An injection failed. Returns why we give up, after a few in a row.
     pub fn inject_failed(&mut self, error: &str) -> Option<String> {
         self.inject_failures += 1;
-        (self.inject_failures >= MAX_INJECT_FAILURES).then(|| self.bench(format!("PimpMyShell couldn't hook explorer ({} tries; last: {error})", self.inject_failures)))
+        (self.inject_failures >= MAX_INJECT_FAILURES).then(|| self.bench(format!("PimpMyShell couldn't connect to the taskbar after {} tries ({error})", self.inject_failures)))
     }
 
-    fn bench(&mut self, why: String) -> String {
+    pub fn bench(&mut self, why: String) -> String {
         log(format!("watchdog: {why}; leaving explorer alone until PimpMyShell restarts (or the tray's Retry)"));
         self.benched = Some(why.clone());
         why
@@ -208,8 +208,8 @@ impl Watchdog {
         self.crashes.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
         self.crashes.push(now);
         match blame {
-            Blame::Ours(m) => Some(self.bench(format!("explorer crashed in PimpMyShell's code ({m}, 0x{code:08X})"))),
-            Blame::Suspect(m) => Some(self.bench(format!("explorer crashed in {m} (0x{code:08X}) while PimpMyShell was hooked into it"))),
+            Blame::Ours(m) => Some(self.bench(format!("Windows Explorer stopped working because of PimpMyShell ({m}, 0x{code:08X})"))),
+            Blame::Suspect(m) => Some(self.bench(format!("Windows Explorer stopped working in {m} (0x{code:08X}) while PimpMyShell was running"))),
             Blame::Elsewhere(m) if self.crashes.len() < MAX_CRASHES => {
                 log(format!("watchdog: the crash was in {m}, not PimpMyShell; carrying on"));
                 None
@@ -218,7 +218,7 @@ impl Watchdog {
                 log("watchdog: no record of what crashed; carrying on");
                 None
             }
-            _ => Some(self.bench(format!("explorer crashed {} times in {} minutes while PimpMyShell was hooked into it", self.crashes.len(), CRASH_WINDOW.as_secs() / 60))),
+            _ => Some(self.bench(format!("Windows Explorer stopped working {} times in {} minutes while PimpMyShell was running", self.crashes.len(), CRASH_WINDOW.as_secs() / 60))),
         }
     }
 }

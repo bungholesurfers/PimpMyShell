@@ -95,6 +95,15 @@ const COUNTDOWN: Color = Color { A: 0x90, R: 0xFF, G: 0xFF, B: 0xFF };
 const PROGRESS: Color = Color { A: 0xFF, R: 0x60, G: 0xCD, B: 0xFF };
 const TRANSPARENT: Color = Color { A: 0, R: 0, G: 0, B: 0 };
 
+/// A pimped card (`style=pimped`): gold where a standard one is white, and every SHEEN_MS a sheen crosses it.
+const GOLD: Color = Color { A: 0xFF, R: 0xFF, G: 0xD3, B: 0x5C };
+const GOLD_DIM: Color = Color { A: 0xB0, R: 0xFF, G: 0xD3, B: 0x5C };
+const GOLD_RIM: Color = Color { A: 0xC8, R: 0xE8, G: 0xB0, B: 0x30 };
+const GOLD_CARD: Color = Color { A: 0x34, R: 0xFF, G: 0xB8, B: 0x30 };
+const GOLD_HOVER: Color = Color { A: 0x50, R: 0xFF, G: 0xB8, B: 0x30 };
+const GOLD_BACK: Color = Color { A: 0x60, R: 0xFF, G: 0xB8, B: 0x30 };
+const SHEEN_MS: i64 = 3200;
+
 /// What `toast show` asks for; every field is optional (the daemon always gives the duration).
 #[derive(Default)]
 struct Content {
@@ -111,6 +120,8 @@ struct Content {
     buttons: Vec<String>,
     /// 0..1 fill for the bottom bar instead of the countdown; negative = indeterminate.
     progress: Option<f64>,
+    /// `style=pimped`: gold, with a sheen sweeping across.
+    pimped: bool,
 }
 
 /// One notification's card in the deck.
@@ -133,6 +144,9 @@ struct Card {
     want: f32,
     /// The logo's color, for the ripple.
     color: Option<Color>,
+    /// Its fill in front, and behind the others.
+    fill: Color,
+    fill_back: Color,
 }
 
 struct Toast {
@@ -255,6 +269,7 @@ pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
                     "image" => c.image = path(),
                     "b" => c.buttons.push(v.into()),
                     "progress" => c.progress = v.parse().ok(),
+                    "style" => c.pimped = v == "pimped",
                     other => return Err(format!("unknown toast field `{other}`")),
                 }
             }
@@ -315,12 +330,11 @@ fn snap_to(e: &UIElement, opacity: f32, dy: f32) -> R<()> {
     v.Properties().and_then(|p| p.InsertVector3(&HSTRING::from("Translation"), Vector3 { X: 0.0, Y: dy, Z: 0.0 })).map_err(w)
 }
 
-/// The persistent part: our host Grid, last child of the Grid that holds the tray.
+/// The persistent part: our host Grid, last child of the Grid above the tray.
 fn build_host(ctx: &Ctx) -> R<Toast> {
     let tray_h = resolve_elem("SystemTrayFrame")?;
     let tray: UIElement = element(ctx, tray_h)?.cast().map_err(w)?;
-    let parent_h = lock(&crate::TREE).get(&tray_h).map(|n| n.parent).ok_or("SystemTrayFrame has no parent")?;
-    let parent: pms_xaml::Panel = element(ctx, parent_h)?.cast().map_err(w)?;
+    let parent = crate::layout::grid_above(ctx, tray_h)?;
 
     let host = Grid::new().map_err(w)?;
     host.SetHorizontalAlignment(HorizontalAlignment::Left).map_err(w)?;
@@ -524,6 +538,8 @@ fn button(label: &str) -> R<Border> {
 /// What build_card makes: the card, its insides, its countdown bar, the width it wants, and the color its logo
 /// glows in (None without a logo).
 struct Built {
+    fill: Color,
+    fill_back: Color,
     card: Border,
     behind: Arc<AtomicBool>,
     inner: UIElement,
@@ -533,9 +549,14 @@ struct Built {
 }
 
 fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
+    let (fill, fill_hover, fill_back) = if c.pimped { (GOLD_CARD, GOLD_HOVER, GOLD_BACK) } else { (CARD, CARD_HOVER, CARD_BACK) };
     let card = Border::new().map_err(w)?;
     card.SetCornerRadius(radius(6.0)).map_err(w)?;
-    card.SetBackground(&brush(CARD)?).map_err(w)?;
+    card.SetBackground(&brush(fill)?).map_err(w)?;
+    if c.pimped {
+        card.SetBorderBrush(&brush(GOLD_RIM)?).map_err(w)?;
+        card.SetBorderThickness(Thickness { Left: 1.0, Top: 1.0, Right: 1.0, Bottom: 1.0 }).map_err(w)?;
+    }
     card.SetMargin(Thickness { Left: 0.0, Top: 2.0, Right: 0.0, Bottom: 2.0 }).map_err(w)?;
     card.SetPadding(Thickness { Left: 8.0, Top: 0.0, Right: 6.0, Bottom: 0.0 }).map_err(w)?;
     let card_el = ui(&card)?;
@@ -543,8 +564,8 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
     let behind = Arc::new(AtomicBool::new(false));
     let (target, back) = (card.clone(), behind.clone());
     on_hover(&card_el, move |entered| {
-        let fill = if back.load(Ordering::Relaxed) { CARD_BACK } else if entered { CARD_HOVER } else { CARD };
-        if let Ok(b) = brush(fill) {
+        let now = if back.load(Ordering::Relaxed) { fill_back } else if entered { fill_hover } else { fill };
+        if let Ok(b) = brush(now) {
             let _ = target.SetBackground(&b);
         }
     })?;
@@ -595,10 +616,10 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
         (false, false) => format!("{} · {}", c.app, c.attribution),
     };
     if !caption.is_empty() {
-        header.Children().map_err(w)?.Append(&ui(&text(&caption, 10.5, 12.0, 400, TEXT_FAINT)?)?).map_err(w)?;
+        header.Children().map_err(w)?.Append(&ui(&text(&caption, 10.5, 12.0, 400, if c.pimped { GOLD_DIM } else { TEXT_FAINT })?)?).map_err(w)?;
         lines.Children().map_err(w)?.Append(&ui(&header)?).map_err(w)?;
     }
-    lines.Children().map_err(w)?.Append(&ui(&text(&c.title, 12.0, 14.5, 600, TEXT)?)?).map_err(w)?;
+    lines.Children().map_err(w)?.Append(&ui(&text(&c.title, 12.0, 14.5, 600, if c.pimped { GOLD } else { TEXT })?)?).map_err(w)?;
     if !c.body.is_empty() {
         lines.Children().map_err(w)?.Append(&ui(&text(&c.body, 11.5, 13.5, 400, TEXT_DIM)?)?).map_err(w)?;
     }
@@ -656,7 +677,12 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
 
     let countdown = Rectangle::new().map_err(w)?;
     countdown.SetHeight(if c.progress.is_some() { 2.5 } else { 2.0 }).map_err(w)?;
-    countdown.SetFill(&brush(if c.progress.is_some() { PROGRESS } else { COUNTDOWN })?).map_err(w)?;
+    countdown.SetFill(&brush(match (c.progress.is_some(), c.pimped) {
+        (true, _) => PROGRESS,
+        (false, true) => GOLD,
+        (false, false) => COUNTDOWN,
+    })?)
+    .map_err(w)?;
     countdown.SetVerticalAlignment(VerticalAlignment::Bottom).map_err(w)?;
     countdown.SetMargin(Thickness { Left: -2.0, Top: 0.0, Right: 0.0, Bottom: 0.5 }).map_err(w)?;
     countdown.SetRadiusX(1.0).map_err(w)?;
@@ -666,7 +692,9 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
     outer.Children().map_err(w)?.Append(&ui(&grid)?).map_err(w)?;
     outer.Children().map_err(w)?.Append(&ui(&countdown)?).map_err(w)?;
     card.SetChild(&ui(&outer)?).map_err(w)?;
-    Ok(Built { card, behind, inner: ui(&outer)?, countdown, want, glow })
+    // A pimped card's logo glows, and ripples out, in gold.
+    let glow = if c.pimped { Some(GOLD) } else { glow };
+    Ok(Built { card, behind, inner: ui(&outer)?, countdown, want, glow, fill, fill_back })
 }
 
 /// A card for the deck: the card in its slot, with the logo's glow behind it (rather than in it, where the card's
@@ -692,6 +720,9 @@ fn make_card(id: u32, c: &Content, host: &Grid) -> R<Card> {
     let card_v = visual(&card_el)?;
     let clip = card_v.Compositor().and_then(|c| c.CreateInsetClip()).map_err(w)?;
     card_v.SetClip(&clip).map_err(w)?;
+    if c.pimped {
+        sheen(&card_el, &card_v)?;
+    }
     draggable(&card_el, host, id)?;
     Ok(Card {
         id,
@@ -705,7 +736,34 @@ fn make_card(id: u32, c: &Content, host: &Grid) -> R<Card> {
         progress: c.progress,
         want: b.want,
         color: b.glow,
+        fill: b.fill,
+        fill_back: b.fill_back,
     })
+}
+
+/// A band of light that crosses a pimped card, then waits: a child of the card's visual, so inside its clip, and over
+/// its content without taking its clicks.
+fn sheen(card: &UIElement, v: &Visual) -> R<()> {
+    let c = v.Compositor().map_err(w)?;
+    let gradient = c.CreateLinearGradientBrush().map_err(w)?;
+    gradient.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 }).map_err(w)?;
+    gradient.SetEndPoint(Vector2 { X: 1.0, Y: 0.25 }).map_err(w)?;
+    let stops = gradient.ColorStops().map_err(w)?;
+    for (at, a) in [(0.0, 0x00), (0.5, 0x58), (1.0, 0x00)] {
+        stops.Append(&c.CreateColorGradientStopWithOffsetAndColor(at, Color { A: a, R: 0xFF, G: 0xF0, B: 0xC0 }).map_err(w)?).map_err(w)?;
+    }
+    let band = c.CreateSpriteVisual().map_err(w)?;
+    band.SetBrush(&gradient).map_err(w)?;
+    band.SetRelativeSizeAdjustment(Vector2 { X: 0.3, Y: 1.0 }).map_err(w)?;
+    let across = c.CreateVector3KeyFrameAnimation().map_err(w)?;
+    let linear = c.CreateLinearEasingFunction().map_err(w)?;
+    across.InsertKeyFrame(0.0, Vector3 { X: -0.3, Y: 0.0, Z: 0.0 }).map_err(w)?;
+    across.InsertKeyFrameWithEasingFunction(0.4, Vector3 { X: 1.0, Y: 0.0, Z: 0.0 }, &linear).map_err(w)?;
+    across.InsertKeyFrameWithEasingFunction(1.0, Vector3 { X: 1.0, Y: 0.0, Z: 0.0 }, &linear).map_err(w)?;
+    across.SetDuration(ms(SHEEN_MS)).map_err(w)?;
+    across.SetIterationBehavior(AnimationIterationBehavior::Forever).map_err(w)?;
+    band.StartAnimation(&HSTRING::from("RelativeOffsetAdjustment"), &across).map_err(w)?;
+    ElementCompositionPreview::SetElementChildVisual(card, &band).map_err(w)
 }
 
 fn show(ctx: &Ctx, id: u32, c: Content) -> R<String> {
@@ -760,7 +818,7 @@ fn show(ctx: &Ctx, id: u32, c: Content) -> R<String> {
         }
         t.deck.last().map_or(Ok(()), |card| countdown(card, Some(c.ms)))
     })?;
-    Ok(format!("toast {id} shown for {}ms", c.ms))
+    Ok(if c.ms > 0 { format!("toast {id} shown for {}ms", c.ms) } else { format!("toast {id} shown until it's answered") })
 }
 
 /// The ripple from the front card's logo (and the glow under the card), in the logo's color; none without one.
@@ -796,6 +854,11 @@ fn countdown(card: &Card, ms_: Option<i64>) -> R<()> {
             let _ = v.StopAnimation(&HSTRING::from("Scale"));
             v.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 }).map_err(w)
         }
+        // No time limit: nothing to count down.
+        (None, Some(n)) if n <= 0 => {
+            let _ = v.StopAnimation(&HSTRING::from("Scale"));
+            v.SetScale(Vector3 { X: 0.0, Y: 1.0, Z: 1.0 }).map_err(w)
+        }
         // Shrink toward the left edge (the right end recedes) over the toast's lifetime.
         (None, Some(n)) => {
             let shrink = comp.CreateVector3KeyFrameAnimation().map_err(w)?;
@@ -823,7 +886,7 @@ fn restack(t: &Toast, entering: Option<u32>) -> R<()> {
         slot.SetIsHitTestVisible(k == 0).map_err(w)?;
         let back = k > 0;
         if card.behind.swap(back, Ordering::Relaxed) != back {
-            card.card.SetBackground(&brush(if back { CARD_BACK } else { CARD })?).map_err(w)?;
+            card.card.SetBackground(&brush(if back { card.fill_back } else { card.fill })?).map_err(w)?;
         }
         let v = visual(&slot)?;
         let (x, height, opacity) = pose(k as f32);
@@ -894,7 +957,7 @@ fn reveal(t: &Toast, tx: f32, first: bool) -> R<()> {
                 }
                 // Coming out from behind: the front card's fill.
                 card.behind.store(false, Ordering::Relaxed);
-                card.card.SetBackground(&brush(CARD)?).map_err(w)?;
+                card.card.SetBackground(&brush(card.fill)?).map_err(w)?;
             }
         }
         let (x, height, opacity) = pose(k as f32 - p);

@@ -23,7 +23,7 @@ VERSION is the workspace's version, in the root `Cargo.toml` (`[workspace.packag
 
 Before copying files it asks a running daemon to stop (which puts the stock taskbar back), then closes any that are left, and the settings window too. A silent install (an update) starts the daemon again if it had been running.
 
-The config, `%LOCALAPPDATA%\PimpMyShell\pms.toml`, belongs to the user: the daemon writes the example there the first time, if there's none, and the uninstaller leaves it. Uninstalling also removes the Run value (whichever of them wrote it) and Task Manager's on/off mark for it.
+The config, `%APPDATA%\PimpMyShell\pms.toml` (roaming; before 0.1.3 it was in `%LOCALAPPDATA%\PimpMyShell`, and one there moves over the first time), belongs to the user: the daemon writes the example there the first time, if there's none, and the uninstaller leaves it. The logs and the machine's own notes stay in `%LOCALAPPDATA%\PimpMyShell`. Uninstalling also removes the Run value (whichever of them wrote it) and Task Manager's on/off mark for it.
 
 A development build (run from `target\release`) and an installed copy can live side by side, but only one daemon at a time. If autostart was switched on from a development build, installing with the task ticked points it at the installed copy.
 
