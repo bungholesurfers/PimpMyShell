@@ -67,6 +67,11 @@ it needs the real thing to be there.
 - **A tray icon** to pause, open the settings, switch start at sign-in, read the log, or exit.
 - **A watchdog** that backs off if explorer ever crashes with PimpMyShell in it.
 - **Signed updates**, checked every day or two if you agree (or whenever you ask), installed only when you say so.
+- **Out of the way when it can't be seen.** While a window fills the screen your taskbar's on, a game or a video, your TVs
+  stop drawing, POOM rests, and Twatch TVs with their sound off stop: from about a quarter of a CPU thread to a few percent,
+  back the moment the taskbar is. While a game's on (it fills the screen, keeps your graphics card busy, and somebody's
+  playing, keyboard, mouse or controller), Twatch TVs make way too, and POOM stops unless you've been playing it. Both are
+  on Settings > Power & performance.
 - **Easy on the battery.** Unplugged, the hot-mic animation drops to 30 fps by default. `max_fps` caps it always.
 
 ## A TV in your taskbar
@@ -89,7 +94,8 @@ changes where it starts and stops, or turns that off.
 | 1295 | [Captain Midnight](https://en.wikipedia.org/wiki/Captain_Midnight_broadcast_signal_intrusion), who took over HBO's satellite feed in April 1986 over the price of scrambling |
 
 Give the console a game on Settings > POOM and it's on channel 6. The demos
-play in the taskbar. Click the picture to stop shuffling, then again to open a window and play. The console keeps running when
+play in the taskbar. Click the picture to stop shuffling, then again to open a window and play: W, A, S and D or the arrows to
+move, the mouse to turn and shoot, E or space to open doors. The console keeps running when
 you change the channel, as a console does, and has a power button of its own. With nobody watching, it rests. Settings > POOM
 fetches [Freedoom](https://freedoom.github.io/) or the Doom shareware episode, on request, or you can add your own IWAD. No
 game data comes with PimpMyShell. Sound is off, and no audio device is opened.
@@ -228,7 +234,9 @@ What it touches, all under your own user (no admin, no services, no drivers):
   `pms.toml` that can't be used (misspelled, one an older version knew, or a value that isn't one of the choices, is out of
   range, isn't a color or is the wrong kind) goes back to its default, or is left out, and the rest loads. A notification says
   so, and Settings marks each in red, with its page.
-- **`%LOCALAPPDATA%\PimpMyShell`**: this PC's own files: `logs` (`daemon.log` and `tap.log`, each rotated at 1 MB with two
+- **`%LOCALAPPDATA%\PimpMyShell`**: this PC's own files: `logs` (`daemon.log` and `tap.log`, each line timed in UTC, as
+  `2026-11-09T18:21:33.512Z`, which says nothing of where you are; Settings > Logs lists what else they can say about you.
+  Each is rotated at 1 MB with two
   older generations kept, `daemon.1.log` and `daemon.2.log`; about 3 MB each at most. They're here, not in the roaming
   profile, as they're about this PC and written all the time: where the roaming folder is redirected to a network share,
   each line from inside Explorer would be a network write), `banners.txt`, `tree.txt` (a
@@ -491,7 +499,11 @@ Windows has to Linux's `eth0`: `ethernet_32773` (what `Get-NetAdapter` calls `In
 ### Toasts
 
 - **Source.** `UserNotificationListener` works unpackaged once you allow notification access. Its change event needs
-  package identity, so the daemon polls it twice a second. The listener only exposes text, so the full toast XML
+  package identity, so the daemon polls, but not the listener: twice a second it reads, from the notification platform's
+  `wpndatabase.db`, the newest notification's id and how many there are, a read of a file that costs Windows nothing, and asks
+  the listener only when those change (and every 30 s, in case). Asking it has WpnUserService gather every notification in the
+  center each time: about 57 ms of its CPU with 260 of them, and on some PCs a stream of writes to that database's log
+  (`wpndatabase.db-wal`). The listener only exposes text, so the full toast XML
   (images, buttons, launch arguments) is read from the notification platform's `wpndatabase.db` by the same id,
   read-only. Without access (or once it's taken away), no banner is turned off, a notice says so, and the daemon
   tries again every 15 seconds.

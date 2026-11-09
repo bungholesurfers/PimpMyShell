@@ -1774,7 +1774,7 @@ mod tests {
     #[test]
     fn what_a_set_shows_goes_by_the_setting_and_the_machine() {
         let with = |value: &str| config(&format!("{SET}[twatch]\npictures = \"{value}\"\n"));
-        let short = Pressure { ram: false, vram: true };
+        let short = Pressure { vram: true, ..Default::default() };
         let fine = Pressure::default();
         assert_eq!(pressed(&config(SET), fine).shows(false), Shows::Video, "the usual: video, with plenty of memory");
         assert_eq!(pressed(&config(SET), short).shows(false), Shows::Pictures, "and pictures without");

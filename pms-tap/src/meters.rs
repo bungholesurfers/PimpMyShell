@@ -2521,11 +2521,15 @@ fn cast_shadows() {
     for (t, shadow) in UNCAST.with_borrow_mut(std::mem::take) {
         let r = (|| -> R<()> {
             let mask = t.GetAlphaMask().map_err(w)?;
-            // The mask is the text's own size; anchored top-left so changing text never stretches it.
+            // The mask is the text's own size; anchored top-left so changing text never stretches it. It's drawn in pixels, and the
+            // shadow is laid out in DIPs: above 100% it would be too big, and spread right and down from the corner, by as much
+            // as the display is scaled. A change of scale rebuilds the strip (`watch_scale`), so `PX` is the scale it's drawn at.
             if let Ok(surface) = mask.cast::<windows::UI::Composition::CompositionSurfaceBrush>() {
                 surface.SetStretch(windows::UI::Composition::CompositionStretch::None).map_err(w)?;
                 surface.SetHorizontalAlignmentRatio(0.0).map_err(w)?;
                 surface.SetVerticalAlignmentRatio(0.0).map_err(w)?;
+                let px = PX.get() as f32;
+                surface.SetScale(Vector2 { X: 1.0 / px, Y: 1.0 / px }).map_err(w)?;
             }
             shadow.SetMask(&mask).map_err(w)
         })();

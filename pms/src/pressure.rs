@@ -1,4 +1,5 @@
-//! Whether the machine is short of memory or video memory, for what can get out of the way when it is. A thread of its own takes a
+//! Whether the machine is short of memory or video memory, or somebody's playing a game (games.rs), for what can get out of the way
+//! when it is. A thread of its own takes a
 //! reading now and then: it isn't short until it has stayed short, or fine until it has stayed fine, so nothing comes and goes.
 //!
 //! Memory is short when either what's in use or what's committed nears what there is. Video memory goes by the adapters big enough
@@ -32,12 +33,18 @@ const SMALLEST_ADAPTER: u64 = 1 << 30;
 pub struct Pressure {
     pub ram: bool,
     pub vram: bool,
+    /// A game's in front. The settings can say not to make way for one (`rest_for_games`): then it's false here.
+    pub game: bool,
+    /// A window covers the taskbar, so nothing on it can be seen (the daemon looks, every second: games::taskbar_covered).
+    pub hidden: bool,
 }
 
 impl Pressure {
     /// Why a Twatch TV's player has to go, which takes memory of both kinds.
     pub fn twatch(self) -> Option<&'static str> {
-        if self.vram {
+        if self.game {
+            Some("GAME ON")
+        } else if self.vram {
             Some("VRAM PRESSURE")
         } else if self.ram {
             Some("RAM PRESSURE")
@@ -48,23 +55,24 @@ impl Pressure {
 
     /// Why the console has to go: it draws in software, so video memory is nothing to it.
     pub fn console(self) -> Option<&'static str> {
-        self.ram.then_some("RAM PRESSURE")
+        if self.game { Some("GAME ON") } else { self.ram.then_some("RAM PRESSURE") }
     }
 }
 
 const RAM: u8 = 1;
 const VRAM: u8 = 2;
+const GAME: u8 = 4;
 static NOW: AtomicU8 = AtomicU8::new(0);
 
-/// What's short right now. `PMS_PRESSURE` says so instead, as "ram", "vram" or both, or a file saying that, for trying it on a PC
-/// with plenty.
+/// What's short right now. `PMS_PRESSURE` says so instead, as "ram", "vram", "game" or any of them, or a file saying that, for trying
+/// it on a PC with plenty, or with no game.
 pub fn now() -> Pressure {
     if let Ok(asked) = std::env::var("PMS_PRESSURE") {
         let asked = std::fs::read_to_string(&asked).unwrap_or(asked);
-        return Pressure { ram: asked.replace("vram", "").contains("ram"), vram: asked.contains("vram") };
+        return Pressure { ram: asked.replace("vram", "").contains("ram"), vram: asked.contains("vram"), game: asked.contains("game"), hidden: false };
     }
     let bits = NOW.load(Ordering::Relaxed);
-    Pressure { ram: bits & RAM != 0, vram: bits & VRAM != 0 }
+    Pressure { ram: bits & RAM != 0, vram: bits & VRAM != 0, game: bits & GAME != 0, hidden: false }
 }
 
 /// One thing that can be short.
@@ -175,6 +183,7 @@ pub fn start() {
         let (mut ram, mut vram) = (Gate::default(), Gate::default());
         let mut found: Option<(Instant, HashMap<String, u64>, Option<Vram>)> = None;
         let mut was = 0;
+        let mut games = crate::games::Watch::default();
         loop {
             let now = Instant::now();
             // Adapters come and go, and a counter only knows the ones there were when it was opened.
@@ -186,13 +195,17 @@ pub fn start() {
             let vram_level = found.as_ref().and_then(|(_, list, counter)| fullest(list, &counter.as_ref()?.read()?));
             let ram_level = ram_level();
             let (ram_short, vram_short) = (ram.step(ram_level, RAM_SHORT, RAM_FINE, now), vram.step(vram_level, VRAM_SHORT, VRAM_FINE, now));
-            let bits = if ram_short { RAM } else { 0 } + if vram_short { VRAM } else { 0 };
+            let game = games.step(now);
+            let bits = if ram_short { RAM } else { 0 } + if vram_short { VRAM } else { 0 } + if game { GAME } else { 0 };
             NOW.store(bits, Ordering::Relaxed);
-            if bits != was {
-                was = bits;
+            if (bits ^ was) & GAME != 0 {
+                crate::log(if game { "a game's in front" } else { "no game in front any more" });
+            }
+            if (bits ^ was) & (RAM | VRAM) != 0 {
                 let level = |l: Option<u32>| l.map_or_else(|| "no reading".to_string(), |l| format!("{l}% in use"));
                 crate::log(format!("memory: RAM {} ({}), VRAM {} ({})", if bits & RAM != 0 { "low" } else { "OK" }, level(ram_level), if bits & VRAM != 0 { "low" } else { "OK" }, level(vram_level)));
             }
+            was = bits;
             std::thread::sleep(READ_EVERY);
         }
     });
@@ -255,8 +268,8 @@ mod tests {
 
     #[test]
     fn what_has_to_go_depends_on_what_it_uses() {
-        let vram = Pressure { vram: true, ram: false };
-        let ram = Pressure { vram: false, ram: true };
+        let vram = Pressure { vram: true, ..Default::default() };
+        let ram = Pressure { ram: true, ..Default::default() };
         assert_eq!(vram.twatch(), Some("VRAM PRESSURE"));
         assert_eq!(ram.twatch(), Some("RAM PRESSURE"));
         assert_eq!(vram.console(), None, "the console doesn't use the GPU");

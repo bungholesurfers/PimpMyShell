@@ -3,7 +3,8 @@
 //!
 //! Source: `UserNotificationListener` (works unpackaged once "let apps access your
 //! notifications" allows it) tells us a toast arrived; its change event needs package identity,
-//! so we poll. It only exposes text, so the full toast XML (images, buttons, launch arguments)
+//! so we poll - the database, cheaply, asking the listener (which costs WpnUserService plenty)
+//! only when that changes. It only exposes text, so the full toast XML (images, buttons, launch arguments)
 //! comes from the notification platform's own database, `wpndatabase.db`, by the same id.
 //!
 //! Kinds: modern toasts, Windows' system toasts and the legacy tray balloons (`Shell_NotifyIcon`
@@ -165,6 +166,30 @@ pub struct Listener {
     seen: HashSet<u32>,
     /// Per AUMID: display name and icon, looked up once.
     apps: HashMap<String, (String, Option<PathBuf>)>,
+    /// What the database said was in the notification center when the listener was last asked, and when that was.
+    mark: Option<Mark>,
+    asked: Option<std::time::Instant>,
+}
+
+/// What's in the notification center, going by the notification platform's database: the newest id it has given out, how
+/// many notifications it holds, and the order of the last one. Any arrival or departure changes it.
+type Mark = (i64, i64, i64);
+
+/// How long the listener goes unasked while the database says nothing changed: in case it says so wrongly.
+const RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The notification center's `Mark`, read straight from the database: a read of a file, which costs Windows nothing. Asking
+/// the listener has WpnUserService gather every notification there is, each time: about 57 ms of its time with 260 of them,
+/// and with some setups, a stream of writes to its database. None if the database can't be read.
+fn mark() -> Option<Mark> {
+    let path = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join(r"Microsoft\Windows\Notifications\wpndatabase.db");
+    let db = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    db.query_row(
+        "select coalesce((select Value from Metadata where Key = 'CurrentNotificationId'), 0), count(*), coalesce(max([Order]), 0) from Notification",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .ok()
 }
 
 /// Whether Windows lets PimpMyShell read notifications (Settings > Privacy & security > Notifications). Unknown
@@ -185,9 +210,11 @@ impl Listener {
         if access != UserNotificationListenerAccessStatus::Allowed {
             return Err("notification access denied (Settings > Privacy & security > Notifications)".into());
         }
-        let mut l = Listener { inner, seen: HashSet::new(), apps: HashMap::new() };
+        let mut l = Listener { inner, seen: HashSet::new(), apps: HashMap::new(), mark: None, asked: None };
         // Whatever is already in the notification center is old news.
+        l.mark = mark();
         l.seen = l.current()?.iter().filter_map(|n| n.Id().ok()).collect();
+        l.asked = Some(std::time::Instant::now());
         Ok(l)
     }
 
@@ -196,9 +223,16 @@ impl Listener {
         Ok(list.into_iter().collect())
     }
 
-    /// Notifications that arrived since the last poll, oldest first.
+    /// Notifications that arrived since the last poll, oldest first. The listener is only asked when the database says something
+    /// came or went (read first, so that what comes meanwhile is seen next time), or now and then in case; or every time, if the
+    /// database can't be read.
     pub fn poll(&mut self) -> Result<Vec<Incoming>, String> {
+        let mark = mark();
+        if mark.is_some() && mark == self.mark && self.asked.is_some_and(|t| t.elapsed() < RECHECK) {
+            return Ok(Vec::new());
+        }
         let mut now = self.current()?;
+        (self.mark, self.asked) = (mark, Some(std::time::Instant::now()));
         now.sort_by_key(|n| n.Id().unwrap_or(0));
         let mut out = Vec::new();
         let mut ids = HashSet::new();

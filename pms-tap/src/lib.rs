@@ -60,8 +60,7 @@ pub fn data_dir() -> PathBuf {
 
 /// A line of tap.log, timed as daemon.log's are, so that the two can be read side by side.
 fn log(msg: impl AsRef<str>) {
-    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    logfile::append(logfile::Log::Tap, &format!("{:02}:{:02}:{:02} [pid {}] {}", t.wHour, t.wMinute, t.wSecond, std::process::id(), msg.as_ref()));
+    logfile::append(logfile::Log::Tap, &format!("{} [pid {}] {}", logfile::stamp(), std::process::id(), msg.as_ref()));
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

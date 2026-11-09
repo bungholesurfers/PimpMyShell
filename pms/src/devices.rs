@@ -210,6 +210,44 @@ pub struct Nic {
     pub internet: bool,
 }
 
+/// Whether counter instance `instance` is adapter `description` spelled some other way than `instance_name` expects: the same
+/// letters and digits (other punctuation swapped, or dropped), or cut short, as long names can be.
+fn loosely(description: &str, instance: &str) -> bool {
+    let plain = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    let (d, i) = (plain(description), plain(instance));
+    !i.is_empty() && (d == i || (i.chars().count() >= 24 && d.starts_with(&i)))
+}
+
+/// An interface with counters and no adapter to go with it is labelled by its kind (ETH), with no name, no interfaces before it,
+/// and no route to the internet: said once in the log, so a report shows why. Not by name: an adapter's says what it is (a VPN, a
+/// virtual machine's), and reports get posted. What's said is how near the nearest adapter came: how long each is, how much they
+/// share from the start, and where they part, by the characters there if those are punctuation.
+fn unmatched(instance: &str, adapters: &[Adapter]) {
+    static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if let Ok(mut said) = SAID.lock()
+        && !said.iter().any(|s| s == instance)
+    {
+        said.push(instance.to_string());
+        crate::log(format!("network interface counters match none of the {} adapter(s): {}", adapters.len(), nearest(instance, adapters)));
+    }
+}
+
+/// How near the adapter nearest to `instance` came, without either's name.
+fn nearest(instance: &str, adapters: &[Adapter]) -> String {
+    let lower = |s: &str| s.chars().flat_map(char::to_lowercase).collect::<Vec<char>>();
+    let i = lower(instance);
+    let Some(d) = adapters.iter().map(|a| lower(&instance_name(&a.description))).max_by_key(|d| d.iter().zip(&i).take_while(|(a, b)| a == b).count()) else {
+        return "there are none".into();
+    };
+    let same = d.iter().zip(&i).take_while(|(a, b)| a == b).count();
+    let say = |c: Option<&char>| match c {
+        None => "its end".to_string(),
+        Some(c) if c.is_alphanumeric() => "a letter or digit".to_string(),
+        Some(c) => format!("{c:?}"),
+    };
+    format!("the nearest has {} characters to its {}, the same for the first {same}, then {} where the counters have {}", d.len(), i.len(), say(d.get(same)), say(i.get(same)))
+}
+
 /// How `\Network Interface(*)` spells an adapter's description.
 fn instance_name(description: &str) -> String {
     description.chars().map(|c| match c {
@@ -230,7 +268,13 @@ pub fn nics(instances: &[String]) -> Vec<Nic> {
         .iter()
         .filter(|i| *i != "_Total")
         .map(|instance| {
-            let a = adapters.iter().find(|a| instance_name(&a.description).eq_ignore_ascii_case(instance));
+            let a = adapters
+                .iter()
+                .find(|a| instance_name(&a.description).eq_ignore_ascii_case(instance))
+                .or_else(|| adapters.iter().find(|a| loosely(&a.description, instance)));
+            if a.is_none() {
+                unmatched(instance, &adapters);
+            }
             let kind = a.map_or_else(|| short_kind(0, instance, instance), |a| short_kind(a.if_type, &a.name, &a.description));
             // eth5, wlan0; ETH, ETH2, ... should an adapter have no LUID name to go by.
             let n = taken.entry(kind.to_string()).or_default();
@@ -329,6 +373,7 @@ fn short_kind(if_type: u32, name: &str, description: &str) -> &'static str {
     }
 }
 
+#[derive(Default)]
 struct Adapter {
     /// IPv4 and IPv6 interface indexes.
     indexes: [u32; 2],
@@ -509,6 +554,16 @@ mod tests {
     #[test]
     fn counter_spelling() {
         assert_eq!(instance_name("Intel(R) Ethernet Connection #2 I219-V"), "Intel[R] Ethernet Connection _2 I219-V");
+        // Spelled some other way, or cut short, it's still found; a different adapter, or a short stub, isn't.
+        assert!(loosely("Realtek PCIe 2.5GbE Family Controller", "Realtek PCIe 2_5GbE Family Controller"));
+        assert!(loosely("Intel(R) Ethernet Controller I225-V with a very long name", "Intel[R] Ethernet Controller I225-V with"));
+        assert!(!loosely("Intel(R) Ethernet Connection #2 I219-V", "Intel[R] Ethernet Connection I219-V"));
+        assert!(!loosely("Intel(R) Ethernet Connection I219-V", "Intel"));
+        // Said without names: where the spellings part, by punctuation only.
+        let mullvad = Adapter { description: "Mullvad (WireGuard)".into(), ..Adapter::default() };
+        let said = nearest("Mullvad <WireGuard>", &[mullvad]);
+        assert!(!said.to_lowercase().contains("mullvad") && !said.to_lowercase().contains("wireguard"), "{said}");
+        assert!(said.contains("first 8") && said.contains("'['") && said.contains("'<'"), "{said}");
         assert_eq!(short_kind(71, "Wi-Fi", "Intel(R) Wi-Fi 6E AX211"), "WiFi");
         let all = [("ethernet_32773", "Mine"), ("ethernet_32770", "WAN Miniport (IP)"), ("ethernet_32769", "Kernel Debug"), ("wireless_32768", "Wi-Fi"), ("ethernet_32774", "Later")];
         let all: Vec<(String, String)> = all.iter().map(|(n, d)| (n.to_string(), d.to_string())).collect();

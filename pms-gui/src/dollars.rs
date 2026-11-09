@@ -1,6 +1,7 @@
 //! What the settings window (winui.rs) floats between its acrylic and its controls: dollar bills and a word from our
-//! sponsors (who aren't; see `copy::LEGAL`), tiled, drifting up and to the right. Crisp in the nav pane; behind the settings, where people read, it's blurred
-//! to soft color. (Blurred once, into a second tile, so that it costs a frame nothing.) A swap chain in a SwapChainPanel behind everything else, transparent but for
+//! sponsors (who aren't; see `copy::LEGAL`), tiled, drifting up and to the right. Crisp in the nav pane; behind the settings, where people read, it's
+//! big gold dollar signs instead, soft-edged, which still read as what they are through a blur. (Drawn once, into a second tile, so that
+//! they cost a frame nothing.) A swap chain in a SwapChainPanel behind everything else, transparent but for
 //! the tile, drawn on a thread of its own so that the window's own work never makes it stutter (and it never holds
 //! the window up). With Windows' animation effects off, it holds still. Anything failing here only means no dollars.
 //!
@@ -41,9 +42,12 @@ use crate::flag;
 const TILE_W: f32 = 288.0;
 const TILE_H: f32 = 184.0;
 const STRENGTH: f32 = 0.3;
-/// Behind the settings: how far the tile is blurred (DIPs, roughly), and how strong it is there.
-const BLUR: f32 = 9.0;
-const STRENGTH_BEHIND: f32 = 0.22;
+/// Behind the settings: how soft the gold dollar signs' edges are (DIPs, roughly), how strong they are there, and how big.
+const BLUR: f32 = 3.0;
+const STRENGTH_BEHIND: f32 = 0.2;
+const GOLD_SIZE: f32 = 120.0;
+/// Gold: yellow, a little warm.
+const GOLD: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 0.78, b: 0.16, a: 1.0 };
 const DRIFT: f32 = 16.0;
 /// See `copy::LEGAL`.
 const SLOGAN: &str = "BUY $MSFT";
@@ -238,13 +242,11 @@ struct Wave {
     slogans: ID2D1Bitmap,
     flat: ID2D1Bitmap,
     crisp: ID2D1Bitmap1,
-    soft: ID2D1Bitmap1,
-    blur: ID2D1Effect,
 }
 
 impl Wave {
-    /// Puts the tile together at `phase`: the slogans, each flag a pixel's width at a time, then the blur of all that. `dc`
-    /// is left with its target as it was.
+    /// Puts the tile together at `phase`: the slogans, then each flag a pixel's width at a time. `dc` is left with its target as it
+    /// was.
     unsafe fn draw(&self, dc: &ID2D1DeviceContext, phase: f32, dpi: f32) -> Result<()> {
         unsafe {
             let area = D2D_RECT_F { left: 0.0, top: 0.0, right: TILE_W, bottom: TILE_H };
@@ -271,19 +273,14 @@ impl Wave {
             }
             dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             dc.EndDraw(None, None)?;
-            dc.SetTarget(&self.soft);
-            dc.BeginDraw();
-            dc.Clear(Some(&clear));
-            dc.DrawImage(&self.blur.GetOutput()?, None, Some(&area), D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-            dc.EndDraw(None, None)?;
             dc.SetTarget(&target);
             Ok(())
         }
     }
 }
 
-/// The tile, as `Tiles` says. The blur wraps around the tile's edges, so that the blurred one has no seams either. `dc` is
-/// left with its target as it was.
+/// The tile, as `Tiles` says: the bills, and the gold dollar signs, whose softening wraps around the tile's edges so that it has no
+/// seams either. `dc` is left with its target as it was.
 unsafe fn make_tiles(dc: &ID2D1DeviceContext) -> Result<Tiles> {
     unsafe {
         let (mut dpi_x, mut dpi_y) = (0.0, 0.0);
@@ -305,8 +302,9 @@ unsafe fn make_tiles(dc: &ID2D1DeviceContext) -> Result<Tiles> {
             None => still.clone(),
         };
         let soft = dc.CreateBitmap(size, None, 0, &props)?;
+        let gold = draw_gold(dc)?;
         let wrapped = dc.CreateEffect(&CLSID_D2D1Border)?;
-        wrapped.SetInput(0, &crisp.cast::<ID2D1Image>()?, true);
+        wrapped.SetInput(0, &gold.cast::<ID2D1Image>()?, true);
         let wrap = (D2D1_BORDER_EDGE_MODE_WRAP.0 as u32).to_le_bytes();
         wrapped.SetValue(D2D1_BORDER_PROP_EDGE_MODE_X.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &wrap)?;
         wrapped.SetValue(D2D1_BORDER_PROP_EDGE_MODE_Y.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &wrap)?;
@@ -325,9 +323,29 @@ unsafe fn make_tiles(dc: &ID2D1DeviceContext) -> Result<Tiles> {
         let brush = |bitmap: &ID2D1Bitmap, opacity: f32| dc.CreateBitmapBrush(bitmap, Some(&repeat), Some(&D2D1_BRUSH_PROPERTIES { opacity, transform: Matrix3x2::identity() }));
         let tiles = Tiles { crisp: brush(&crisp, STRENGTH)?, soft: brush(&soft.cast()?, STRENGTH_BEHIND)?, wave: None };
         let Some(moving) = moving else { return Ok(tiles) };
-        let wave = Wave { slogans: still, flat: draw_flag(dc)?, crisp: moving, soft, blur };
+        let wave = Wave { slogans: still, flat: draw_flag(dc)?, crisp: moving };
         wave.draw(dc, flag::REST, dpi_x)?;
         Ok(Tiles { wave: Some(wave), ..tiles })
+    }
+}
+
+/// Big, heavy dollar signs in gold, two to a tile, for behind the settings.
+unsafe fn draw_gold(dc: &ID2D1DeviceContext) -> Result<ID2D1Bitmap> {
+    unsafe {
+        let rt = dc.CreateCompatibleRenderTarget(Some(&D2D_SIZE_F { width: TILE_W, height: TILE_H }), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE)?;
+        let ink = rt.CreateSolidColorBrush(&GOLD, None)?;
+        let write: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+        let font = write.CreateTextFormat(w!("Segoe UI Black"), None, DWRITE_FONT_WEIGHT_BLACK, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, GOLD_SIZE, w!("en-us"))?;
+        font.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        font.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        let sign: Vec<u16> = "$".encode_utf16().collect();
+        rt.BeginDraw();
+        rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+        for x in [TILE_W / 4.0, TILE_W * 3.0 / 4.0] {
+            rt.DrawText(&sign, &font, &D2D_RECT_F { left: x - 70.0, top: 0.0, right: x + 70.0, bottom: TILE_H }, &ink, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+        rt.EndDraw(None, None)?;
+        rt.GetBitmap()
     }
 }
 

@@ -45,6 +45,18 @@ pub static mut key_strafeleft: c_int = KEY_STRAFE_L as c_int;
 /// Strafe right (default: period `KEY_STRAFE_R`).
 #[no_mangle]
 pub static mut key_straferight: c_int = KEY_STRAFE_R as c_int;
+/// A second key for each of moving, strafing and using, for a player of today: W, S, A, D and E, beside the arrows, comma,
+/// period and space Doom always had. (Added for PimpMyShell; see NOTICE.md.)
+#[no_mangle]
+pub static mut key_up2: c_int = b'w' as c_int;
+#[no_mangle]
+pub static mut key_down2: c_int = b's' as c_int;
+#[no_mangle]
+pub static mut key_strafeleft2: c_int = b'a' as c_int;
+#[no_mangle]
+pub static mut key_straferight2: c_int = b'd' as c_int;
+#[no_mangle]
+pub static mut key_use2: c_int = b'e' as c_int;
 /// Fire current weapon (default: `KEY_FIRE`, the right Ctrl).
 #[no_mangle]
 pub static mut key_fire: c_int = super::doomkeys::KEY_FIRE as c_int;
@@ -456,6 +468,11 @@ pub extern "C" fn M_BindBaseControls() {
             cstr(b"key_straferight\0"),
             &raw mut key_straferight as *mut c_int as *mut c_void,
         );
+        M_BindVariable(cstr(b"key_up2\0"), &raw mut key_up2 as *mut c_int as *mut c_void);
+        M_BindVariable(cstr(b"key_down2\0"), &raw mut key_down2 as *mut c_int as *mut c_void);
+        M_BindVariable(cstr(b"key_strafeleft2\0"), &raw mut key_strafeleft2 as *mut c_int as *mut c_void);
+        M_BindVariable(cstr(b"key_straferight2\0"), &raw mut key_straferight2 as *mut c_int as *mut c_void);
+        M_BindVariable(cstr(b"key_use2\0"), &raw mut key_use2 as *mut c_int as *mut c_void);
         M_BindVariable(
             cstr(b"key_fire\0"),
             &raw mut key_fire as *mut c_int as *mut c_void,

@@ -43,6 +43,8 @@ const MAX_FAILURES: u32 = 3;
 const INJECT_BACKOFF: Duration = Duration::from_secs(5);
 const APPLY_BACKOFF: Duration = Duration::from_secs(5);
 const STATUS_EVERY: Duration = Duration::from_secs(1);
+/// How long a window has to cover the taskbar before what's drawn on it rests: Alt+Tab through a full-screen window changes nothing.
+const COVERED_AFTER: Duration = Duration::from_secs(2);
 /// How often the mic loudness is read while the mic is hot.
 const LEVEL_EVERY: Duration = Duration::from_millis(66);
 /// How long an app that let go of the mic stays in the label.
@@ -615,7 +617,7 @@ impl Daemon {
         let expected = self.config.update_check == Some(true) || self.config.meters.iter().any(|m| m.set.as_deref() == Some("twatch"));
         match config::network_trouble(&self.path).filter(|_| expected) {
             Some(e) => {
-                log(format!("{}: {e}; nothing goes online until it's fixed", config::network_path(&self.path).display()));
+                log(format!("{}: {}; nothing goes online until it's fixed", config::network_path(&self.path).display(), config::unquoted(&e)));
                 self.notices.raise(notices::network_settings(&config::network_path(&self.path), &e));
             }
             None => self.notices.clear("network"),
@@ -1839,6 +1841,8 @@ pub fn run(path: &Path) -> Result<(), String> {
     crate::pressure::start();
     let mut dark = false;
     let mut next_status = Instant::now();
+    // Since when a window's been covering the taskbar, and whether that's been long enough to count.
+    let (mut covered_since, mut was_hidden): (Option<Instant>, bool) = (None, false);
     loop {
         if d.handle_tray() {
             log("exit from the tray");
@@ -1870,8 +1874,17 @@ pub fn run(path: &Path) -> Result<(), String> {
                 dark = !dark;
                 log(if dark { "the display's off: muted TwaTVs stop until it's back" } else { "the display's back" });
             }
+            // Nobody can see the taskbar while a window fills its screen: after a moment of that, what's only drawn to be seen stops,
+            // and it's back the moment the taskbar is.
+            let covered = d.config.rest_when_covered && active && crate::games::taskbar_covered();
+            covered_since = if covered { covered_since.or(Some(Instant::now())) } else { None };
+            let hidden = covered_since.is_some_and(|t| t.elapsed() >= COVERED_AFTER);
+            if hidden != was_hidden {
+                was_hidden = hidden;
+                log(if hidden { "the taskbar's covered: TVs and muted TwaTVs rest" } else { "the taskbar's in sight again" });
+            }
             // PMS_BATTERY: as if on battery, for trying it on a PC that has none.
-            d.screens.update(&d.config, &d.path, active, on_battery() || std::env::var_os("PMS_BATTERY").is_some(), dark, crate::pressure::now());
+            d.screens.update(&d.config, &d.path, active, on_battery() || std::env::var_os("PMS_BATTERY").is_some(), dark, crate::pressure::Pressure { hidden, ..crate::pressure::now() });
             d.do_what_the_tvs_asked();
             d.do_what_the_sets_asked();
             d.look_after_explorer();

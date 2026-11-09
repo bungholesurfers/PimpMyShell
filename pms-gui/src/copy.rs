@@ -14,6 +14,14 @@ pub fn setting(id: &str) -> (&str, &str) {
         "bar_height" => ("Bar height", "How much of the taskbar's height meters made of bars use"),
         "interval_ms" => ("Update interval", "How often meters refresh, unless a meter has its own interval"),
         "software_gpus" => ("Include software graphics adapters", "Count Microsoft Basic Render Driver, which runs on the CPU, in GPU meters"),
+        "rest_when_covered" => (
+            "Rest while the taskbar's covered",
+            "When a window fills the screen your taskbar's on (a game, a video, a presentation), nobody can see your TVs, so they stop drawing and POOM rests. Twatch TVs with their sound off stop too; ones with sound go on playing it. All of it's back the moment the taskbar is",
+        ),
+        "rest_for_games" => (
+            "Rest while you play",
+            "When a game fills your screen and keeps your graphics card busy, your TVs show GAME ON and stop drawing, Twatch TVs make way, and POOM stops, unless you've played it since it started. All come back about 20 seconds after the game",
+        ),
         "max_fps" => ("Limit animation frame rate", "Cap ongoing animations, such as Hot Mic's and the notification rings. When it's off, they run at your display's refresh rate"),
         "battery_fps" => ("Frame rate on battery", "A lower cap while your PC runs on battery. 0 means no cap"),
         "value_font" => ("Meter font", "A fixed-width font keeps digits from shifting. Leave it empty to use Cascadia Mono, or Consolas"),
@@ -186,8 +194,38 @@ pub const IGNORED_LINES: &str = "Everything else loaded. A setting that couldn't
 /// Why the favorites and the network settings have files of their own.
 pub const PRIVATE_FILES: &str = "Your favorites and network settings are kept out of the settings file, so you can share that file for help without them.";
 
-/// What's in the logs, and what isn't (logfile.rs, and the daemon's lines on toasts).
-pub const LOG_PRIVACY: &str = "Logs can include app and file names and error details. We leave out your Windows user name and what your notifications say, but check a log before you share it.";
+/// What's in the logs, and what isn't (logfile.rs, the daemon's lines on toasts, system.rs's report): its title, what's left out,
+/// and what each file can say about you. Kept to what the code logs: a new kind of line that says something about somebody goes here.
+pub const LOG_PRIVACY: (&str, &str) = (
+    "What your logs can say about you",
+    "Your Windows user name, what your notifications say, your proxy and your list of favorites are left out. The rest is there to help fix things, and people often share logs: read one before you do.",
+);
+pub const LOG_CONTENTS: &[(&str, &[&str])] = &[
+    (
+        "daemon.log",
+        &[
+            "When you used your PC: every line has the date and time, in UTC, so not where you are",
+            "The names of apps that notify you, and of apps that use your microphone",
+            "Twitch channels from your favorites, when something about one comes up",
+            "Which game POOM played",
+            "When a game was in front of everything, though not which one",
+            "File and folder paths, with your user name taken out",
+            "Your version of Windows, and other software that's loaded into Explorer or changes the taskbar",
+            "Error messages from Windows, and from Streamlink",
+            "Whether you use a proxy, though never its address",
+        ],
+    ),
+    ("tap.log", &["When you used your PC: every line has the date and time, in UTC", "Your TVs' names, and errors from inside the taskbar"]),
+    (
+        "A saved report, besides the end of both logs",
+        &["Your settings file, with your meters and the apps you've excluded from Hot Mic and Notification Toast", "How your taskbar is laid out: what's in it, without any window's title"],
+    ),
+];
+
+/// LOG_CONTENTS, as bulleted lines.
+pub fn log_contents() -> String {
+    LOG_CONTENTS.iter().map(|(file, lines)| format!("{file}\n{}", lines.iter().map(|l| format!("  •  {l}")).collect::<Vec<_>>().join("\n"))).collect::<Vec<_>>().join("\n\n")
+}
 
 /// The small print for what floats behind the settings window (dollars.rs).
 pub const LEGAL: &str = include_str!("legal.txt");
@@ -221,6 +259,13 @@ pub const AGGS: &[(&str, &str)] = &[("sum", "Sum"), ("max", "Maximum"), ("min", 
 /// Pages: title, and what's on them.
 pub const GENERAL: (&str, &str) = ("General", "");
 pub const METERS: (&str, &str) = ("Meters", "Your meters, in their order on the taskbar, left to right. Select one to change it, and move it with the arrows. Where they go among your TVs is on the Widgets page.");
+/// When PimpMyShell gets out of the way, and what it does by itself.
+pub const POWER: (&str, &str) = ("Power & performance", "When PimpMyShell gets out of the way: when nobody can see it, for your games, on battery, and for your memory and your data.");
+pub const POWER_BY_ITSELF: &str = "Some of it happens by itself. On battery, a TV you leave alone sleeps, and Twatch TVs show pictures. When memory or video memory runs short, Twatch TVs make way, and so does POOM, unless you've been playing it. When the PC is busy, TVs draw at half speed.";
+/// Under Twatch TV's settings: where its pictures went.
+pub const TWATCH_POWER: &str = "Pictures instead of video, to save memory or data, are under Power & performance.";
+/// The logs' page.
+pub const LOGS: (&str, &str) = ("Logs", "What PimpMyShell writes down as it goes, to help fix things when they go wrong.");
 /// The page of what's along the taskbar, and its notes.
 pub const WIDGETS: (&str, &str) = ("Widgets", "What's along the taskbar beside the system tray, in its order: your meters, together; each TV and Twatch TV; and the Hot Mic label, at one end or the other. When space runs short they squeeze up, then the ones nearest the tray hide first (never the Hot Mic label).");
 pub const WIDGET_MIC_FIRST: &str = "Its label, while an app uses your mic: first, before your meters and TVs";
@@ -229,7 +274,7 @@ pub const WIDGETS_NONE: &str = "Nothing's on the taskbar yet: add meters, a TV o
 pub const WIDGETS_NO_MIC: &str = "Hot Mic is off. Switched on, under Hot Mic, its label goes at one end of these.";
 /// A program of PimpMyShell's (`file`) isn't where the rest are.
 pub fn part_missing(file: &str) -> String {
-    let dir = pms::parts::path(file).and_then(|p| p.parent().map(|d| d.display().to_string())).unwrap_or_default();
+    let dir = pms::parts::path(file).and_then(|p| p.parent().map(pms::shown)).unwrap_or_default();
     format!(
         "It should be with the rest of PimpMyShell, in {dir}, but it isn't, so {}. An antivirus program or a cleanup tool may have taken it away. Installing PimpMyShell again puts it back, and keeps your settings.",
         pms::parts::without(file)

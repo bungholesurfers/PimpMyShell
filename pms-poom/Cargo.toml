@@ -6,7 +6,7 @@ resolver = "3"
 
 [package]
 name = "pms-poom"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "GPL-2.0-only"
 description = "POOM: games for the Doom engine, on a screen in the taskbar"

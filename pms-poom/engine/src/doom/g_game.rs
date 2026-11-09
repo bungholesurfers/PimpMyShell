@@ -760,7 +760,7 @@ use crate::doom::m_controls::{
     dclick_use, joybfire, joybnextweapon, joybprevweapon, joybspeed, joybstrafe, joybstrafeleft,
     joybstraferight, joybuse, key_demo_quit, key_down, key_fire, key_left, key_nextweapon,
     key_pause, key_prevweapon, key_right, key_speed, key_spy, key_strafe, key_strafeleft,
-    key_straferight, key_up, key_use, key_weapon1, key_weapon2, key_weapon3, key_weapon4,
+    key_straferight, key_up, key_use, key_up2, key_down2, key_strafeleft2, key_straferight2, key_use2, key_weapon1, key_weapon2, key_weapon3, key_weapon4,
     key_weapon5, key_weapon6, key_weapon7, key_weapon8, mousebbackward, mousebfire, mousebforward,
     mousebnextweapon, mousebprevweapon, mousebstrafe, mousebstrafeleft, mousebstraferight,
     mousebuse,
@@ -1048,10 +1048,10 @@ pub unsafe extern "C" fn G_BuildTiccmd(cmd: *mut TiccmdT, maketic: c_int) {
         }
     }
 
-    if GAMEKEYDOWN[key_up as usize] != 0 {
+    if GAMEKEYDOWN[key_up as usize] != 0 || GAMEKEYDOWN[key_up2 as usize] != 0 {
         forward += forwardmove[speed];
     }
-    if GAMEKEYDOWN[key_down as usize] != 0 {
+    if GAMEKEYDOWN[key_down as usize] != 0 || GAMEKEYDOWN[key_down2 as usize] != 0 {
         forward -= forwardmove[speed];
     }
     if JOYYMOVE < 0 {
@@ -1062,6 +1062,7 @@ pub unsafe extern "C" fn G_BuildTiccmd(cmd: *mut TiccmdT, maketic: c_int) {
     }
 
     if GAMEKEYDOWN[key_strafeleft as usize] != 0
+        || GAMEKEYDOWN[key_strafeleft2 as usize] != 0
         || joybutton(joybstrafeleft) != 0
         || mousebutton(mousebstrafeleft) != 0
         || JOYSTRAFEMOVE < 0
@@ -1069,6 +1070,7 @@ pub unsafe extern "C" fn G_BuildTiccmd(cmd: *mut TiccmdT, maketic: c_int) {
         side -= sidemove[speed];
     }
     if GAMEKEYDOWN[key_straferight as usize] != 0
+        || GAMEKEYDOWN[key_straferight2 as usize] != 0
         || joybutton(joybstraferight) != 0
         || mousebutton(mousebstraferight) != 0
         || JOYSTRAFEMOVE > 0
@@ -1086,7 +1088,7 @@ pub unsafe extern "C" fn G_BuildTiccmd(cmd: *mut TiccmdT, maketic: c_int) {
         cmd.buttons |= BT_ATTACK;
     }
 
-    if GAMEKEYDOWN[key_use as usize] != 0 || joybutton(joybuse) != 0 || mousebutton(mousebuse) != 0
+    if GAMEKEYDOWN[key_use as usize] != 0 || GAMEKEYDOWN[key_use2 as usize] != 0 || joybutton(joybuse) != 0 || mousebutton(mousebuse) != 0
     {
         cmd.buttons |= BT_USE;
         DCLICKS = 0;

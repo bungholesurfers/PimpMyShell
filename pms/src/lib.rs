@@ -6,6 +6,7 @@ mod layers;
 pub mod daemon;
 mod devices;
 pub mod explorer;
+pub mod games;
 mod expr;
 mod hotmic;
 pub mod meters;
@@ -41,7 +42,6 @@ use pms_tap::ipc::{PIPE_NAME, read_frame, write_frame};
 use pms_tap::{CLSID_PMS_TAP, data_dir, xamlom::InitializeXamlDiagnosticsExFn};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, FindWindowW, GetWindowThreadProcessId};
 use windows_core::{HSTRING, PCWSTR, s, w};
 
@@ -57,8 +57,7 @@ pub fn log_to_file() {
 }
 
 pub fn log(msg: impl AsRef<str>) {
-    let t = unsafe { GetLocalTime() };
-    let line = pms_tap::logfile::redact(&format!("{:02}:{:02}:{:02} {}", t.wHour, t.wMinute, t.wSecond, msg.as_ref()));
+    let line = pms_tap::logfile::redact(&format!("{} {}", pms_tap::logfile::stamp(), msg.as_ref()));
     eprintln!("{line}");
     if LOG_TO_FILE.load(Ordering::Acquire) {
         pms_tap::logfile::append(pms_tap::logfile::Log::Daemon, &line);
@@ -214,10 +213,48 @@ pub fn inject() -> Result<String, String> {
     Ok(out.join("\n"))
 }
 
+/// `path` as the settings and notices show it: under a folder Windows has a name for, by that name (`%LOCALAPPDATA%\PimpMyShell`),
+/// so that what's on screen doesn't spell out the Windows user name. Only for reading: a path to open is the path itself.
+pub fn shown(path: &std::path::Path) -> String {
+    let vars: Vec<(&str, String)> = ["LOCALAPPDATA", "APPDATA", "USERPROFILE"].iter().filter_map(|v| std::env::var(v).ok().map(|p| (*v, p))).collect();
+    shown_with(&path.display().to_string(), &vars)
+}
+
+/// `shown`, with the folders' names and where they are: the first that `path` is in, or is, goes by its name.
+fn shown_with(path: &str, vars: &[(&str, String)]) -> String {
+    for (name, place) in vars {
+        let place = place.trim_end_matches('\\');
+        if place.is_empty() || path.len() < place.len() || !path.is_char_boundary(place.len()) {
+            continue;
+        }
+        let (head, rest) = path.split_at(place.len());
+        if head.eq_ignore_ascii_case(place) && (rest.is_empty() || rest.starts_with('\\')) {
+            return format!("%{name}%{rest}");
+        }
+    }
+    path.to_string()
+}
+
 /// `PMS_TRACE=1`: log timing details (sampling, pushes) for diagnosis.
 pub fn trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("PMS_TRACE").is_some_and(|v| v != "0"))
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::shown_with;
+
+    #[test]
+    fn paths_go_by_their_folders_names() {
+        let vars = [("LOCALAPPDATA", r"C:\Users\Bob\AppData\Local".to_string()), ("APPDATA", r"C:\Users\Bob\AppData\Roaming".to_string()), ("USERPROFILE", r"C:\Users\Bob".to_string())];
+        assert_eq!(shown_with(r"C:\Users\Bob\AppData\Local\PimpMyShell\logs", &vars), r"%LOCALAPPDATA%\PimpMyShell\logs");
+        assert_eq!(shown_with(r"c:\users\bob\appdata\roaming\PimpMyShell\pms.toml", &vars), r"%APPDATA%\PimpMyShell\pms.toml");
+        assert_eq!(shown_with(r"C:\Users\Bob\Desktop\x.toml", &vars), r"%USERPROFILE%\Desktop\x.toml");
+        // Not somebody else whose name starts the same, and not elsewhere.
+        assert_eq!(shown_with(r"C:\Users\Bobby\x", &vars), r"C:\Users\Bobby\x");
+        assert_eq!(shown_with(r"D:\Games", &vars), r"D:\Games");
+    }
 }
 
 #[cfg(test)]

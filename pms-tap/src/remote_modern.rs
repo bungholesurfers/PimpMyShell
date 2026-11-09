@@ -35,7 +35,7 @@ const WARN_EDGE: Color = rgb(0x8A, 0x63, 0x1E);
 const WARN_TEXT: Color = rgb(0xFF, 0xD6, 0x8A);
 const NOT_LIVE: Color = rgb(0x4A, 0x4E, 0x58);
 const CLEAR: Color = Color { A: 0, R: 0, G: 0, B: 0 };
-const WIDTH: f64 = 244.0;
+const WIDTH: f64 = 256.0;
 /// How many favorites it lists.
 const ROWS: usize = 12;
 const REFRESH: Duration = Duration::from_millis(1500);
@@ -50,6 +50,7 @@ const SOUND_OFF: &str = "\u{E74F}";
 const UP: &str = "\u{E70E}";
 const DOWN: &str = "\u{E70D}";
 const PLUS: &str = "\u{E710}";
+const MINUS: &str = "\u{E738}";
 
 /// What each of the three ways does, said under them: for the one that's chosen, or the one the pointer's on.
 const WAYS: [&str; 3] = [
@@ -57,6 +58,11 @@ const WAYS: [&str; 3] = [
     "Stays on what's playing until the stream ends, whoever else goes live",
     "Only this channel. While it's offline, the set waits for it",
 ];
+/// What the keys do, said where the ways are explained while the pointer's on one.
+const POWER_SAYS: &str = "Turns this TwaTV off, or back on";
+const SOUND_SAYS: &str = "This TwaTV's sound, on or off";
+const UP_SAYS: &str = "The next favorite that's live. It stays on them until their stream ends";
+const DOWN_SAYS: &str = "The live favorite before this one. It stays on them until their stream ends";
 /// The key that takes this set off the taskbar: it asks first, for a few seconds.
 const NUKE: &str = "Remove this TwaTV";
 const SURE: &str = "Select again to remove it";
@@ -107,6 +113,8 @@ thread_local! {
     /// Which of the three ways is chosen, and whether the pointer's on one.
     static CHOSEN: Cell<usize> = const { Cell::new(0) };
     static POINTED: Cell<Option<usize>> = const { Cell::new(None) };
+    /// What the key the pointer's on does, said in the ways' place meanwhile.
+    static EXPLAINING: Cell<Option<&'static str>> = const { Cell::new(None) };
     /// The remove key has been pressed once, and is asking.
     static ARMED: Cell<bool> = const { Cell::new(false) };
 }
@@ -249,6 +257,26 @@ fn hints(k: &Border, i: usize, hint: &TextBlock) -> R<()> {
     Ok(())
 }
 
+/// While the pointer's on key `k`, `hint` says what it does (`says`); after, what the chosen way does.
+fn explains(k: &Border, says: &'static str, hint: &TextBlock) -> R<()> {
+    let el = ui(k)?;
+    for entering in [true, false] {
+        let hint = hint.clone();
+        let handler = PointerEventHandler::new(move |_, _| {
+            EXPLAINING.set(entering.then_some(says));
+            let _ = hint.SetText(&HSTRING::from(hint_text()));
+            Ok(())
+        });
+        if entering { el.PointerEntered(&handler) } else { el.PointerExited(&handler) }.map_err(w)?;
+    }
+    Ok(())
+}
+
+/// What the hint under the ways says: what the key the pointer's on does, or the way it's on, or the way that's chosen.
+fn hint_text() -> &'static str {
+    EXPLAINING.get().unwrap_or(WAYS[POINTED.get().unwrap_or(CHOSEN.get())])
+}
+
 /// The remove key: the first press only asks, and stops asking after a few seconds.
 fn nuke_pressed() {
     if !ARMED.replace(true) {
@@ -375,13 +403,13 @@ fn build(root: &XamlRoot) -> R<Remote> {
     let up = key(&icon(UP)?, Button::ChannelUp)?;
     let down = key(&icon(DOWN)?, Button::ChannelDown)?;
     for k in [&power, &mute, &up, &down] {
-        k.SetWidth(51.0).map_err(w)?;
+        k.SetWidth(54.0).map_err(w)?;
     }
     down.SetMargin(thickness(0.0, 0.0, 0.0, 0.0)).map_err(w)?;
     let keys = across(&[ui(&power)?, ui(&mute)?, ui(&up)?, ui(&down)?])?;
     keys.SetMargin(thickness(0.0, 10.0, 0.0, 0.0)).map_err(w)?;
 
-    let (follow, stay, only) = (way("Favorites", Button::Follow, 63.0, false)?, way("This stream", Button::Stay, 70.0, false)?, way("This channel", Button::Only, 75.0, true)?);
+    let (follow, stay, only) = (way("Favorites", Button::Follow, 66.0, false)?, way("This stream", Button::Stay, 74.0, false)?, way("This channel", Button::Only, 82.0, true)?);
     let ways = across(&[ui(&follow)?, ui(&stay)?, ui(&only)?])?;
     ways.SetMargin(thickness(0.0, 2.0, 0.0, 0.0)).map_err(w)?;
     // Read across, it's a sentence: this TwaTV plays favorites, this stream, or this channel. Under it, what that means.
@@ -393,33 +421,36 @@ fn build(root: &XamlRoot) -> R<Remote> {
     for (i, k) in [&follow, &stay, &only].into_iter().enumerate() {
         hints(k, i, &way_hint)?;
     }
+    for (k, says) in [(&power, POWER_SAYS), (&mute, SOUND_SAYS), (&up, UP_SAYS), (&down, DOWN_SAYS)] {
+        explains(k, says, &way_hint)?;
+    }
 
     let every = words("All TwaTVs", 11.0, QUIET)?;
     every.SetMargin(thickness(0.0, 10.0, 0.0, 2.0)).map_err(w)?;
     let name = words("Top quality", 11.0, QUIET)?;
-    name.SetWidth(108.0).map_err(w)?;
+    name.SetWidth(120.0).map_err(w)?;
     name.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
     let top_value = words("", 12.0, TEXT)?;
     top_value.SetWidth(50.0).map_err(w)?;
     top_value.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
-    let (lower, higher) = (stepper(DOWN, Button::QualityDown)?, stepper(UP, Button::QualityUp)?);
+    let (lower, higher) = (stepper(MINUS, Button::QualityDown)?, stepper(PLUS, Button::QualityUp)?);
     higher.SetMargin(thickness(0.0, 0.0, 0.0, 0.0)).map_err(w)?;
     let quality = across(&[ui(&name)?, ui(&top_value)?, ui(&lower)?, ui(&higher)?])?;
     quality.SetMargin(thickness(0.0, 2.0, 0.0, 0.0)).map_err(w)?;
 
     let loud_name = words("Volume", 11.0, QUIET)?;
-    loud_name.SetWidth(108.0).map_err(w)?;
+    loud_name.SetWidth(120.0).map_err(w)?;
     loud_name.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
     let loud_value = words("", 12.0, TEXT)?;
     loud_value.SetWidth(50.0).map_err(w)?;
     loud_value.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
-    let (quieter, louder) = (stepper(DOWN, Button::VolumeDown)?, stepper(UP, Button::VolumeUp)?);
+    let (quieter, louder) = (stepper(MINUS, Button::VolumeDown)?, stepper(PLUS, Button::VolumeUp)?);
     louder.SetMargin(thickness(0.0, 0.0, 0.0, 0.0)).map_err(w)?;
     let loudness = across(&[ui(&loud_name)?, ui(&loud_value)?, ui(&quieter)?, ui(&louder)?])?;
     loudness.SetMargin(thickness(0.0, 4.0, 0.0, 0.0)).map_err(w)?;
 
     let heading = words("Favorites", 11.0, QUIET)?;
-    heading.SetWidth(190.0).map_err(w)?;
+    heading.SetWidth(202.0).map_err(w)?;
     heading.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
     let another = stepper(PLUS, Button::AddFavorite)?;
     another.SetMargin(thickness(0.0, 0.0, 0.0, 0.0)).map_err(w)?;
@@ -572,7 +603,7 @@ fn show_status(r: &Remote) -> R<()> {
     r.stay.SetBackground(&brush(if screen.shuffle && !screen.only { ACCENT } else { KEY })?).map_err(w)?;
     r.only.SetBackground(&brush(if screen.only { ACCENT } else { KEY })?).map_err(w)?;
     CHOSEN.set(if screen.only { 2 } else if screen.shuffle { 1 } else { 0 });
-    r.way_hint.SetText(&HSTRING::from(WAYS[POINTED.get().unwrap_or(CHOSEN.get())])).map_err(w)?;
+    r.way_hint.SetText(&HSTRING::from(hint_text())).map_err(w)?;
     r.top.SetText(&HSTRING::from(info.top.as_str())).map_err(w)?;
     r.volume.SetText(&HSTRING::from(info.volume.as_str())).map_err(w)?;
     r.heading.SetText(&HSTRING::from(heading_text(info.seen))).map_err(w)?;
@@ -684,6 +715,7 @@ pub(crate) fn close() {
     OPENED.fetch_add(1, Ordering::Relaxed);
     UNFOLDED.set(false);
     POINTED.set(None);
+    EXPLAINING.set(None);
     if ARMED.get() {
         calm_down();
     }

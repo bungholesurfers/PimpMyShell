@@ -975,6 +975,10 @@ struct Shared {
     busy: AtomicBool,
     /// Nothing's to be shown: the taskbar isn't ours just now.
     resting: AtomicBool,
+    /// A game's in front: a set that's on says so, and draws nothing more until it's over.
+    gaming: AtomicBool,
+    /// A window covers the taskbar: a set holds its last picture, sending nothing, until it can be seen again.
+    hidden: AtomicBool,
     /// Why the console has been sent away, if it has.
     console_evicted: Mutex<Option<&'static str>>,
     /// Somebody's picked up the controller since the game last started.
@@ -1075,6 +1079,8 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
     let mut on_console = tv.on_console();
     // How long a beat its remote's been told it is, and whether nuking this set would end the game.
     let mut said = String::new();
+    // While a game's in front, the size its picture saying so was drawn at.
+    let mut rested: Option<(u32, u32)> = None;
     while !stop.load(Ordering::Relaxed) {
         let began = Instant::now();
         let (has_game, game_on, battery) = (shared.has_game.load(Ordering::Relaxed), shared.game_on.load(Ordering::Relaxed), shared.battery.load(Ordering::Relaxed));
@@ -1165,8 +1171,26 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
         }
         screen.set_status(Status { jitter, ..tv.status(shared.game_on.load(Ordering::Relaxed)) });
         screen.set_also(shared.game_pid.load(Ordering::Relaxed));
+        // A game's in front: one picture saying so, on a set that's on, and nothing more until it's over. Its remote still works.
+        if shared.gaming.load(Ordering::Relaxed) && tv.on && !shared.resting.load(Ordering::Relaxed) {
+            if let Some((w, h)) = screen.wanted().filter(|size| rested != Some(*size)) {
+                px.resize((w * h * 4) as usize, 0);
+                let mut c = Canvas { w: w as usize, h: h as usize, px: &mut px };
+                c.fill(BLACK);
+                evicted(&mut c, "GAME ON");
+                screen.publish(w, h, &px);
+                rested = Some((w, h));
+            }
+            last = Instant::now();
+            std::thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+        if rested.take().is_some() {
+            // Back from the game: the next frame is a whole new one.
+            tv.drawn = None;
+        }
         // Nothing to draw for until something's showing it; and on battery, a set left alone sleeps on its last picture.
-        let asleep = shared.resting.load(Ordering::Relaxed) || (battery && touched.elapsed() > AWAKE);
+        let asleep = shared.resting.load(Ordering::Relaxed) || shared.hidden.load(Ordering::Relaxed) || (battery && touched.elapsed() > AWAKE);
         let Some((w, h)) = screen.wanted().filter(|_| !asleep) else {
             last = Instant::now();
             std::thread::sleep(Duration::from_millis(250));
@@ -1320,7 +1344,14 @@ impl Screens {
 
     /// Keeps the sets and the console as they should be. Every second or so. `path` is where `config` came from. `dark` is only for
     /// the Twatch sets: the console carries on as it was, whatever the display's doing. Short of memory, it isn't so lucky.
+    /// `pressure.hidden`: a window covers the taskbar, so nothing on it can be seen. Sets stop drawing, and Twatch TVs do as they do
+    /// with the display off.
     pub fn update(&mut self, config: &crate::config::Config, path: &Path, active: bool, battery: bool, dark: bool, pressure: crate::pressure::Pressure) {
+        let hidden = pressure.hidden;
+        self.shared.hidden.store(hidden, Ordering::Relaxed);
+        // A game's only made way for when the settings say so.
+        let pressure = crate::pressure::Pressure { game: pressure.game && config.rest_for_games, ..pressure };
+        self.shared.gaming.store(pressure.game, Ordering::Relaxed);
         if let Ok(mut known) = self.shared.config.lock()
             && *known != path
         {
@@ -1354,14 +1385,19 @@ impl Screens {
             self.shared.shuffle_seconds.store(shuffling.0, Ordering::Relaxed);
             self.shared.jitter.store(shuffling.1, Ordering::Relaxed);
         }
-        self.twatch.update(config, active, battery, self.shared.busy.load(Ordering::Relaxed), dark, pressure);
+        self.twatch.update(config, active, battery, self.shared.busy.load(Ordering::Relaxed), dark || hidden, pressure);
         let short = pressure.console();
         let evicted = console_evicted(short, self.game.is_some(), self.shared.played.load(Ordering::Relaxed));
         // Once for each time memory runs short.
         let spared = short.is_some() && evicted.is_none();
         if spared && !self.spared {
-            crate::log("console: memory is low, but it keeps running: someone's been playing it");
-            self.spared_news = true;
+            if pressure.game {
+                // Nothing to tell anybody: it rests anyway, with no set watching it.
+                crate::log("console: a game's in front, but it keeps running, resting: someone's been playing it");
+            } else {
+                crate::log("console: memory is low, but it keeps running: someone's been playing it");
+                self.spared_news = true;
+            }
         }
         self.spared = spared;
         if let Ok(mut said) = self.shared.console_evicted.lock() {

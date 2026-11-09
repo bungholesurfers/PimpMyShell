@@ -85,6 +85,8 @@ fn page_tagged(tag: &str) -> Option<Page> {
         "hotmic" => Some(Page::Hotmic),
         "toasts" => Some(Page::Toasts),
         "network" => Some(Page::Network),
+        "power" => Some(Page::Power),
+        "logs" => Some(Page::Logs),
         _ => None,
     }
 }
@@ -175,9 +177,11 @@ enum Page {
     Hotmic,
     Toasts,
     Network,
+    Power,
+    Logs,
 }
 
-const PAGES: [(Page, &str, &str); 11] = [
+const PAGES: [(Page, &str, &str); 13] = [
     (Page::General, "General", "Status, startup, and updates"),
     (Page::Widgets, "Widgets", "What's along the taskbar, in its order"),
     (Page::Meters, "Meters", "The meters next to the system tray"),
@@ -189,6 +193,8 @@ const PAGES: [(Page, &str, &str); 11] = [
     (Page::Hotmic, "Hot Mic", "Know when an app uses your microphone"),
     (Page::Toasts, "Notification Toast", "Notifications in the taskbar"),
     (Page::Network, "Network", "What goes online, and a proxy"),
+    (Page::Power, "Power & performance", "When PimpMyShell gets out of the way"),
+    (Page::Logs, "Logs", "What it writes down, and what that says about you"),
 ];
 
 /// The egui window: the model (model.rs, which the WinUI 3 window shares), and which page and meter it shows.
@@ -392,6 +398,13 @@ impl eframe::App for Gui {
                     self.confirm = ask.or(self.confirm);
                 }
                 Page::Network => network(ui, &mut self.m),
+                Page::Power => {
+                    power(ui, &mut self.m);
+                    let mut ask = None;
+                    reset_line(ui, &mut ask, Section::Performance);
+                    self.confirm = ask.or(self.confirm);
+                }
+                Page::Logs => self.logs(ui),
             });
         });
         // Asking before a section goes back to its defaults.
@@ -650,7 +663,7 @@ impl Gui {
                 if ui.small_button("Show in File Explorer").clicked() {
                     self.show_config();
                 }
-                ui.add(egui::Label::new(RichText::new(self.path.display().to_string()).monospace().small()).truncate());
+                ui.add(egui::Label::new(RichText::new(pms::shown(&self.path)).monospace().small()).truncate());
             });
             ui.label("");
             ui.end_row();
@@ -661,7 +674,7 @@ impl Gui {
                 if ui.small_button("Show in File Explorer").clicked() {
                     self.show_watchlist();
                 }
-                ui.add(egui::Label::new(RichText::new(pms::config::watchlist_path(&self.path).display().to_string()).monospace().small()).truncate());
+                ui.add(egui::Label::new(RichText::new(pms::shown(&pms::config::watchlist_path(&self.path))).monospace().small()).truncate());
             });
             ui.label("");
             ui.end_row();
@@ -672,7 +685,7 @@ impl Gui {
                 if ui.small_button("Show in File Explorer").clicked() {
                     self.show_network();
                 }
-                ui.add(egui::Label::new(RichText::new(pms::config::network_path(&self.path).display().to_string()).monospace().small()).truncate());
+                ui.add(egui::Label::new(RichText::new(pms::shown(&pms::config::network_path(&self.path))).monospace().small()).truncate());
             });
             ui.label(copy::PRIVATE_FILES);
             ui.end_row();
@@ -691,33 +704,6 @@ impl Gui {
             if ui.small_button("Reset...").on_hover_text(copy::RESET_ALL.1).clicked() {
                 self.confirm_all = true;
             }
-            ui.label("");
-            ui.end_row();
-
-            ui.label("Logs");
-            ui.horizontal(|ui| {
-                ui.set_max_width(520.0);
-                if ui.small_button("Show in File Explorer").clicked() {
-                    self.show_logs();
-                }
-                ui.add(egui::Label::new(RichText::new(pms_tap::logfile::dir().display().to_string()).monospace().small()).truncate());
-            });
-            ui.label("");
-            ui.end_row();
-
-            ui.label("Last log entry");
-            ui.scope(|ui| {
-                ui.set_max_width(520.0);
-                ui.add(egui::Label::new(RichText::new(&self.last_log).monospace().small().color(DIM)).truncate());
-            });
-            ui.label("");
-            ui.end_row();
-
-            ui.label("");
-            ui.scope(|ui| {
-                ui.set_max_width(460.0);
-                ui.add(egui::Label::new(RichText::new(copy::LOG_PRIVACY).small().color(DIM)).wrap());
-            });
             ui.label("");
             ui.end_row();
 
@@ -743,19 +729,6 @@ impl Gui {
             row(ui, "software_gpus", &mut c.software_gpus, false, |ui, v| {
                 ui.checkbox(v, "");
             });
-            row(ui, "max_fps", &mut c.max_fps, None, |ui, v| {
-                let mut on = v.is_some();
-                if ui.checkbox(&mut on, "").changed() {
-                    *v = on.then_some(30);
-                }
-                match v {
-                    Some(f) => number(ui, f, 0..=240, " fps"),
-                    None => {
-                        ui.label(RichText::new("auto").color(DIM));
-                    }
-                }
-            });
-            opt_row(ui, "battery_fps", &mut c.battery_fps, 30, |ui, v| number(ui, v, 0..=240, " fps"));
             row(ui, "value_font", &mut c.value_font, None, |ui, v| {
                 let mut s = v.clone().unwrap_or_default();
                 text(ui, &mut s, "Cascadia Mono", 200.0);
@@ -765,7 +738,6 @@ impl Gui {
 
         let mut ask = None;
         reset_line(ui, &mut ask, Section::Taskbar);
-        reset_line(ui, &mut ask, Section::Performance);
         self.software_update(ui);
         reset_line(ui, &mut ask, Section::Updates);
         self.confirm = ask.or(self.confirm);
@@ -1014,6 +986,46 @@ impl Gui {
             ui.small(copy::WIDGETS_NO_MIC);
         }
         ui.small(copy::ORDER_NOTE);
+    }
+
+    /// The logs: where they are, the last thing written, and what they can say about you.
+    fn logs(&mut self, ui: &mut egui::Ui) {
+        heading(ui, copy::LOGS.0, copy::LOGS.1);
+        egui::Grid::new("logs").num_columns(3).spacing([16.0, 8.0]).show(ui, |ui| {
+            ui.label("Logs");
+            ui.horizontal(|ui| {
+                ui.set_max_width(520.0);
+                if ui.small_button("Show in File Explorer").clicked() {
+                    self.show_logs();
+                }
+                ui.add(egui::Label::new(RichText::new(pms::shown(&pms_tap::logfile::dir())).monospace().small()).truncate());
+            });
+            ui.label("");
+            ui.end_row();
+
+            ui.label("Last log entry");
+            ui.scope(|ui| {
+                ui.set_max_width(520.0);
+                ui.add(egui::Label::new(RichText::new(&self.last_log).monospace().small().color(DIM)).truncate());
+            });
+            ui.label("");
+            ui.end_row();
+
+            ui.label("");
+            // One under another: a grid's cell would set them side by side, each a letter wide.
+            ui.vertical(|ui| {
+                ui.set_width(460.0);
+                // In amber: worth a look before a log goes anywhere.
+                let amber = Color32::from_rgb(0xF2, 0xB1, 0x4B);
+                ui.add_space(4.0);
+                ui.label(RichText::new(copy::LOG_PRIVACY.0).strong().color(amber));
+                ui.add(egui::Label::new(RichText::new(copy::LOG_PRIVACY.1).small().color(amber)).wrap());
+                ui.add(egui::Label::new(RichText::new(copy::log_contents()).small().color(amber)).wrap());
+            });
+            ui.label("");
+            ui.end_row();
+
+        });
     }
 
     fn counter_rows(&mut self, ui: &mut egui::Ui) {
@@ -1378,7 +1390,6 @@ fn twatch(ui: &mut egui::Ui, m: &mut model::Model) {
         ui.label(copy::setting("twatch.volume").0).on_hover_text(copy::setting("twatch.volume").1);
         ui.add(egui::DragValue::new(&mut t.volume).range(0..=100).suffix("%"));
     });
-    ui.checkbox(&mut t.metered_pictures, copy::setting("twatch.metered_pictures").0).on_hover_text(copy::setting("twatch.metered_pictures").1);
     ui.horizontal(|ui| {
         ui.label(copy::setting("twatch.higher_favorite").0);
         egui::ComboBox::from_id_salt("twatch-higher").selected_text(copy::TWATCH_HIGHER.iter().find(|(v, _)| *v == t.higher_favorite).map_or("", |(_, l)| *l)).show_ui(ui, |ui| {
@@ -1405,14 +1416,6 @@ fn twatch(ui: &mut egui::Ui, m: &mut model::Model) {
     });
     ui.checkbox(&mut t.notify_live, copy::setting("twatch.notify_live").0);
     ui.horizontal(|ui| {
-        ui.label(copy::setting("twatch.pictures").0);
-        egui::ComboBox::from_id_salt("twatch-pictures").selected_text(copy::TWATCH_PICTURES.iter().find(|(v, _)| *v == t.pictures).map_or("", |(_, l)| *l)).show_ui(ui, |ui| {
-            for (value, label) in copy::TWATCH_PICTURES {
-                ui.selectable_value(&mut t.pictures, value.to_string(), label);
-            }
-        });
-    });
-    ui.horizontal(|ui| {
         ui.label("Highest quality");
         egui::ComboBox::from_id_salt("twatch-quality").selected_text(t.top_quality.clone()).show_ui(ui, |ui| {
             for (value, label) in copy::TWATCH_QUALITIES {
@@ -1434,6 +1437,7 @@ fn twatch(ui: &mut egui::Ui, m: &mut model::Model) {
     });
     ui.add_space(8.0);
     ui.small(copy::TWATCH_NETWORK);
+    ui.small(copy::TWATCH_POWER);
     ui.small(copy::ORDER_HINT);
     ui.small(copy::TWATCH_NOTICE);
 }
@@ -1558,6 +1562,53 @@ fn tv(ui: &mut egui::Ui, m: &mut model::Model) {
 }
 
 /// The console on channel 6: which game is in it, more to get, and whether a TV tuning in switches it on.
+/// When PimpMyShell gets out of the way: for a game, for the frame rate, on battery, and Twatch TV's pictures instead of video.
+fn power(ui: &mut egui::Ui, m: &mut model::Model) {
+    heading(ui, copy::POWER.0, copy::POWER.1);
+    let c = &mut m.config;
+    section(ui, "When nobody can see it", |ui| {
+        row(ui, "rest_when_covered", &mut c.rest_when_covered, true, |ui, v| {
+            ui.checkbox(v, "");
+        });
+    });
+    section(ui, "While you play", |ui| {
+        row(ui, "rest_for_games", &mut c.rest_for_games, true, |ui, v| {
+            ui.checkbox(v, "");
+        });
+    });
+    section(ui, "Animations", |ui| {
+        row(ui, "max_fps", &mut c.max_fps, None, |ui, v| {
+            let mut on = v.is_some();
+            if ui.checkbox(&mut on, "").changed() {
+                *v = on.then_some(30);
+            }
+            match v {
+                Some(f) => number(ui, f, 0..=240, " fps"),
+                None => {
+                    ui.label(RichText::new("auto").color(DIM));
+                }
+            }
+        });
+        opt_row(ui, "battery_fps", &mut c.battery_fps, 30, |ui, v| number(ui, v, 0..=240, " fps"));
+    });
+    // Twatch TV's, read without making it a section of the settings: that's only for changing one.
+    let d = pms::config::Twatch::default();
+    let mut t = c.twatch.clone().unwrap_or_default();
+    let was = (t.pictures.clone(), t.metered_pictures);
+    section(ui, "Twatch TV", |ui| {
+        row(ui, "twatch.pictures", &mut t.pictures, d.pictures.clone(), |ui, v| choice(ui, "twatch-pictures", v, &copy::TWATCH_PICTURES));
+        row(ui, "twatch.metered_pictures", &mut t.metered_pictures, d.metered_pictures, |ui, v| {
+            ui.checkbox(v, "");
+        });
+    });
+    if (t.pictures.clone(), t.metered_pictures) != was {
+        let mine = m.twatch();
+        (mine.pictures, mine.metered_pictures) = (t.pictures, t.metered_pictures);
+    }
+    ui.add_space(6.0);
+    ui.small(copy::POWER_BY_ITSELF);
+}
+
 /// A program of PimpMyShell's that isn't beside this one (pms::parts), said at the top of the page of what needs it.
 fn missing_part(ui: &mut egui::Ui, file: &'static str) {
     if !pms::parts::here(file) {

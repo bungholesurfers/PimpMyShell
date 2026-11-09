@@ -223,7 +223,10 @@ static mut doom_defaults: DefaultCollection = DefaultCollection {
 ///
 /// Holds the extended (non-vanilla) settings - video, joystick, mouse and
 /// extra key bindings. Order matches the C source.
-static mut EXTRA_DEFAULTS_LIST: [Default; 119] = [
+/// How many extended settings there are: the table and its collection both go by it.
+const EXTRA_COUNT: usize = 124;
+
+static mut EXTRA_DEFAULTS_LIST: [Default; EXTRA_COUNT] = [
     cfg(b"graphical_startup\0", DefaultType::Int),
     cfg(b"autoadjust_video_settings\0", DefaultType::Int),
     cfg(b"fullscreen\0", DefaultType::Int),
@@ -343,6 +346,12 @@ static mut EXTRA_DEFAULTS_LIST: [Default; 119] = [
     cfg(b"key_multi_msgplayer6\0", DefaultType::Key),
     cfg(b"key_multi_msgplayer7\0", DefaultType::Key),
     cfg(b"key_multi_msgplayer8\0", DefaultType::Key),
+    // PimpMyShell's second movement keys (m_controls.rs), here rather than in the vanilla table so default.cfg stays as it was.
+    cfg(b"key_up2\0", DefaultType::Key),
+    cfg(b"key_down2\0", DefaultType::Key),
+    cfg(b"key_strafeleft2\0", DefaultType::Key),
+    cfg(b"key_straferight2\0", DefaultType::Key),
+    cfg(b"key_use2\0", DefaultType::Key),
 ];
 
 /// Collection wrapper around [`EXTRA_DEFAULTS_LIST`] for the extended
@@ -350,7 +359,7 @@ static mut EXTRA_DEFAULTS_LIST: [Default; 119] = [
 /// extra_defaults`.
 static mut extra_defaults: DefaultCollection = DefaultCollection {
     defaults: unsafe { &mut EXTRA_DEFAULTS_LIST as *mut _ },
-    numdefaults: 119,
+    numdefaults: EXTRA_COUNT as c_int,
     filename: ptr::null_mut(),
 };
 

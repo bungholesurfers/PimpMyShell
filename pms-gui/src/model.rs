@@ -71,7 +71,7 @@ impl Section {
     pub fn name(self) -> &'static str {
         match self {
             Section::Taskbar => "Taskbar",
-            Section::Performance => "Performance",
+            Section::Performance => "Power & performance",
             Section::Updates => "Software update",
             Section::Meters => "Meters",
             Section::Counters => "Performance counters",
@@ -733,8 +733,17 @@ impl Model {
     fn apply_reset(&self, section: Section, c: &mut Config, counters: &mut Vec<CounterRow>) {
         let b = self.baseline.clone();
         match section {
-            Section::Taskbar => (c.theme, c.meter_height, c.bar_height, c.interval_ms, c.value_font) = (b.theme, b.meter_height, b.bar_height, b.interval_ms, b.value_font),
-            Section::Performance => (c.max_fps, c.battery_fps, c.software_gpus) = (b.max_fps, b.battery_fps, b.software_gpus),
+            Section::Taskbar => {
+                (c.theme, c.meter_height, c.bar_height, c.interval_ms, c.value_font, c.software_gpus) = (b.theme, b.meter_height, b.bar_height, b.interval_ms, b.value_font, b.software_gpus)
+            }
+            // Twatch TV's pictures are on this page too, without making a Twatch TV section where there isn't one.
+            Section::Performance => {
+                (c.max_fps, c.battery_fps, c.rest_for_games, c.rest_when_covered) = (b.max_fps, b.battery_fps, b.rest_for_games, b.rest_when_covered);
+                if let Some(t) = c.twatch.as_mut() {
+                    let d = b.twatch.unwrap_or_default();
+                    (t.pictures, t.metered_pictures) = (d.pictures, d.metered_pictures);
+                }
+            }
             // Whether to check at all is consent, not a setting: only its owner changes that.
             Section::Updates => c.update_channel = b.update_channel,
             Section::Meters => c.meters = b.meters,
@@ -743,9 +752,14 @@ impl Model {
             Section::StartGlow => c.start_glow = b.start_glow,
             Section::AppGlow => c.app_glow = b.app_glow,
             // Your favorites are yours.
+            // Its pictures are under Power & performance, which resets them.
             Section::Twatch => {
-                let favorites = c.twatch.take().map(|t| t.favorites).unwrap_or_default();
+                let mine = c.twatch.take();
+                let favorites = mine.as_ref().map(|t| t.favorites.clone()).unwrap_or_default();
                 c.twatch = if favorites.is_empty() { b.twatch } else { Some(pms::config::Twatch { favorites, ..b.twatch.unwrap_or_default() }) };
+                if let (Some(t), Some(mine)) = (c.twatch.as_mut(), mine) {
+                    (t.pictures, t.metered_pictures) = (mine.pictures, mine.metered_pictures);
+                }
             }
             Section::Hotmic => {
                 let ignore = c.hotmic.take().map(|h| h.ignore);
@@ -1135,6 +1149,7 @@ mod tests {
         let c = &mut m.config;
         c.theme = "dark".into();
         c.software_gpus = true;
+        c.rest_for_games = false;
         c.update_channel = "latest".into();
         c.meters.remove(1);
         c.backdrop = None;

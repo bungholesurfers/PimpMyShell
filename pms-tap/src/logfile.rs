@@ -8,6 +8,10 @@
 //! a folder, nor a link to somewhere else).
 //!
 //! People send these files to others, so no line keeps the Windows user name: see `redact`.
+//!
+//! Each line starts with when, `stamp`: UTC, to the millisecond, as RFC 3339 (ISO 8601's profile for the internet) writes it:
+//! `2026-11-09T18:21:33.512Z`. It sorts as text, and means the same hour whatever the clocks did: and unlike local time with
+//! its offset, it doesn't say where in the world the PC is, in a log someone may post.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -170,9 +174,26 @@ fn rotate(log: Log) {
     let _ = std::fs::rename(&current, &older);
 }
 
+/// Now, for the start of a log line: see the top of this file.
+pub fn stamp() -> String {
+    rfc3339(unsafe { windows::Win32::System::SystemInformation::GetSystemTime() })
+}
+
+/// `utc`, as RFC 3339 writes it.
+fn rfc3339(t: windows::Win32::Foundation::SYSTEMTIME) -> String {
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamps_are_utc() {
+        let t = windows::Win32::Foundation::SYSTEMTIME { wYear: 2026, wMonth: 1, wDay: 9, wHour: 7, wMinute: 5, wSecond: 3, wMilliseconds: 7, ..Default::default() };
+        assert_eq!(rfc3339(t), "2026-01-09T07:05:03.007Z");
+        assert!(stamp().ends_with('Z') && stamp().len() == 24, "{}", stamp());
+    }
 
     fn redacted(line: &str) -> String {
         redact_for(line, r"C:\Users\Bob", "Bob")

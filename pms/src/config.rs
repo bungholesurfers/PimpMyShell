@@ -157,6 +157,14 @@ pub struct Config {
     /// meters and `agg = "engine"` counters. Default false: they're left out.
     #[serde(default, skip_serializing_if = "is_false")]
     pub software_gpus: bool,
+    /// While a game fills the screen and keeps the graphics card busy (games.rs), the TVs say so and draw nothing, Twatch TVs make
+    /// way, and the console stops, unless someone's played it since it started. On unless you say otherwise.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub rest_for_games: bool,
+    /// While a window fills the screen the taskbar's on, so it can't be seen (a game, a video), the TVs stop drawing and Twatch TVs
+    /// with their sound off stop: as when the display's off. On unless you say otherwise.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub rest_when_covered: bool,
     /// A TV landing on the console's channel switches the console on, instead of showing no signal. On unless you say otherwise.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub console_autostart: bool,
@@ -259,7 +267,7 @@ fn take_in_network(path: &Path, config: &mut Config) {
             Ok(n) => config.network = Some(n),
             // A file that won't read could have been a proxy: everything goes nowhere until it's fixed, rather than without one.
             Err(e) => {
-                crate::log(format!("{}: {e}; nothing goes out over the network until it's fixed", file.display()));
+                crate::log(format!("{}: {}; nothing goes out over the network until it's fixed", file.display(), unquoted(&e.to_string())));
                 config.network = Some(Network { proxy: NETWORK_UNREAD.into(), live_checks: true, streams: true, updates: true, downloads: true, ..Default::default() });
             }
         },
@@ -272,6 +280,16 @@ fn take_in_network(path: &Path, config: &mut Config) {
 }
 
 /// What's wrong with the network settings' file beside `path`, if it's there and won't load.
+/// An error reading a settings file, without the line of it that the error quotes: for the log, which people share, where a
+/// network settings line would give away the proxy, and maybe its password. What's left says which line, and what's wrong.
+pub fn unquoted(error: &str) -> String {
+    let quoted = |l: &str| {
+        let l = l.trim_start();
+        l.starts_with('|') || l.split_once('|').is_some_and(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
+    };
+    error.lines().filter(|l| !l.trim().is_empty() && !quoted(l)).map(str::trim).collect::<Vec<_>>().join(" ")
+}
+
 pub fn network_trouble(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(network_path(path)).ok()?;
     toml::from_str::<Network>(&text).err().map(|e| e.to_string())
@@ -687,6 +705,8 @@ pub fn issue_setting(error: &str) -> String {
 pub fn settings_page(id: &str) -> &'static str {
     let (table, key) = id.split_once('.').unwrap_or(("", id));
     match (table, key) {
+        // What makes way for something else, or saves power: the frame rates, and Twatch TV's pictures instead of video.
+        ("twatch", "pictures" | "metered_pictures") | ("", "max_fps" | "battery_fps" | "rest_for_games" | "rest_when_covered") => "power",
         ("twatch", _) => "twatch",
         ("toasts", _) => "toasts",
         ("hotmic", _) => "hotmic",
@@ -696,7 +716,7 @@ pub fn settings_page(id: &str) -> &'static str {
         ("network", _) => "network",
         ("", "console_autostart") => "poom",
         ("", k) if k.starts_with("tv_intro") || k.starts_with("shuffle_") => "tv",
-        ("", "meter" | "meter_height" | "bar_height" | "software_gpus") => "meters",
+        ("", "meter") => "meters",
         ("", "counters") => "counters",
         ("", "backdrop" | "start_glow" | "app_glow") => "look",
         ("", "twatch") => "twatch",
@@ -1472,6 +1492,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(network_path(&path)).unwrap(), "proxy = [nonsense", "left for you to fix");
         // And what's wrong is there to say, with its line, in a notice that opens the file.
         let e = network_trouble(&path).expect("it's trouble");
+        // The log gets what's wrong and where, but not the line: it could hold a proxy's password.
+        std::fs::write(network_path(&path), "proxy = socks5h://me:hunter2@127.0.0.1:9050").unwrap();
+        let said = unquoted(&network_trouble(&path).unwrap());
+        assert!(!said.contains("hunter2") && said.contains("line 1"), "{said}");
         let notice = crate::notices::network_settings(&network_path(&path), &e);
         assert!(notice.detail.contains("Line 1") && notice.fix.is_some_and(|(_, f)| f.ends_with("pms-network.toml")), "{}", notice.detail);
         std::fs::write(network_path(&path), "proxy = \"socks5h://127.0.0.1:9050\"
@@ -1541,6 +1565,7 @@ prxy = 1
         // Each issue's setting is on a page of the settings, and the notice opens the first one's.
         assert_eq!(["tv_intro_from", "toasts.position", "meter.style", "theme", "twatch.volume", "backdrop.tint"].map(settings_page), ["tv", "toasts", "meters", "general", "twatch", "look"]);
         assert_eq!(settings_page("console_autostart"), "poom");
+        assert_eq!(["max_fps", "twatch.pictures", "twatch.volume", "meter_height", "rest_for_games"].map(settings_page), ["power", "power", "twatch", "general", "power"]);
         let dir = std::env::temp_dir().join(format!("pms-issues-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("pms.toml");

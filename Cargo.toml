@@ -7,7 +7,7 @@ members = ["pms-recon", "pms-tap", "pms-xaml", "pms-screen", "pms-twatch", "pms"
 # One version for every crate - PimpMyShell's, which each exe and the TAP carry in their version resource, the
 # installer is named for, and the release's tag must match (cargo xtask, release.yml).
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "MIT"
 

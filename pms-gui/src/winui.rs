@@ -74,10 +74,12 @@ enum Page {
     Hotmic,
     Toasts,
     Network,
+    Power,
+    Logs,
 }
 
 /// Each page: its tag, its icon (Segoe Fluent Icons), and its title.
-const PAGES: [(Page, &str, &str, (&str, &str)); 11] = [
+const PAGES: [(Page, &str, &str, (&str, &str)); 13] = [
     (Page::General, "general", "\u{E713}", copy::GENERAL),
     (Page::Widgets, "widgets", "\u{F0E2}", copy::WIDGETS),
     (Page::Meters, "meters", "\u{E9D9}", copy::METERS),
@@ -89,6 +91,8 @@ const PAGES: [(Page, &str, &str, (&str, &str)); 11] = [
     (Page::Hotmic, "hotmic", "\u{E720}", copy::HOTMIC),
     (Page::Toasts, "toasts", "\u{E91C}", copy::TOASTS),
     (Page::Network, "network", "\u{E774}", copy::NETWORK),
+    (Page::Power, "power", "\u{E945}", copy::POWER),
+    (Page::Logs, "logs", "\u{E70B}", copy::LOGS),
 ];
 
 /// How often the window looks in on its model: saves once edits settle, PimpMyShell's state, an update's progress.
@@ -239,6 +243,8 @@ impl Component for Settings {
         let page: View = match self.page {
             Page::General => self.general(cx),
             Page::Widgets => self.widgets(cx),
+            Page::Power => self.power(cx),
+            Page::Logs => self.logs(cx),
             Page::Meters => self.meters(cx),
             Page::Counters => self.counters(cx),
             Page::Look => self.look(cx),
@@ -272,7 +278,7 @@ impl Component for Settings {
         ]);
         // The small print, where nobody can claim not to have seen it; there's no room for it in a narrow pane.
         let footer: View = if self.pane_open && self.pane_mode == NavigationViewDisplayMode::Expanded {
-            ScrollViewer::new().height(130.0).vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(TextBlock::new().text(copy::LEGAL).font_size(9.0).opacity(0.55).text_wrapping(TextWrapping::Wrap).margin(Thickness::new(14.0, 6.0, 12.0, 8.0)))
+            ScrollViewer::new().height(90.0).vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(TextBlock::new().text(copy::LEGAL).font_size(9.0).opacity(0.55).text_wrapping(TextWrapping::Wrap).margin(Thickness::new(14.0, 6.0, 12.0, 8.0)))
         } else {
             Border::new().into()
         };
@@ -781,17 +787,13 @@ impl Settings {
             )),
             Border::new().grid_column(2).vertical_alignment(VerticalAlignment::Center).content(start_stop),
         )));
-        let logs = pms_tap::logfile::dir().display().to_string();
         let files = group(
             "Your files",
             vec![
-                settings_card(Some("\u{E8A5}"), "Settings file", &m.path.display().to_string(), None, Button::new().on_click(act(cx, |s| s.m.show_config())).content("Show in File Explorer")),
-                settings_card(Some("\u{E728}"), "Twatch TV watchlist", &pms::config::watchlist_path(&m.path).display().to_string(), None, Button::new().on_click(act(cx, |s| s.m.show_watchlist())).content("Show in File Explorer")),
-                settings_card(Some("\u{E774}"), "Network settings", &pms::config::network_path(&m.path).display().to_string(), None, Button::new().on_click(act(cx, |s| s.m.show_network())).content("Show in File Explorer")),
+                settings_card(Some("\u{E8A5}"), "Settings file", &pms::shown(&m.path), None, Button::new().on_click(act(cx, |s| s.m.show_config())).content("Show in File Explorer")),
+                settings_card(Some("\u{E728}"), "Twatch TV watchlist", &pms::shown(&pms::config::watchlist_path(&m.path)), None, Button::new().on_click(act(cx, |s| s.m.show_watchlist())).content("Show in File Explorer")),
+                settings_card(Some("\u{E774}"), "Network settings", &pms::shown(&pms::config::network_path(&m.path)), None, Button::new().on_click(act(cx, |s| s.m.show_network())).content("Show in File Explorer")),
                 TextBlock::new().text(copy::PRIVATE_FILES).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7).margin(Thickness::new(1.0, 2.0, 0.0, 6.0)).into(),
-                settings_card(Some("\u{E81C}"), "Logs", &logs, None, Button::new().on_click(act(cx, |s| s.m.show_logs())).content("Show in File Explorer")),
-                settings_card(None, "Last log entry", &m.last_log, None, TextBlock::new()),
-                TextBlock::new().text(copy::LOG_PRIVACY).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7).margin(Thickness::new(1.0, 2.0, 0.0, 0.0)).into(),
             ],
         );
         let startup = group(
@@ -809,35 +811,6 @@ impl Settings {
                 row("bar_height", c.bar_height != b.bar_height, top!(bar_height), choice(cx, &c.bar_height, copy::HEIGHTS, |s, v| s.m.config.bar_height = v)),
                 row("interval_ms", c.interval_ms != b.interval_ms, top!(interval_ms), number(cx, c.interval_ms as f64, 16.0, 60_000.0, "ms", |s, v| s.m.config.interval_ms = v as u64)),
                 row("value_font", c.value_font != b.value_font, top!(value_font), text(cx, c.value_font.as_deref().unwrap_or(""), "Cascadia Mono", 220.0, |s, v| s.m.config.value_font = Some(v).filter(|v| !v.is_empty()))),
-            ],
-        );
-        let advanced = group_reset(
-            cx,
-            "Performance",
-            Section::Performance,
-            m.at_default(Section::Performance),
-            vec![
-                row(
-                    "max_fps",
-                    c.max_fps != b.max_fps,
-                    top!(max_fps),
-                    StackPanel::new().orientation(Orientation::Horizontal).spacing(12.0).children((
-                        match c.max_fps {
-                            Some(f) => number(cx, f64::from(f), 0.0, 240.0, "fps", |s, v| s.m.config.max_fps = Some(v as u32)),
-                            None => TextBlock::new().into(),
-                        },
-                        toggle(cx, c.max_fps.is_some(), |s, on| s.m.config.max_fps = on.then_some(30)),
-                    )),
-                ),
-                row(
-                    "battery_fps",
-                    c.battery_fps != b.battery_fps,
-                    top!(battery_fps),
-                    number(cx, f64::from(c.battery_fps.unwrap_or(30)), 0.0, 240.0, "fps", |s, v| {
-                        let v = v as u32;
-                        s.m.config.battery_fps = (v != 30).then_some(v);
-                    }),
-                ),
                 row("software_gpus", c.software_gpus != b.software_gpus, top!(software_gpus), toggle(cx, c.software_gpus, |s, v| s.m.config.software_gpus = v)),
             ],
         );
@@ -864,7 +837,7 @@ impl Settings {
             ],
         );
         let legal = group("Legal", vec![card(TextBlock::new().text(copy::LEGAL).text_wrapping(TextWrapping::Wrap).font_size(11.0).opacity(0.7))]);
-        StackPanel::new().spacing(4.0).children((heading(copy::GENERAL), header, files, startup, self.software_update(cx), taskbar, advanced, window, legal))
+        StackPanel::new().spacing(4.0).children((heading(copy::GENERAL), header, files, startup, self.software_update(cx), taskbar, window, legal))
     }
 
     fn software_update(&self, cx: &Cx) -> View {
@@ -1469,6 +1442,73 @@ impl Settings {
         StackPanel::new().spacing(4.0).children((heading(copy::HOTMIC), group_reset(cx, "Alert", Section::Hotmic, self.m.at_default(Section::Hotmic), cards)))
     }
 
+    /// When PimpMyShell gets out of the way: for a game, for the frame rate, on battery, and Twatch TV's pictures instead of video.
+    fn power(&self, cx: &Cx) -> View {
+        let (c, b) = (&self.m.config, &self.m.baseline);
+        let (games, shipped_games) = (c.rest_for_games, b.rest_for_games);
+        let (covered, shipped_covered) = (c.rest_when_covered, b.rest_when_covered);
+        let unseen = vec![row("rest_when_covered", covered != shipped_covered, Some(act(cx, move |s| s.m.config.rest_when_covered = shipped_covered)), toggle(cx, covered, |s, v| s.m.config.rest_when_covered = v))];
+        let resting = vec![row("rest_for_games", games != shipped_games, Some(act(cx, move |s| s.m.config.rest_for_games = shipped_games)), toggle(cx, games, |s, v| s.m.config.rest_for_games = v))];
+        let (max, shipped_max, battery, shipped_battery) = (c.max_fps, b.max_fps, c.battery_fps, b.battery_fps);
+        let frames = vec![
+            row(
+                "max_fps",
+                max != shipped_max,
+                Some(act(cx, move |s| s.m.config.max_fps = shipped_max)),
+                StackPanel::new().orientation(Orientation::Horizontal).spacing(12.0).children((
+                    match max {
+                        Some(f) => number(cx, f64::from(f), 0.0, 240.0, "fps", |s, v| s.m.config.max_fps = Some(v as u32)),
+                        None => TextBlock::new().into(),
+                    },
+                    toggle(cx, max.is_some(), |s, on| s.m.config.max_fps = on.then_some(30)),
+                )),
+            ),
+            row(
+                "battery_fps",
+                battery != shipped_battery,
+                Some(act(cx, move |s| s.m.config.battery_fps = shipped_battery)),
+                number(cx, f64::from(battery.unwrap_or(30)), 0.0, 240.0, "fps", |s, v| {
+                    let v = v as u32;
+                    s.m.config.battery_fps = (v != 30).then_some(v);
+                }),
+            ),
+        ];
+        // Twatch TV's, read without making it a section of the settings: that's only for changing one.
+        let (t, d) = (c.twatch.clone().unwrap_or_default(), b.twatch.clone().unwrap_or_default());
+        let (pictures, metered) = (d.pictures.clone(), d.metered_pictures);
+        let twatch = vec![
+            row("twatch.pictures", t.pictures != pictures, Some(act(cx, move |s| s.m.twatch().pictures = pictures.clone())), choice(cx, &t.pictures, &copy::TWATCH_PICTURES, |s, v| s.m.twatch().pictures = v)),
+            row("twatch.metered_pictures", t.metered_pictures != metered, Some(act(cx, move |s| s.m.twatch().metered_pictures = metered)), toggle(cx, t.metered_pictures, |s, v| s.m.twatch().metered_pictures = v)),
+        ];
+        let note = |text: &str| TextBlock::new().text(text.to_string()).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7);
+        StackPanel::new().spacing(4.0).children((
+            heading_reset(cx, copy::POWER, Section::Performance, self.m.at_default(Section::Performance)),
+            group("When nobody can see it", unseen),
+            group("While you play", resting),
+            group("Animations", frames),
+            group("Twatch TV", twatch),
+            note(copy::POWER_BY_ITSELF),
+        ))
+    }
+
+    /// The logs: where they are, the last thing written, and what they can say about you.
+    fn logs(&self, cx: &Cx) -> View {
+        let m = &self.m;
+        let files = vec![
+            settings_card(Some("\u{E81C}"), "Logs", &pms::shown(&pms_tap::logfile::dir()), None, Button::new().on_click(act(cx, |s| s.m.show_logs())).content("Show in File Explorer")),
+            settings_card(None, "Last log entry", &m.last_log, None, TextBlock::new()),
+        ];
+        let privacy: View = InfoBar::new()
+            .title(copy::LOG_PRIVACY.0)
+            .message(format!("{}\n\n{}", copy::LOG_PRIVACY.1, copy::log_contents()))
+            .severity(InfoBarSeverity::Warning)
+            .is_open(true)
+            .is_closable(false)
+            .margin(Thickness::new(0.0, 8.0, 0.0, 0.0))
+            .into();
+        StackPanel::new().spacing(4.0).children((heading(copy::LOGS), group("Your logs", files), privacy))
+    }
+
     /// What's along the taskbar, in its order: the meters, together; each TV and Twatch TV; and the Hot Mic's label at an end.
     fn widgets(&self, cx: &Cx) -> View {
         let meters = &self.m.config.meters;
@@ -1722,9 +1762,8 @@ impl Settings {
         // What ships, which Reset puts back.
         let d = self.m.baseline.twatch.clone().unwrap_or_default();
         let (top, more) = (d.top_quality.clone(), d.more_sets);
-        let (pictures, notify, reset_top) = (d.pictures.clone(), d.notify_live, top.clone());
-        let (volume, metered) = (d.volume, d.metered_pictures);
-        let reset_pictures = pictures.clone();
+        let (notify, reset_top) = (d.notify_live, top.clone());
+        let volume = d.volume;
         let (higher, check, check_extra) = (d.higher_favorite.clone(), d.check_seconds, d.check_extra_seconds);
         let reset_higher = higher.clone();
         let (media, reset_media) = (d.media_controls.clone(), d.media_controls.clone());
@@ -1734,8 +1773,6 @@ impl Settings {
             row("twatch.check_extra_seconds", t.check_extra_seconds != check_extra, Some(act(cx, move |s| s.m.twatch().check_extra_seconds = check_extra)), choice(cx, &t.check_extra_seconds.to_string(), &copy::TWATCH_CHECK_EXTRAS, |s, v| s.m.twatch().check_extra_seconds = v.parse().unwrap_or(pms::twatch::live::USUAL_CHECK_EXTRA))),
             row("twatch.notify_live", t.notify_live != notify, Some(act(cx, move |s| s.m.twatch().notify_live = notify)), toggle(cx, t.notify_live, |s, v| s.m.twatch().notify_live = v)),
             row("twatch.volume", t.volume != volume, Some(act(cx, move |s| s.m.twatch().volume = volume)), number(cx, f64::from(t.volume), 0.0, 100.0, "%", |s, v| s.m.twatch().volume = v as u32)),
-            row("twatch.metered_pictures", t.metered_pictures != metered, Some(act(cx, move |s| s.m.twatch().metered_pictures = metered)), toggle(cx, t.metered_pictures, |s, v| s.m.twatch().metered_pictures = v)),
-            row("twatch.pictures", t.pictures != pictures, Some(act(cx, move |s| s.m.twatch().pictures = reset_pictures.clone())), choice(cx, &t.pictures, &copy::TWATCH_PICTURES, |s, v| s.m.twatch().pictures = v)),
             row("twatch.top_quality", t.top_quality != top, Some(act(cx, move |s| s.m.twatch().top_quality = reset_top.clone())), choice(cx, &t.top_quality, &copy::TWATCH_QUALITIES, |s, v| s.m.twatch().top_quality = v)),
             row("twatch.media_controls", t.media_controls != media, Some(act(cx, move |s| s.m.twatch().media_controls = reset_media.clone())), choice(cx, &t.media_controls, &copy::TWATCH_MEDIA_CONTROLS, |s, v| s.m.twatch().media_controls = v)),
             row("twatch.more_sets", t.more_sets != more, Some(act(cx, move |s| s.m.twatch().more_sets = more)), choice(cx, &t.more_sets.to_string(), &copy::TWATCH_MORE_SETS, |s, v| s.m.twatch().more_sets = v.parse().unwrap_or(0))),
@@ -1770,7 +1807,7 @@ impl Settings {
         let stuck = on && !have && !busy && !t.favorites.is_empty() && t.pictures != "always";
         let (title, words) = copy::TWATCH_NO_STREAMLINK;
         let warning: View = if stuck { InfoBar::new().title(title).message(words).severity(InfoBarSeverity::Warning).is_open(true).is_closable(false).into() } else { Border::new().into() };
-        StackPanel::new().spacing(4.0).children((heading(copy::TWATCH), missing_part(pms::parts::TWATCH), warning, group("Streamlink", stream), group("Your Twatch TV", vec![set]), group("Favorites", vec![favorites]), group_reset(cx, "How it plays", Section::Twatch, self.m.at_default(Section::Twatch), playing), note(copy::TWATCH_NETWORK), note(copy::ORDER_HINT), note(copy::TWATCH_NOTICE)))
+        StackPanel::new().spacing(4.0).children((heading(copy::TWATCH), missing_part(pms::parts::TWATCH), warning, group("Streamlink", stream), group("Your Twatch TV", vec![set]), group("Favorites", vec![favorites]), group_reset(cx, "How it plays", Section::Twatch, self.m.at_default(Section::Twatch), playing), note(copy::TWATCH_NETWORK), note(copy::TWATCH_POWER), note(copy::ORDER_HINT), note(copy::TWATCH_NOTICE)))
     }
 
     /// The proxy, and what goes through it: every way PimpMyShell uses the network, each with its switch.

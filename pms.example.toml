@@ -34,6 +34,14 @@ theme = "auto"
 # (WARP), which Windows keeps for when there's no GPU driver, and whose "GPU" work is really CPU work.
 # software_gpus = true
 
+# While a game fills the screen and keeps your graphics card busy, the TVs show GAME ON and draw nothing, Twatch TVs make way, and
+# the console stops, unless you've played it since it started (then it rests). All come back when the game's over. On by default.
+# rest_for_games = false
+
+# While a window fills the screen the taskbar's on, so the taskbar can't be seen (a game, a video), the TVs stop drawing, the console
+# rests, and Twatch TVs with their sound off stop; ones with sound go on playing it. Back the moment the taskbar is. On by default.
+# rest_when_covered = false
+
 # A TV arriving on channel 6, even by shuffling, switches its console on (the default). Off, channel 6 shows no signal until
 # you switch the console on yourself.
 # console_autostart = false

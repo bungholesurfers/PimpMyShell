@@ -17,6 +17,12 @@ Changed on 2026-11-07:
 - `doom/tables.rs` and `doom/r_segs.rs`: a wall's texture column read `finetangent` past its end (an index of 4096 or more),
   which panicked. It now reads on into `finesine`, as the original's memory layout made it do (`finetangent_overflowing`).
 
+Changed on 2026-11-09:
+
+- `doom/m_controls.rs`, `doom/m_config.rs` and `doom/g_game.rs`: a second key for moving, strafing and using (`key_up2`, `key_down2`,
+  `key_strafeleft2`, `key_straferight2`, `key_use2`), W, S, A, D and E by default, saved with the extended settings. The
+  arrows, comma, period and space still work as they always did.
+
 Copyright of what this descends from:
 
 - The Doom source code: Copyright (C) 1993-1996 id Software, Inc., released under the GPL.

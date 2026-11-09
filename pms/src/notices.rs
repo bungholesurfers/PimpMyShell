@@ -270,7 +270,7 @@ pub fn no_streamlink() -> Notice {
 
 /// Part of PimpMyShell (`file`, from parts.rs) isn't beside the rest, so what needs it can't work.
 pub fn missing_part(file: &'static str) -> Notice {
-    let dir = crate::parts::path(file).and_then(|p| p.parent().map(|d| d.display().to_string())).unwrap_or_default();
+    let dir = crate::parts::path(file).and_then(|p| p.parent().map(crate::shown)).unwrap_or_default();
     let without = crate::parts::without(file);
     Notice {
         key: file,
