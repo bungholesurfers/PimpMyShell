@@ -87,8 +87,14 @@ selectors:
 pub(crate) type R<T> = Result<T, String>;
 
 pub fn execute(line: &str) -> String {
+    /// What's worth a line in the log: most of this runs on the taskbar's own thread, and this long is a stutter you can see.
+    const SLOW: std::time::Duration = std::time::Duration::from_millis(100);
     let args = crate::ipc::tokenize(line);
+    let began = std::time::Instant::now();
     let result = std::panic::catch_unwind(|| dispatch(&args)).unwrap_or_else(|_| Err("command panicked".into()));
+    if began.elapsed() >= SLOW {
+        crate::log(format!("slow command: `{}` took {} ms", line.chars().take(48).collect::<String>(), began.elapsed().as_millis()));
+    }
     match result {
         Ok(s) => s,
         Err(e) => format!("error: {e}"),

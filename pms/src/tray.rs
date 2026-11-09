@@ -41,7 +41,8 @@ pub enum Command {
     /// Install the downloaded update: the user said yes to it.
     InstallUpdate,
     /// The answer to whether software update may check by itself.
-    UpdateConsent(bool),
+    /// The answer to the update question: None if it was closed without one.
+    UpdateConsent(Option<bool>),
     /// Turn the taskbar's toasts off, notifications staying Windows' (asked from a notice: notices.rs).
     KeepNativeToasts,
     /// *Shut up, computer*: stop asking before a notification opens something.
@@ -151,29 +152,34 @@ impl Tray {
     }
 
     /// Asks whether software update may check GitHub by itself (the first run's question: until it's answered,
-    /// nothing is checked); the answer comes back as `Command::UpdateConsent`. As Nagare's card has it: OK, or
-    /// closing the question, says yes; *No, don't check* says no. `latest`: the channel is the latest release's (the
-    /// question shows the URL it reads first). On a thread of its own, so the daemon goes on while the question waits.
+    /// nothing is checked); the answer comes back as `Command::UpdateConsent`: OK says yes, *Don't check* says no, and
+    /// closing the question says nothing, so that it's asked again at the next start. `latest`: the channel is the latest release's (the
+    /// question shows both channels' addresses, and which this is). On a thread of its own, so the daemon goes on while the question waits.
     pub fn ask_update_consent(&self, latest: bool) {
         let _ =
             std::thread::Builder::new().name("update question".into()).spawn(move || queue(Command::UpdateConsent(update_question(latest))));
     }
 }
 
-/// The question whether software update may check by itself, waiting for the answer: true unless it was no. Where
-/// there's no task dialog, a Yes/No message box (which can't be closed without an answer).
-pub fn update_question(latest: bool) -> bool {
-    let url = crate::update::first_url(latest);
-    // Closing it (its x, Esc) answers as OK does: so does a window closed without an answer (0).
-    if let Some(pressed) = modern("Check for updates automatically?", &consent_text("the address below"), Some(url), &["Check automatically", "Don't check"]) {
-        return pressed != 2;
+/// The question whether software update may check by itself, waiting for the answer. Closing it (its x, Esc) is no answer:
+/// nothing's kept, nothing's checked, and it's asked again at the next start, as its note says. Where there's no task dialog, a
+/// Yes/No message box (which can't be closed without an answer).
+pub fn update_question(latest: bool) -> Option<bool> {
+    if let Some(pressed) = modern_ask("Check for updates automatically?", CONSENT_INTRO, None, &["Check automatically", "Don't check"], None, &[], &consent_details(latest), CONSENT_NOTE) {
+        return match pressed {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        };
     }
-    let content = consent_text(&format!("<a href=\"{url}\">{url}</a>"));
+    let content = consent_text(latest);
     match task_dialog("Check for updates automatically?", &content, &[(NO_CHECKS, "Don't check")], true, IDOK.0, true) {
-        Ok(pressed) => pressed != NO_CHECKS,
+        Ok(pressed) if pressed == IDOK.0 => Some(true),
+        Ok(pressed) if pressed == NO_CHECKS => Some(false),
+        Ok(_) => None,
         Err(e) => {
             log(format!("tray: no task dialog ({e}); a message box instead"));
-            message_box(&format!("{}\n\nCheck for updates by itself?", consent_text(url)), true)
+            Some(message_box(&format!("{}\n\nCheck for updates by itself?", consent_text(latest)), true))
         }
     }
 }
@@ -188,6 +194,12 @@ fn modern(heading: &str, text: &str, link: Option<&str>, buttons: &[&str]) -> Op
 /// `modern`, with a checkbox and the note it shows once it's checked (being checked adds `CHECKED` to the answer), and
 /// rows of exact details, each a label and a value.
 fn modern_with(heading: &str, text: &str, link: Option<&str>, buttons: &[&str], check: Option<(&str, &str)>, rows: &[(String, String)]) -> Option<u32> {
+    modern_ask(heading, text, link, buttons, check, rows, &[], "")
+}
+
+/// Everything a question window can have: `details`, facts grouped on a card under the words, and `note`, a quieter last line.
+#[allow(clippy::too_many_arguments)]
+fn modern_ask(heading: &str, text: &str, link: Option<&str>, buttons: &[&str], check: Option<(&str, &str)>, rows: &[(String, String)], details: &[(String, String)], note: &str) -> Option<u32> {
     let exe = std::env::current_exe().ok()?.with_file_name("pms-gui.exe");
     if !exe.is_file() {
         return None;
@@ -206,6 +218,12 @@ fn modern_with(heading: &str, text: &str, link: Option<&str>, buttons: &[&str], 
     for (label, value) in rows {
         ask.args(["--row", label, value]);
     }
+    for (label, value) in details {
+        ask.args(["--detail", label, value]);
+    }
+    if !note.is_empty() {
+        ask.args(["--note", note]);
+    }
     // Its window comes up in front: the daemon may give it the foreground (it can't take it itself).
     let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
     let mut child = match ask.spawn() {
@@ -219,6 +237,11 @@ fn modern_with(heading: &str, text: &str, link: Option<&str>, buttons: &[&str], 
     // too (Install), and its icon must stay alive meanwhile.
     use std::os::windows::io::AsRawHandle;
     let process = HANDLE(child.as_raw_handle());
+    if let Some(job) = questions_job()
+        && let Err(e) = unsafe { windows::Win32::System::JobObjects::AssignProcessToJobObject(job, process) }
+    {
+        log(format!("tray: pms-gui --ask: couldn't tie it to this process: {e}"));
+    }
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -238,6 +261,22 @@ fn modern_with(heading: &str, text: &str, link: Option<&str>, buttons: &[&str], 
         }
     };
     status.code().and_then(|c| u32::try_from(c).ok()).filter(|&c| c < 255)
+}
+
+/// The job the question windows are in, which ends them when this process does, however that happens: a question whose daemon has
+/// gone has nobody to answer, and a daemon that starts again asks again.
+fn questions_job() -> Option<HANDLE> {
+    use windows::Win32::System::JobObjects::*;
+    static JOB: std::sync::OnceLock<Option<isize>> = std::sync::OnceLock::new();
+    let job = JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const limits).cast(), size).ok()?;
+        Some(job.0 as isize)
+    });
+    job.map(|h| HANDLE(h as *mut std::ffi::c_void))
 }
 
 /// What `pms-gui --ask` adds to its answer for a checked box.
@@ -265,12 +304,34 @@ pub fn ask_click(about: &str, question: &str, rows: &[(String, String)]) -> Clic
 }
 
 /// What the question about software update says; `url` is the first request's (a link, in a task dialog).
-fn consent_text(url: &str) -> String {
+/// The update question in its window: what it does, the addresses it uses together, and when nothing happens.
+const CONSENT_INTRO: &str = "PimpMyShell can check GitHub for new versions shortly after it starts, then every day or two. New versions download in \
+     the background, and you choose when to install them.\n\n\
+     We don't send any information about you or your PC, and we only install versions signed with PimpMyShell's release key.";
+const CONSENT_NOTE: &str = "We won't check until you choose. Close this, and we'll ask again next time. You can change it anytime in Settings > General.";
+
+fn consent_details(latest: bool) -> Vec<(String, String)> {
+    let (stable, releases, files) = (crate::update::STABLE_URL, crate::update::RELEASES_PAGE, crate::update::RELEASE_FILES);
+    let yours = |on: bool| if on { " (yours)" } else { "" };
+    vec![
+        (format!("Checks, on the stable channel{}", yours(!latest)), stable.to_string()),
+        (format!("Checks, on the latest channel{}", yours(latest)), releases.to_string()),
+        ("Downloads".to_string(), files.to_string()),
+    ]
+}
+
+/// The same, in words only, for where there's no window to group them in.
+fn consent_text(latest: bool) -> String {
+    let (stable, releases, files) = (crate::update::STABLE_URL, crate::update::RELEASES_PAGE, crate::update::RELEASE_FILES);
+    let on = if latest { "latest" } else { "stable" };
     format!(
         "PimpMyShell can check GitHub for new versions shortly after it starts, then every day or two. New versions \
          download in the background, and you choose when to install them. We only install versions signed with \
          PimpMyShell's release key.\n\n\
-         Each check starts by reading {url}. We don't send any information about you or your PC.\n\n\
+         A check reads one address, depending on your update channel. You're on {on}:\n\
+         Stable: {stable}\n\
+         Latest: {releases}\n\n\
+         A new version's files then come from {files}. We don't send any information about you or your PC.\n\n\
          We won't check until you choose. You can change this anytime in Settings > General."
     )
 }
@@ -287,6 +348,16 @@ pub fn explain(instruction: &str, content: &str, choices: &[&str]) -> Option<usi
     if let Some(pressed) = modern(instruction, content, None, &buttons) {
         return (pressed as usize).checked_sub(1).filter(|&i| i < choices.len());
     }
+    // A task dialog and a message box don't scroll: a long text, a license say, would run off the screen unread. It goes to
+    // Notepad, where it can be read whole, and the question is asked beside it.
+    let in_notepad;
+    let content = match read_in_notepad(instruction, content) {
+        Some(note) => {
+            in_notepad = note;
+            in_notepad.as_str()
+        }
+        None => content,
+    };
     const FIRST: i32 = 101;
     let buttons: Vec<(i32, &str)> = choices.iter().enumerate().map(|(i, c)| (FIRST + i as i32, *c)).collect();
     let default = if choices.is_empty() { IDCLOSE.0 } else { FIRST };
@@ -303,6 +374,20 @@ pub fn explain(instruction: &str, content: &str, choices: &[&str]) -> Option<usi
             }
         }
     }
+}
+
+/// How long a text a task dialog can show whole.
+const FITS_IN_A_DIALOG: usize = 900;
+
+/// Opens `content` in Notepad, if it's too long for a dialog: what the dialog says instead. None if it fits, or Notepad wouldn't.
+fn read_in_notepad(heading: &str, content: &str) -> Option<String> {
+    if content.chars().count() <= FITS_IN_A_DIALOG {
+        return None;
+    }
+    let file = std::env::temp_dir().join("PimpMyShell, to read.txt");
+    std::fs::write(&file, format!("{heading}\r\n\r\n{}", content.replace('\n', "\r\n"))).ok()?;
+    std::process::Command::new("notepad.exe").arg(&file).spawn().ok()?;
+    Some("It's open in Notepad, where you can read all of it. Read it there, then choose here.".into())
 }
 
 /// A message box in front of everything: Yes/No (true for yes), or just OK.
@@ -644,6 +729,14 @@ fn menu(hwnd: HWND) {
 fn open_settings() {
     match std::env::current_exe().map(|e| e.with_file_name("pms-gui.exe")) {
         Ok(gui) => spawn(&gui.display().to_string(), &[shared().config.clone().into_os_string()]),
+        Err(e) => log(format!("tray: {e}")),
+    }
+}
+
+/// The settings, on `page`.
+pub(crate) fn open_settings_on(page: &str) {
+    match std::env::current_exe().map(|e| e.with_file_name("pms-gui.exe")) {
+        Ok(gui) => spawn(&gui.display().to_string(), &[format!("--page={page}").into(), shared().config.clone().into_os_string()]),
         Err(e) => log(format!("tray: {e}")),
     }
 }

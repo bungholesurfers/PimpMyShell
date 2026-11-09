@@ -1,0 +1,33 @@
+[package]
+name = "pms-twatch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Plays a live stream onto a screen in the taskbar"
+
+[[bin]]
+name = "pms-twatch"
+path = "src/main.rs"
+
+[dependencies]
+pms-screen = { path = "../pms-screen" }
+windows-core = "0.62.2"
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls", "socks-proxy"] }
+windows-future = "0.3"
+windows = { version = "0.62.2", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Graphics_DirectX_Direct3D11",
+    "Media",
+    "Media_Core",
+    "Media_Playback",
+    "Media_Streaming_Adaptive",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+] }

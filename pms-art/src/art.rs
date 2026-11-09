@@ -163,6 +163,14 @@ pub fn logo_svg(d: &Design, crab: &str, style: Bill) -> Result<String, String> {
     ))
 }
 
+/// The crab alone, filling its picture.
+fn crab_svg(crab: &str) -> String {
+    let crab = crab.find("<svg").map_or(crab, |at| &crab[at..]);
+    let height = 256.0 * 511.0 / 755.0;
+    let crab = crab.replacen("<svg", &format!(r#"<svg x="0" y="{}" width="256" height="{height}""#, (256.0 - height) / 2.0), 1);
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 256 256" width="256" height="256">{crab}</svg>"#)
+}
+
 /// The flag, bent at rest: what `flat` (an SVG of the flat picture, in its units) looks like, with `flag::PAD` above and
 /// below it, as a PNG of `k` pixels a unit.
 fn bent(flat: &str, k: f32, phase: f32) -> Result<Vec<u8>, String> {
@@ -543,6 +551,8 @@ pub fn write_all(root: &Path, d: &Design) -> Result<String, String> {
         pngs.push((size, png));
     }
     write(icons.join("pms.ico"), &ico(&pngs))?;
+    // The crab alone, whose shape the TV's channel 3 bounces around (pms/src/tv.rs).
+    write(icons.join("crab-512.png"), &png(&crab_svg(&crab), 512, 512)?)?;
 
     let boxed = box_svg(d, &logo_svg(d, &crab, d.box_bill)?);
     let art = root.join("installer/art");

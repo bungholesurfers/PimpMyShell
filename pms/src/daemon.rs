@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -29,7 +29,7 @@ use windows_core::{BOOL, HSTRING, PCWSTR, w};
 use crate::config::{self, Config};
 use crate::hotmic::{self, MicWatch};
 use crate::meters::Sampler;
-use crate::notices::{self, Notices};
+use crate::notices::{self, Notice, Notices};
 use crate::system;
 use crate::toasts::{self, Banners, Incoming, Listener};
 use crate::tray::{self, Tray};
@@ -66,6 +66,8 @@ const LISTEN_RETRY: Duration = Duration::from_secs(15);
 /// How long a config that didn't load waits before its notice shows: a save that writes the file in two goes
 /// (truncated, then filled) loads at the second, and the notice never comes.
 const CONFIG_NOTICE_AFTER: Duration = Duration::from_secs(3);
+/// How often to work out whether Explorer could do with a restart.
+const EXPLORER_LOOK_EVERY: Duration = Duration::from_secs(10 * 60);
 /// How long a shell can go without its XAML taskbar before we say why we can't help: with software that can replace
 /// it, and without (where it might just be a slow start, so longer).
 const REPLACED_AFTER: Duration = Duration::from_secs(30);
@@ -80,6 +82,10 @@ const REFUSED_RETRY: Duration = Duration::from_secs(5 * 60);
 const REFUSED_RETRY_MAX: Duration = Duration::from_secs(60 * 60);
 /// That the welcome has been offered, here. Nobody should sit through it twice.
 const WELCOMED: &str = "welcomed.txt";
+/// Which news has been shown: the welcome's pages on what's new, for somebody who's been here before. NEWS goes up by one each
+/// time there's something worth showing them, and pms-gui's --whats-new says what it is.
+const NEWS_SEEN: &str = "news.txt";
+const NEWS: u32 = 1;
 /// How many times in a row the meters may fail before we ask for a report.
 const METER_FAILURES: u32 = 3;
 /// Whose replaced taskbar we've explained: once is plenty, not at every sign-in.
@@ -111,7 +117,11 @@ pub fn stop() -> Result<String, String> {
 }
 
 struct Daemon {
+    /// What's on the `screen` meter: a TV, or a game.
+    screens: crate::tv::Screens,
     path: PathBuf,
+    /// The strip the TAP has, as the commands that made it.
+    strip: Vec<String>,
     modified: Option<SystemTime>,
     config: Config,
     sampler: Sampler,
@@ -178,6 +188,8 @@ struct Daemon {
     notices: Notices,
     /// The config didn't load at the start: this one is empty (a stock taskbar), until a save that loads.
     stand_in: bool,
+    /// When it was last worked out whether Explorer could do with a restart.
+    explorer_checked: Option<Instant>,
 }
 
 /// How many times in a row a TAP of another build gets swapped for ours before we stop trying.
@@ -257,7 +269,7 @@ impl ToastFeed {
                 self.scan = Some(scan_notifiers());
                 self.next_scan = now + NOTIFIER_SCAN;
                 if notices.is_raised("notification access") || notices.is_raised("toasts") {
-                    log("listening for notifications at last: they come to the taskbar");
+                    log("notification access granted: toasts come to the taskbar");
                 }
                 notices.clear("notification access");
                 // A taskbar that was refusing toasts has yet to show one: `shown` says when it's over.
@@ -278,7 +290,7 @@ impl ToastFeed {
 
     /// Windows stopped letting us read notifications: their banners go back to it, until `listen` works again.
     fn deafen(&mut self, notices: &mut Notices, now: Instant) {
-        log("notification access was turned off: notification banners are back to Windows");
+        log("notification access turned off: banners are back with Windows");
         self.listener = None;
         self.scan = None;
         self.banners.restore();
@@ -387,8 +399,17 @@ fn toast_feed(config: &Config) -> Option<ToastFeed> {
     })
 }
 
+/// Lines of the settings that aren't settings: left out, and the rest loaded. Said in the log; the settings window shows them.
+fn note_ignored(path: &Path, config: &Config) {
+    for e in &config.issues {
+        let p = crate::problem::Problem::of(path, e);
+        log(format!("{}: {} (ignored; the rest loaded)", p.line.map_or("the settings".into(), |n| format!("line {n}")), p.what));
+    }
+}
+
 fn modified(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+    let when = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    when(path).max(when(&config::watchlist_path(path))).max(when(&config::network_path(path)))
 }
 
 /// `key=value` field of a status line.
@@ -409,14 +430,31 @@ impl Daemon {
         if m == self.modified {
             return;
         }
+        // Taken away while we run, as for a fresh start: that's the defaults, as it is on a first run, not a file that won't load.
+        if !self.path.exists() && config::is_default(&self.path) {
+            match config::ensure(&self.path) {
+                Ok(()) => log("the settings file went: starting again from the defaults"),
+                Err(e) => log(format!("the settings file went, and couldn't be made again: {e}")),
+            }
+        }
+        let m = modified(&self.path);
         self.modified = m;
-        match config::load(&self.path).and_then(|c| Sampler::new(&c).map(|s| (c, s))) {
+        // Most of what a save can change has nothing to do with the meters: a Twatch TV's favorites, say.
+        let keep = |c: &Config| !self.stand_in && crate::meters::same_sampler(&self.config, c);
+        match config::load(&self.path).and_then(|c| if keep(&c) { Ok((c, None)) } else { Sampler::new(&c).map(|s| (c, Some(s))) }) {
             Ok((config, sampler)) => {
                 log(format!("reloaded {}", self.path.display()));
+                note_ignored(&self.path, &config);
                 self.notices.clear("config");
+                config::remember_good(&self.path);
+                self.check_watchlist();
                 self.stand_in = false;
+                crate::net::follow(&config);
                 let old = std::mem::replace(&mut self.config, config);
-                self.sampler = sampler;
+                let same_meters = sampler.is_none();
+                if let Some(sampler) = sampler {
+                    self.sampler = sampler;
+                }
                 let new = &self.config;
                 if old.toasts != new.toasts {
                     if let Some(mut feed) = self.toasts.take() {
@@ -425,7 +463,7 @@ impl Daemon {
                         if !feed.deck.is_empty()
                             && let Err(e) = send("toast hide")
                         {
-                            log(format!("toast hide: {e}"));
+                            log(format!("couldn't take the toasts down: {e}"));
                         }
                     }
                     // Started now only while the taskbar has our config; otherwise `apply` starts it.
@@ -435,8 +473,10 @@ impl Daemon {
                     }
                 }
                 // Apply only what changed, so editing (say, from the GUI) doesn't flash the whole
-                // taskbar back to stock and rebuild everything on every save. The meters always
-                // start over: the new sampler knows nothing of the old strip.
+                // taskbar back to stock and rebuild everything on every save. That goes for the meters
+                // too: the new sampler knows nothing of the old strip, but it says everything again
+                // anyway, and a strip that's the same needn't be built again. Building it costs the
+                // taskbar a moment, and Explorer some memory it never gives back.
                 if self.applied.is_none() {
                     return;
                 }
@@ -458,19 +498,28 @@ impl Daemon {
                     self.sent_level = -1.0;
                     self.sent_tide = -1.0;
                 }
-                cmds.extend(self.sampler.define(&self.config.meter_height, &self.config.bar_height));
+                if !same_meters {
+                    let strip = self.sampler.define(&self.config.meter_height, &self.config.bar_height, self.config.mic_position());
+                    if strip != self.strip {
+                        cmds.extend(strip.iter().cloned());
+                        self.strip = strip;
+                    }
+                }
+                if cmds.is_empty() {
+                    return;
+                }
                 let batch = std::iter::once("batch".to_string()).chain(cmds.iter().map(|c| crate::quote(c))).collect::<Vec<_>>().join(" ");
                 match send(&batch) {
                     Ok(r) if !r.lines().any(|l| l.starts_with("error")) => self.sync_mic(),
                     Ok(e) | Err(e) => {
-                        log(format!("applying the reloaded config: {e}; re-applying everything"));
+                        log(format!("couldn't apply the reloaded config ({e}): applying all of it again"));
                         self.applied = None;
                         self.retry_apply = Instant::now();
                     }
                 }
             }
             Err(e) => {
-                log(format!("keeping the previous config: {e}"));
+                log(format!("the config didn't load, so the previous one stays: {e}"));
                 self.notices.raise_in(notices::config(&self.path, &e, !self.stand_in), CONFIG_NOTICE_AFTER);
             }
         }
@@ -478,7 +527,7 @@ impl Daemon {
 
     fn fail(&mut self, e: String) {
         self.failures += 1;
-        self.note(format!("TAP trouble ({}/{MAX_FAILURES}): {e}", self.failures));
+        self.note(format!("the TAP failed ({}/{MAX_FAILURES}): {e}", self.failures));
         if self.failures >= MAX_FAILURES {
             self.inject();
         }
@@ -486,6 +535,117 @@ impl Daemon {
 
     fn inject(&mut self) {
         self.inject_tap(false);
+    }
+
+    /// What a TV's remote asked for that's in the settings: the file gets it, and everything goes on from there as if the settings
+    /// window had done it.
+    fn do_what_the_tvs_asked(&mut self) {
+        let asked = self.screens.take_asked();
+        if asked == crate::tv::Asked::default() {
+            return;
+        }
+        let mut config = self.config.clone();
+        if asked.add_tv {
+            crate::tv::add_tv(&mut config);
+        }
+        for name in &asked.nuked {
+            crate::tv::nuke_tv(&mut config, name);
+        }
+        if let Some((seconds, jitter)) = asked.shuffling {
+            (config.shuffle_seconds, config.shuffle_jitter) = (seconds, jitter);
+        }
+        if let Err(e) = config::save(&self.path, &config) {
+            log(format!("TV: couldn't save that: {e}"));
+        }
+    }
+
+    /// Restarts Explorer if you've asked for that, on a thread, as it takes seconds: what happens to the taskbar after that is what
+    /// happens after any restart. It's never done unasked. All that happens by itself is a notification, when it's holding a lot of ours.
+    fn look_after_explorer(&mut self) {
+        use std::sync::atomic::AtomicBool;
+        static RESTARTING: AtomicBool = AtomicBool::new(false);
+        if std::fs::remove_file(crate::explorer::request_file()).is_ok() && !RESTARTING.swap(true, Ordering::Relaxed) {
+            self.notices.clear("explorer");
+            std::thread::spawn(|| {
+                if let Err(e) = crate::explorer::restart() {
+                    log(format!("Explorer restart: {e}"));
+                }
+                RESTARTING.store(false, Ordering::Relaxed);
+            });
+        }
+        let now = Instant::now();
+        if self.explorer_checked.is_some_and(|at| now.duration_since(at) < EXPLORER_LOOK_EVERY) {
+            return;
+        }
+        self.explorer_checked = Some(now);
+        let Some(pid) = taskbar_pid().filter(|_| self.config.notify_explorer) else { return self.notices.clear("explorer") };
+        let (taps, memory) = (system::loaded_taps(pid).map_or(0, |t| t.len()), crate::explorer::memory(pid));
+        if !crate::explorer::worth_it(taps, memory) {
+            self.notices.clear("explorer");
+        } else if !self.notices.is_raised("explorer") {
+            log(format!("Explorer has {taps} TAPs loaded and uses {} MB: a notice suggests restarting it", memory >> 20));
+            self.notices.raise(notices::explorer_heavy(taps, memory >> 20));
+        }
+    }
+
+    /// Says what's wrong with the watchlist, or that nothing is any more.
+    fn check_watchlist(&mut self) {
+        let bad = config::watchlist_trouble(&self.path);
+        if bad.is_empty() {
+            self.notices.clear("watchlist");
+        } else {
+            self.notices.raise(notices::watchlist(&config::watchlist_path(&self.path), &bad));
+        }
+        self.check_network();
+        self.check_issues();
+    }
+
+    /// Settings that couldn't be used (config.rs, `leniently`): said, while the file has any.
+    fn check_issues(&mut self) {
+        if self.config.issues.is_empty() || self.stand_in {
+            self.notices.clear("settings issues");
+        } else {
+            self.notices.raise(notices::settings_issues(&self.path, &self.config.issues));
+        }
+    }
+
+    /// The network settings won't load, so nothing goes online (config.rs, NETWORK_UNREAD): said, while something's expected to,
+    /// update checks or a Twatch TV. Downloads are asked for in the settings, which say so there.
+    fn check_network(&mut self) {
+        let expected = self.config.update_check == Some(true) || self.config.meters.iter().any(|m| m.set.as_deref() == Some("twatch"));
+        match config::network_trouble(&self.path).filter(|_| expected) {
+            Some(e) => {
+                log(format!("{}: {e}; nothing goes online until it's fixed", config::network_path(&self.path).display()));
+                self.notices.raise(notices::network_settings(&config::network_path(&self.path), &e));
+            }
+            None => self.notices.clear("network"),
+        }
+    }
+
+    /// One more Twatch TV, a different quality or volume for all of them, and news of favorites going live.
+    fn do_what_the_sets_asked(&mut self) {
+        let asked = crate::twatch::take_asked();
+        if asked.add_set || !asked.removed.is_empty() || asked.quality != 0 || asked.volume != 0 {
+            let mut config = self.config.clone();
+            if asked.add_set {
+                crate::twatch::add_set(&mut config);
+            }
+            for (name, fixed) in &asked.removed {
+                log(format!("{name}: taken off the taskbar from its remote"));
+                crate::twatch::remove_set(&mut config, name, *fixed);
+            }
+            crate::twatch::step_quality(&mut config, asked.quality);
+            crate::twatch::step_volume(&mut config, asked.volume);
+            if let Err(e) = config::save(&self.path, &config) {
+                log(format!("Twatch TV: couldn't save that: {e}"));
+            }
+        }
+        if !asked.went_live.is_empty() {
+            self.notices.raise(notices::favorite_live(&asked.went_live));
+        }
+        if self.screens.take_spared() {
+            self.notices.raise(notices::console_spared());
+        }
     }
 
     /// Inject our TAP (detaching any other). `swap`: in place of a working one of another build; that, done, doesn't
@@ -503,7 +663,7 @@ impl Daemon {
         self.last_inject = Some(Instant::now());
         match inject() {
             Ok(msg) => {
-                log(msg);
+                log(msg.replace('\n', "; "));
                 self.failures = 0;
                 self.applied = None;
                 self.retry_apply = Instant::now();
@@ -512,7 +672,7 @@ impl Daemon {
                 }
             }
             Err(e) => {
-                self.note(format!("inject failed: {e}"));
+                self.note(format!("couldn't inject the TAP: {e}"));
                 if let Some(why) = self.watchdog.inject_failed(&e) {
                     self.bench(why);
                 }
@@ -567,7 +727,7 @@ impl Daemon {
     fn tell_replaced(&mut self, name: Option<&str>) {
         self.told_replaced = true;
         let who = name.unwrap_or("unknown");
-        log(format!("no Windows 11 taskbar to hook (running it: {who})"));
+        log(format!("no Windows 11 taskbar to hook (the taskbar is run by: {who})"));
         let told = pms_tap::data_dir().join(TOLD);
         if std::fs::read_to_string(&told).is_ok_and(|t| t.trim() == who) {
             return;
@@ -594,7 +754,7 @@ impl Daemon {
                 match std::process::Command::new(&exe).arg("8").creation_flags(CREATE_DEFAULT_ERROR_MODE.0).spawn() {
                     Ok(c) => {
                         let app = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        log(format!("watchdog drill: watching {app} (pid {}) in place of explorer; it crashes in 8 s", c.id()));
+                        log(format!("watchdog drill: watching {app} (pid {}) in place of Explorer; it crashes in 8 s", c.id()));
                         self.watchdog.watch(c.id(), &app);
                     }
                     Err(e) => log(format!("watchdog drill: {}: {e}", exe.display())),
@@ -713,7 +873,12 @@ impl Daemon {
             Ok(status) => {
                 update::checked();
                 self.updates.next = now + update::random_secs(update::EVERY);
-                log(format!("update: {status:?}"));
+                log(match &status {
+                    update::Status::UpToDate { stable } => format!("update: up to date (stable is {stable})"),
+                    update::Status::Available { version } => format!("update: {version} is available (this copy can't install it)"),
+                    update::Status::Ready { version, path, .. } => format!("update: {version} is downloaded and verified: {}", path.display()),
+                    update::Status::Stuck { version } => format!("update: {version} didn't install last time; not trying it again"),
+                });
                 let told = match &status {
                     update::Status::Ready { version, .. } => Some((
                         version.clone(),
@@ -803,7 +968,10 @@ impl Daemon {
 
     /// The answer to the question whether software update may check by itself: kept in the config.
     fn set_update_consent(&mut self, yes: bool) {
-        log(format!("update: checking by itself {}", if yes { "allowed" } else { "declined" }));
+        log(format!("update: automatic checks {}", if yes { "turned on" } else { "turned off" }));
+        if config::is_default(&self.path) {
+            let _ = config::ensure(&self.path);
+        }
         match config::set_top_level(&self.path, "update_check", if yes { "true" } else { "false" }) {
             // The reload picks it up; until then, as answered.
             Ok(()) => self.config.update_check = Some(yes),
@@ -815,23 +983,29 @@ impl Daemon {
     }
 
     /// A first run: all defaults, in the usual place, and no welcome yet. Its window asks the first questions, among them
-    /// software update's, which waits for it. A config that isn't new has been through all this.
+    /// software update's, which waits for it. A config that isn't new has been through all this, and gets only what's new since
+    /// it last looked, once.
     fn welcome(&mut self) {
-        let mark = pms_tap::data_dir().join(WELCOMED);
-        if mark.exists() || !config::is_default(&self.path) {
+        if !config::is_default(&self.path) {
             return;
         }
-        let Some(exe) = std::env::current_exe().ok().map(|e| e.with_file_name("pms-gui.exe")).filter(|_| config::untouched(&self.config)) else {
+        let (mark, news) = (pms_tap::data_dir().join(WELCOMED), pms_tap::data_dir().join(NEWS_SEEN));
+        let seen: u32 = std::fs::read_to_string(&news).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+        let first = !mark.exists() && config::untouched(&self.config);
+        if !first && seen >= NEWS {
             let _ = std::fs::write(&mark, "");
             return;
-        };
+        }
+        let Some(exe) = std::env::current_exe().ok().map(|e| e.with_file_name("pms-gui.exe")) else { return };
         let (waiting, config) = (self.welcoming.clone(), self.path.clone());
         waiting.store(true, Ordering::Release);
+        log(if first { "first run: the welcome" } else { "what's new, for somebody who's been here before" });
         std::thread::spawn(move || {
-            if let Err(e) = std::process::Command::new(exe).arg("--welcome").arg(config).status() {
+            if let Err(e) = std::process::Command::new(exe).arg(if first { "--welcome" } else { "--whats-new" }).arg(config).status() {
                 log(format!("no welcome: {e}"));
             }
             let _ = std::fs::write(&mark, "");
+            let _ = std::fs::write(&news, NEWS.to_string());
             waiting.store(false, Ordering::Release);
         });
     }
@@ -840,7 +1014,7 @@ impl Daemon {
     fn failed(&mut self, what: &str, error: &str) {
         self.meter_failures += 1;
         if self.meter_failures == METER_FAILURES {
-            log(format!("{what}, {METER_FAILURES} times in a row: asking for a report"));
+            log(format!("{what} ({METER_FAILURES} times in a row): a notice asks for a report"));
             self.notices.raise(notices::problem(what, error));
         }
     }
@@ -848,8 +1022,8 @@ impl Daemon {
     /// *Shut up, computer*: clicks on notifications go ahead without asking, from now on.
     fn stop_confirming_clicks(&mut self) {
         match config::set_in_table(&self.path, "toasts", "confirm_clicks", "\"off\"") {
-            Ok(()) => log("notification clicks won't ask any more"),
-            Err(e) => log(format!("couldn't stop asking about notification clicks: {e}")),
+            Ok(()) => log("toast clicks no longer ask first"),
+            Err(e) => log(format!("couldn't stop toast clicks asking first: {e}")),
         }
     }
 
@@ -858,7 +1032,7 @@ impl Daemon {
     fn keep_native_toasts(&mut self) {
         match config::set_in_table(&self.path, "toasts", "enabled", "false") {
             Ok(()) => {
-                log("toasts off, as asked: notifications stay Windows' (the settings' Toasts page turns them on again)");
+                log("toasts off, as asked: banners stay with Windows (turn them on again in Settings > Notifications)");
                 self.notices.clear("notification access");
                 self.notices.clear("toasts");
             }
@@ -878,7 +1052,7 @@ impl Daemon {
                     if self.paused { self.quiet() } else { self.resume() }
                 }
                 tray::Command::Retry => {
-                    log("hooking explorer again, from the tray");
+                    log("Retry, from the tray: hooking Explorer again");
                     self.watchdog.retry();
                     if self.active() {
                         self.resume();
@@ -886,7 +1060,8 @@ impl Daemon {
                 }
                 tray::Command::CheckUpdate => self.check_update(true),
                 tray::Command::InstallUpdate => self.install_update(),
-                tray::Command::UpdateConsent(yes) => self.set_update_consent(yes),
+                tray::Command::UpdateConsent(Some(yes)) => self.set_update_consent(yes),
+                tray::Command::UpdateConsent(None) => log("update: the question was closed without an answer; nothing is checked, and it's asked again at the next start"),
                 tray::Command::KeepNativeToasts => self.keep_native_toasts(),
                 tray::Command::StopConfirmingClicks => self.stop_confirming_clicks(),
                 tray::Command::SaveReport => {
@@ -911,7 +1086,7 @@ impl Daemon {
                 return true;
             }
             self.swaps += 1;
-            log(format!("explorer has a TAP of another build ({theirs}; ours is {ours}), likely from before an update: swapping ours in"));
+            log(format!("Explorer has a TAP from another build ({theirs}; ours is {ours}): swapping ours in"));
             self.inject_tap(true);
             return true;
         }
@@ -921,10 +1096,7 @@ impl Daemon {
             if let Some(mut f) = self.toasts.take() {
                 f.banners.restore();
             }
-            log(format!(
-                "the TAP in explorer ({theirs}) wouldn't be swapped for ours ({ours}): it keeps the rest of the config, but notification \
-                 banners stay with Windows until explorer restarts"
-            ));
+            log(format!("couldn't swap Explorer's TAP ({theirs}) for ours ({ours}): it gets the config, but toasts stay with Windows until Explorer restarts"));
         }
         false
     }
@@ -936,7 +1108,7 @@ impl Daemon {
             Ok(s) => s,
             Err(e) if crate::no_tap(&e) => return self.inject(),
             // Someone else (REPL, layout watch) holds the pipe; not the TAP's fault.
-            Err(e) if crate::busy(&e) => return self.note("TAP pipe busy with another client".into()),
+            Err(e) if crate::busy(&e) => return self.note("the TAP's pipe is busy with another client".into()),
             Err(e) => return self.fail(e),
         };
         self.failures = 0;
@@ -964,7 +1136,7 @@ impl Daemon {
         let key = format!("tap={} taskbar={}", field(&status, "tap").unwrap_or("?"), field(&status, "taskbar").unwrap_or("none"));
         if field(&status, "taskbar") == Some("none") {
             self.applied = None;
-            return self.note("TAP is up, taskbar tree not there yet".into());
+            return self.note("the TAP is up, but the taskbar isn't there yet".into());
         }
         let want = |b: bool| if b { "on" } else { "off" };
         let drifted = field(&status, "backdrop") != Some(want(self.config.backdrop.is_some()))
@@ -978,7 +1150,7 @@ impl Daemon {
             return;
         }
         if self.applied.as_deref() == Some(key.as_str()) {
-            log(format!("taskbar drifted from the config ({status}); re-applying"));
+            log(format!("the taskbar no longer matches the config ({status}): applying it again"));
         }
         self.apply(key);
     }
@@ -989,11 +1161,14 @@ impl Daemon {
         cmds.push(format!("theme {}", if self.light { "light" } else { "dark" }));
         self.fps = self.wanted_fps();
         cmds.push(format!("pace {}", self.fps));
+        cmds.push(format!("toast position {}", self.config.toasts().map_or("clock", |t| t.position.as_str())));
         cmds.extend(self.config.backdrop.iter().flat_map(|b| b.commands(self.light)));
         cmds.extend(self.config.start_glow.iter().map(|g| g.command()));
         cmds.extend(self.config.app_glow.iter().map(|g| g.command()));
+        self.strip.clear();
         if !self.sampler.is_empty() {
-            cmds.extend(self.sampler.define(&self.config.meter_height, &self.config.bar_height));
+            self.strip = self.sampler.define(&self.config.meter_height, &self.config.bar_height, self.config.mic_position());
+            cmds.extend(self.strip.iter().cloned());
         }
         for cmd in &cmds {
             let r = send(cmd);
@@ -1006,7 +1181,7 @@ impl Daemon {
                 self.retry_apply = Instant::now() + APPLY_BACKOFF;
                 let what = if cmd.starts_with("meters") { "The meters couldn't start" } else { "PimpMyShell couldn't set up your taskbar" };
                 self.failed(what, &e);
-                return self.note(format!("applying config: `{cmd}` -> {e}"));
+                return self.note(format!("applying the config: `{cmd}`: {e}"));
             }
         }
         self.mic_state = None;
@@ -1028,7 +1203,7 @@ impl Daemon {
         if !self.stale_tap && std::mem::take(&mut self.toasts_parked) {
             self.toasts = toast_feed(&self.config);
             if self.toasts.is_some() {
-                log("the taskbar is ours again: toasts go to it again");
+                log("the taskbar is ours again: toasts go back to it");
             }
         }
         self.sync_mic();
@@ -1047,7 +1222,7 @@ impl Daemon {
         {
             f.banners.restore();
             self.toasts_parked = true;
-            log("the taskbar isn't ours (yet): notification banners are back to Windows until it is");
+            log("the taskbar isn't ours yet: banners are back with Windows until it is");
         }
     }
 
@@ -1220,7 +1395,7 @@ impl Daemon {
         for cmd in &cmds {
             match send(cmd) {
                 Ok(r) if !r.starts_with("error") => {}
-                Ok(e) | Err(e) => return self.note(format!("`{cmd}` -> {e}")),
+                Ok(e) | Err(e) => return self.note(format!("`{cmd}`: {e}")),
             }
         }
         self.alert_shown = want.is_some();
@@ -1275,7 +1450,7 @@ impl Daemon {
         match f.given_back_until {
             Some(until) if now < until => return,
             Some(_) => {
-                log("trying the taskbar for toasts again");
+                log("trying toasts on the taskbar again");
                 f.given_back_until = None;
                 f.next_listen = now;
             }
@@ -1310,9 +1485,9 @@ impl Daemon {
                         let native = !f.banners.is_managed(&n.aumid);
                         f.banners.suppress(&n.aumid);
                         if native {
-                            log(format!("first toast from {}: shown natively; its banners go to the taskbar from now on", n.app));
+                            log(format!("first toast from {} shown by Windows; its next ones come to the taskbar", n.app));
                         } else if !toasts::windows_accepts_toasts() {
-                            log(format!("toast from {} held back by Windows (do not disturb, full screen, ...)", n.app));
+                            log(format!("toast from {} held back by Windows (do not disturb or full screen)", n.app));
                         } else {
                             // The app alone: a toast's words are often someone's name, and logs get sent to people.
                             log(format!("toast from {}", n.app));
@@ -1324,7 +1499,7 @@ impl Daemon {
                     for id in taken_back {
                         let was_front = f.deck.last().is_some_and(|n| n.id == id);
                         let Some(n) = f.take(id) else { continue };
-                        log(format!("toast from {} taken back by the app", n.app));
+                        log(format!("toast from {} withdrawn by the app", n.app));
                         let next = f.deck.last().filter(|_| was_front).map(|m| front_ms(cfg, m, f.deck.len()));
                         if let Err(e) = send(&format!("toast drop id={id}{}", next.map(|ms| format!(" ms={ms}")).unwrap_or_default())) {
                             log(format!("toast drop: {e}"));
@@ -1372,6 +1547,11 @@ impl Daemon {
                 // One of our own: a click explains (the explanation waits for its answer, so off the loop).
                 if Notices::is_ours(t.id) {
                     match self.notices.by_card(t.id).filter(|_| what == "open") {
+                        Some(Notice { opens: Some(target), .. }) => {
+                            if let Err(e) = crate::toasts::open(target) {
+                                log(format!("notice: couldn't open its link: {e}"));
+                            }
+                        }
                         Some(n) => {
                             let n = n.clone();
                             log(format!("notice \"{}\" clicked: explaining", n.title));
@@ -1380,7 +1560,7 @@ impl Daemon {
                                 notices::explain(&n);
                             });
                         }
-                        None => log(format!("notice \"{}\" put away", t.title)),
+                        None => log(format!("notice \"{}\" dismissed", t.title)),
                     }
                     continue;
                 }
@@ -1408,7 +1588,7 @@ impl Daemon {
                                 tray::queue(tray::Command::StopConfirmingClicks);
                             }
                             if !answer.yes {
-                                log(format!("toast from {}: you said no; it stays in the notification center", t.app));
+                                log(format!("toast from {} not opened (you said no); it stays in the notification center", t.app));
                                 return;
                             }
                         }
@@ -1519,7 +1699,7 @@ impl Daemon {
         }
         match r {
             Ok(r) if r.lines().any(|l| l.starts_with("error")) => {
-                self.note(format!("meters push -> {r}"));
+                self.note(format!("meters push: {r}"));
                 self.failed("The meters keep failing", &r);
                 self.applied = None;
             }
@@ -1532,21 +1712,34 @@ impl Daemon {
 pub fn run(path: &Path) -> Result<(), String> {
     pms_tap::logfile::move_old();
     let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+    config::running_with(&path);
+    crate::wads::move_old();
     match config::adopt_layers(&path) {
-        Ok(true) => log(format!("{} now holds only what's been changed; the whole file is kept as .toml.full.bak", path.display())),
+        Ok(true) => log(format!("{0} now holds only your changes; the whole file is in {0}.full.bak", path.display())),
         Ok(false) => {}
-        Err(e) => log(format!("keeping the config as it is: {e}")),
+        Err(e) => log(format!("couldn't trim the config to your changes, so it stays as it is: {e}")),
     }
     // A config that doesn't load doesn't stop us: a stock taskbar (an empty config) meanwhile, a notice saying what's
     // wrong, and the next save that loads takes over.
-    let (config, sampler, broken) = match config::load(&path).and_then(|c| Sampler::new(&c).map(|s| (c, s))) {
-        Ok((c, s)) => (c, s, None),
-        Err(e) => {
-            log(format!("{e}: starting with a stock taskbar until it loads"));
-            let empty: Config = toml::from_str("").map_err(|e| format!("an empty config: {e}"))?;
-            let sampler = Sampler::new(&empty)?;
-            (empty, sampler, Some(e))
+    let loaded = |p: &Path| config::load(p).and_then(|c| Sampler::new(&c).map(|s| (c, s)));
+    let (config, sampler, broken, stand_in) = match loaded(&path) {
+        Ok((c, s)) => {
+            config::remember_good(&path);
+            note_ignored(&path, &c);
+            (c, s, None, false)
         }
+        Err(e) => match config::last_good(&path).and_then(|good| loaded(&good).ok()) {
+            Some((c, s)) => {
+                log(format!("{e}: starting with the last config that loaded"));
+                (c, s, Some(e), false)
+            }
+            None => {
+                log(format!("{e}: using the standard taskbar until the config loads"));
+                let empty: Config = toml::from_str("").map_err(|e| format!("an empty config: {e}"))?;
+                let sampler = Sampler::new(&empty)?;
+                (empty, sampler, Some(e), true)
+            }
+        },
     };
 
     let instance = unsafe { CreateMutexW(None, false, INSTANCE_MUTEX) }.map_err(|e| e.to_string())?;
@@ -1560,8 +1753,11 @@ pub fn run(path: &Path) -> Result<(), String> {
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let mic = MicWatch::new()?;
 
+    crate::net::follow(&config);
     let mut d = Daemon {
+        screens: Default::default(),
         modified: modified(&path),
+        strip: Vec::new(),
         path,
         config,
         sampler,
@@ -1613,10 +1809,11 @@ pub fn run(path: &Path) -> Result<(), String> {
         welcoming: Arc::default(),
         next_shell_check: Instant::now() + SHELL_CHECK,
         notices: Notices::default(),
-        stand_in: broken.is_some(),
+        stand_in,
+        explorer_checked: None,
     };
     if let Some(e) = &broken {
-        let notice = notices::config(&d.path, e, false);
+        let notice = notices::config(&d.path, e, !stand_in);
         d.notices.raise(notice);
     }
     // The feed (which turns native banners off) starts once the taskbar has our config (`apply`): toasts that came
@@ -1626,6 +1823,7 @@ pub fn run(path: &Path) -> Result<(), String> {
     d.tray = Tray::start(&d.path).map_err(|e| log(format!("no tray icon: {e}"))).ok();
     d.sync_tray();
     d.welcome();
+    d.check_watchlist();
     log(format!("PimpMyShell {} on {}", crate::version::CURRENT, system::windows_version()));
     log(format!(
         "daemon up (pid {}): {}; backdrop {}; hot-mic {}; toasts {}; meters: {}",
@@ -1633,10 +1831,13 @@ pub fn run(path: &Path) -> Result<(), String> {
         d.path.display(),
         if d.config.backdrop.is_some() { "custom" } else { "stock" },
         if d.config.hotmic.is_some() { "on" } else { "off" },
-        if d.config.toasts().is_some() { "in the taskbar (once it's ours)" } else { "native" },
+        if d.config.toasts().is_some() { "on the taskbar (once it's ours)" } else { "Windows'" },
         d.sampler.describe(),
     ));
 
+    watch_display();
+    crate::pressure::start();
+    let mut dark = false;
     let mut next_status = Instant::now();
     loop {
         if d.handle_tray() {
@@ -1665,6 +1866,24 @@ pub fn run(path: &Path) -> Result<(), String> {
             d.pump_notices();
             d.survey_shell();
             d.check_taskbar_hidden(Instant::now());
+            if dark != DISPLAY_OFF.load(Ordering::Relaxed) {
+                dark = !dark;
+                log(if dark { "the display's off: muted TwaTVs stop until it's back" } else { "the display's back" });
+            }
+            // PMS_BATTERY: as if on battery, for trying it on a PC that has none.
+            d.screens.update(&d.config, &d.path, active, on_battery() || std::env::var_os("PMS_BATTERY").is_some(), dark, crate::pressure::now());
+            d.do_what_the_tvs_asked();
+            d.do_what_the_sets_asked();
+            d.look_after_explorer();
+            if let Some(version) = crate::twatch::newer_streamlink() {
+                d.notices.raise(notices::newer_streamlink(&version));
+            }
+            if crate::twatch::no_streamlink() {
+                d.notices.raise(notices::no_streamlink());
+            }
+            for file in crate::parts::newly_missing() {
+                d.notices.raise(notices::missing_part(file));
+            }
         }
         if active {
             d.pump_toasts();
@@ -1696,6 +1915,7 @@ pub fn run(path: &Path) -> Result<(), String> {
         }
     }
 
+    d.screens.stop();
     log(match send("reset") {
         Ok(r) => format!("stopping; {r}"),
         Err(e) => format!("stopping; TAP unreachable ({e})"),
@@ -1723,10 +1943,17 @@ const RUN_VALUE: PCWSTR = w!("PimpMyShell");
 pub fn migrate() {
     let Some(base) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else { return };
     let old = base.join("SeaShell");
-    // Only where PimpMyShell has no config of its own yet, in either place it has kept one (the old folder stays
-    // after the first carry-over, so this is asked every start). Not `default_path()`: that would move a config.
+    // Only where PimpMyShell has never had a config of its own, in either place it has kept one. Once it has, SeaShell's
+    // never comes back: the old folder stays, and without the mark, removing your settings for a fresh start would bring
+    // back SeaShell's instead of the defaults. Not `default_path()`: that would move a config.
     let config = config::config_dir().join("pms.toml");
-    if old.join("seashell.toml").is_file() && !config.exists() && !config::legacy_path().exists() {
+    let carried = pms_tap::data_dir().join("seashell-carried-over.txt");
+    let has_one = || config.exists() || config::legacy_path().exists();
+    if old.join("seashell.toml").is_file() && !carried.exists() && has_one() {
+        let _ = std::fs::create_dir_all(pms_tap::data_dir());
+        let _ = std::fs::write(&carried, "");
+    }
+    if old.join("seashell.toml").is_file() && !carried.exists() && !has_one() {
         let banners = pms_tap::data_dir().join("banners.txt");
         for (from, to) in [(old.join("seashell.toml"), &config), (old.join("banners.txt"), &banners)] {
             if let Some(dir) = to.parent() {
@@ -1736,13 +1963,14 @@ pub fn migrate() {
                 log(format!("carried over {} from SeaShell", to.display()));
             }
         }
+        let _ = std::fs::write(&carried, "");
     }
     let had_autostart = unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, w!("SeaShell"), RRF_RT_REG_SZ, None, None, None) } == ERROR_SUCCESS;
     if had_autostart {
         let _ = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, w!("SeaShell")) };
         match autostart(&["on".to_string(), config::default_path().display().to_string()]) {
             Ok(m) => log(format!("start at sign-in moved over from SeaShell: {m}")),
-            Err(e) => log(format!("start at sign-in (was SeaShell's): {e}")),
+            Err(e) => log(format!("couldn't move start at sign-in over from SeaShell: {e}")),
         }
     }
     let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, w!(r"Software\Classes\AppUserModelId\SeaShell")) };
@@ -1754,7 +1982,7 @@ pub fn migrate() {
         && let Some(plain) = without_legacy_config(&cmd, &config::legacy_path())
     {
         match write_run(&HSTRING::from(&plain)) {
-            Ok(()) => log(format!("start at sign-in: {plain} (it named the config's old place, {})", config::legacy_path().display())),
+            Ok(()) => log(format!("start at sign-in: {plain} (it pointed at the config's old location, {})", config::legacy_path().display())),
             Err(e) => log(format!("start at sign-in: {e}")),
         }
     }
@@ -1841,6 +2069,37 @@ fn shell_light() -> bool {
 
 /// The cap while on battery power, unless `battery_fps` says otherwise.
 const BATTERY_FPS: u32 = 30;
+
+/// Windows has turned the display off (`watch_display`). Dimmed counts as on: it can still be seen.
+static DISPLAY_OFF: AtomicBool = AtomicBool::new(false);
+
+/// GUID_CONSOLE_DISPLAY_STATE, which says 0 for off, 1 for on and 2 for dimmed.
+const DISPLAY_STATE: windows_core::GUID = windows_core::GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
+
+unsafe extern "system" fn display_changed(_context: *const core::ffi::c_void, kind: u32, setting: *const core::ffi::c_void) -> u32 {
+    use windows::Win32::System::Power::POWERBROADCAST_SETTING;
+    use windows::Win32::UI::WindowsAndMessaging::PBT_POWERSETTINGCHANGE;
+    if kind == PBT_POWERSETTINGCHANGE && !setting.is_null() {
+        // SAFETY: that's what comes with PBT_POWERSETTINGCHANGE, and it's only read for as long as this call.
+        let setting = unsafe { &*setting.cast::<POWERBROADCAST_SETTING>() };
+        if setting.PowerSetting == DISPLAY_STATE && setting.DataLength >= 1 {
+            DISPLAY_OFF.store(setting.Data[0] == 0, Ordering::Relaxed);
+        }
+    }
+    0
+}
+
+/// Has Windows keep `DISPLAY_OFF` up to date, for as long as this process lasts. It says where things stand as soon as it's asked.
+fn watch_display() {
+    use windows::Win32::System::Power::{DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, PowerSettingRegisterNotification};
+    use windows::Win32::UI::WindowsAndMessaging::DEVICE_NOTIFY_CALLBACK;
+    let asked: &'static DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS = Box::leak(Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS { Callback: Some(display_changed), Context: std::ptr::null_mut() }));
+    let mut registered = std::ptr::null_mut();
+    let done = unsafe { PowerSettingRegisterNotification(&DISPLAY_STATE, DEVICE_NOTIFY_CALLBACK, HANDLE(std::ptr::from_ref(asked).cast_mut().cast()), &mut registered) };
+    if done != ERROR_SUCCESS {
+        log(format!("can't tell when the display turns off: error {}", done.0));
+    }
+}
 
 /// Whether the PC runs on its battery (unplugged, discharging): not a desktop, nor a laptop on its charger.
 fn on_battery() -> bool {

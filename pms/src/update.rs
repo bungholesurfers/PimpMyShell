@@ -26,12 +26,16 @@ pub const RELEASES_PAGE: &str = "https://github.com/bungholesurfers/PimpMyShell/
 /// What the stable channel reads first: the tag of the version it moves copies to.
 pub const STABLE_URL: &str = "https://raw.githubusercontent.com/bungholesurfers/PimpMyShell/main/update/stable.txt";
 
-/// The first request a check makes, on the stable or the latest channel: what the update question shows. Only
-/// when that names a version newer than the running one does the check go on, to the release's manifest
-/// (`releases/download/<tag>/pms-update.json`, its signature, then the installer).
-pub fn first_url(latest: bool) -> &'static str {
-    if latest { RELEASES_PAGE } else { STABLE_URL }
+/// Where a release's files are, under their version's tag.
+pub const RELEASE_FILES: &str = "https://github.com/bungholesurfers/PimpMyShell/releases/download/";
+
+/// Every address a check can use, for the settings to say. Each channel starts somewhere different; only when that names a
+/// version newer than the running one does a check go on, to the release's manifest (`<tag>/pms-update.json`, its signature,
+/// then the installer).
+pub fn addresses() -> String {
+    format!("Stable reads {STABLE_URL}\nLatest reads {RELEASES_PAGE}\nNew versions come from {RELEASE_FILES}")
 }
+
 /// The only hosts a request, or a redirect, may go to.
 const HOSTS: [&str; 4] = ["github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
 const MAX_TAG: u64 = 64;
@@ -368,20 +372,9 @@ pub fn allowed(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Redirects are followed by hand (`get`), each one checked.
 fn agent() -> ureq::Agent {
-    use std::time::Duration;
-    let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::WebPki).build();
-    ureq::Agent::config_builder()
-        .https_only(true)
-        .tls_config(tls)
-        .max_redirects(0)
-        .max_redirects_will_error(false)
-        .http_status_as_error(false)
-        .user_agent(format!("PimpMyShell/{} (update check)", version::CURRENT))
-        .timeout_connect(Some(Duration::from_secs(20)))
-        .timeout_global(Some(Duration::from_secs(600)))
-        .build()
-        .into()
+    crate::net::agent(crate::net::Use::Updates, std::time::Duration::from_secs(600), 0, &format!("PimpMyShell/{} (update check)", version::CURRENT))
 }
 
 /// GET `url`, following up to five redirects by hand, each checked by `allowed`.

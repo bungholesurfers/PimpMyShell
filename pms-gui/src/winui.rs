@@ -15,7 +15,7 @@ use windows_reactor::*;
 
 use crate::copy;
 use crate::dollars::Layer;
-use crate::model::{self, Model, Section, Update};
+use crate::model::{self, Model, Section, Update, WadJob, Widget};
 
 /// The Windows App Runtime's framework package, at the version windows-reactor is built for or later.
 const RUNTIME_FAMILY: &str = "Microsoft.WindowsAppRuntime.2_8wekyb3d8bbwe";
@@ -49,28 +49,46 @@ pub fn available() -> bool {
 }
 
 /// Runs the window until it's closed.
-pub fn run(path: PathBuf) -> Result<(), String> {
+pub fn run(path: PathBuf, page: Option<&str>) -> Result<(), String> {
+    let _ = FIRST_PAGE.set(page.and_then(page_tagged).unwrap_or(Page::General));
     App::run_component::<Settings>(path).map_err(|e| e.to_string())
+}
+
+/// The page to open on.
+static FIRST_PAGE: std::sync::OnceLock<Page> = std::sync::OnceLock::new();
+
+fn page_tagged(tag: &str) -> Option<Page> {
+    PAGES.iter().find(|(_, t, ..)| *t == tag).map(|(page, ..)| *page)
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     General,
+    Widgets,
     Meters,
     Counters,
     Look,
+    Tv,
+    Poom,
+    Twatch,
     Hotmic,
     Toasts,
+    Network,
 }
 
 /// Each page: its tag, its icon (Segoe Fluent Icons), and its title.
-const PAGES: [(Page, &str, &str, (&str, &str)); 6] = [
+const PAGES: [(Page, &str, &str, (&str, &str)); 11] = [
     (Page::General, "general", "\u{E713}", copy::GENERAL),
+    (Page::Widgets, "widgets", "\u{F0E2}", copy::WIDGETS),
     (Page::Meters, "meters", "\u{E9D9}", copy::METERS),
     (Page::Counters, "counters", "\u{E8EF}", copy::COUNTERS),
     (Page::Look, "look", "\u{E771}", copy::LOOK),
+    (Page::Tv, "tv", "\u{E7F4}", copy::TV),
+    (Page::Poom, "poom", "\u{E7FC}", copy::POOM),
+    (Page::Twatch, "twatch", "\u{E714}", copy::TWATCH),
     (Page::Hotmic, "hotmic", "\u{E720}", copy::HOTMIC),
     (Page::Toasts, "toasts", "\u{E91C}", copy::TOASTS),
+    (Page::Network, "network", "\u{E774}", copy::NETWORK),
 ];
 
 /// How often the window looks in on its model: saves once edits settle, PimpMyShell's state, an update's progress.
@@ -87,6 +105,10 @@ pub struct Settings {
     pane_mode: NavigationViewDisplayMode,
     /// The section whose reset is waiting to be confirmed.
     confirm: Option<Section>,
+    /// Resetting every setting is waiting to be confirmed.
+    confirm_all: bool,
+    /// The box for editing favorites as text has been up long enough to be given its text (`favorites`).
+    box_ready: bool,
     /// What floats behind the controls (dollars.rs), and where.
     dollars: Layer,
     panel: ElementRef<SwapChainPanel>,
@@ -100,6 +122,8 @@ pub enum Msg {
     PaneMode(NavigationViewDisplayMode),
     /// The answer to whether to reset the section in `Settings::confirm`.
     Reset(ContentDialogResult),
+    /// The answer to whether to reset every setting.
+    ResetAll(ContentDialogResult),
     Tick,
     /// What a control did: a change to the settings.
     Edit(Box<dyn FnOnce(&mut Settings) + Send>),
@@ -134,7 +158,7 @@ impl Component for Settings {
 
     fn create(path: &PathBuf, context: &ComponentContext<Self>) -> Self {
         tick_later(context);
-        Settings { m: Model::open(path.clone()), page: Page::General, meter: 0, pane_open: true, pane_mode: NavigationViewDisplayMode::Expanded, confirm: None, dollars: Layer::default(), panel: ElementRef::new() }
+        Settings { m: Model::open(path.clone()), page: FIRST_PAGE.get().copied().unwrap_or(Page::General), meter: 0, pane_open: true, pane_mode: NavigationViewDisplayMode::Expanded, confirm: None, confirm_all: false, box_ready: false, dollars: Layer::default(), panel: ElementRef::new() }
     }
 
     fn update(&mut self, msg: Msg, context: &ComponentContext<Self>) {
@@ -142,6 +166,7 @@ impl Component for Settings {
             Msg::Page(tag) => {
                 if let Some((page, ..)) = PAGES.iter().find(|(_, t, ..)| Some(*t) == tag.as_deref()) {
                     self.page = *page;
+                    self.box_ready = false;
                 }
             }
             Msg::Pane(open) => self.pane_open = open,
@@ -151,9 +176,20 @@ impl Component for Settings {
                     self.m.reset(section);
                 }
             }
+            Msg::ResetAll(answer) => {
+                if std::mem::take(&mut self.confirm_all) && answer == ContentDialogResult::Primary {
+                    self.m.reset_all();
+                }
+            }
             Msg::Tick => {
                 if self.m.polled.elapsed() > Duration::from_secs(2) {
                     self.m.poll_daemon();
+                }
+                if let Some(page) = crate::model::page_asked().as_deref().and_then(page_tagged) {
+                    self.page = page;
+                    self.box_ready = false;
+                } else {
+                    self.box_ready = self.m.favorites_text.is_some();
                 }
                 self.m.autosave();
                 self.dollars.attach(&self.panel);
@@ -167,7 +203,7 @@ impl Component for Settings {
     }
 
     fn view(&self, _input: &PathBuf, cx: &mut Cx) -> View {
-        cx.window_title("PimpMyShell");
+        cx.window_title(crate::model::WINDOW_TITLE);
         // Only an expanded pane takes room of its own when it's open: a compact one that opens goes over the settings.
         self.dollars.set_pane(match (self.pane_mode, self.pane_open) {
             (NavigationViewDisplayMode::Minimal, _) => 0,
@@ -179,23 +215,39 @@ impl Component for Settings {
             Some(icon) => visuals.icon(icon),
             None => visuals,
         });
+        let issues = self.m.issues();
+        // A meter's issue can't be put on one meter's card: the file says which meter, not where it is in the list.
+        PROBLEMS.with_borrow_mut(|p| *p = issues.iter().filter(|(id, ..)| !id.starts_with("meter.")).map(|(id, _, words)| (id.clone(), words.clone())).collect());
         let items = PAGES.iter().map(|(page, tag, glyph, (name, _))| {
+            // A page with a setting that couldn't be used says so in red.
+            let marked = issues.iter().any(|(_, on, _)| on == tag);
+            let title = TextBlock::new().text(*name);
+            let title = if marked { title.foreground(Brush::Theme(ThemeBrush::SystemCritical)) } else { title };
+            let title = if *page == Page::General { title.font_weight(FontWeight::SEMI_BOLD) } else { title };
+            // And with a red dot: the page a window opens on doesn't take its words' color at first.
+            let dot = Border::new().width(7.0).height(7.0).corner_radius(CornerRadius::uniform(3.5)).vertical_alignment(VerticalAlignment::Center).background(Brush::Theme(ThemeBrush::SystemCritical)).opacity(if marked { 1.0 } else { 0.0 });
+            let title = StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((title, dot));
             let content: View = if *page == Page::General {
                 // The first stop, with the one thing to know at a glance: whether PimpMyShell is running.
-                StackPanel::new().margin(Thickness::xy(0.0, 4.0)).children((TextBlock::new().text(*name).font_weight(FontWeight::SEMI_BOLD), state(self.m.daemon_running).font_size(12.0)))
+                StackPanel::new().margin(Thickness::xy(0.0, 4.0)).children((title, state(self.m.daemon_running).font_size(12.0)))
             } else {
-                TextBlock::new().text(*name).into()
+                title
             };
             let item = NavigationViewItem::new().tag(*tag).is_selected(self.page == *page);
             KeyedView::new(*tag, item.slots([SlotView::new(NavigationViewItemSlot::Icon, FontIcon::new().glyph(*glyph)), SlotView::new(NavigationViewItemSlot::Content, content)]))
         });
         let page: View = match self.page {
             Page::General => self.general(cx),
+            Page::Widgets => self.widgets(cx),
             Page::Meters => self.meters(cx),
             Page::Counters => self.counters(cx),
             Page::Look => self.look(cx),
+            Page::Tv => self.tv(cx),
+            Page::Poom => self.poom(cx),
+            Page::Twatch => self.twatch(cx),
             Page::Hotmic => self.hotmic(cx),
             Page::Toasts => self.toasts(cx),
+            Page::Network => self.network(cx),
         };
         let (text, error) = &self.m.message;
         let status = TextBlock::new()
@@ -205,7 +257,7 @@ impl Component for Settings {
             .foreground(if *error { Brush::Theme(ThemeBrush::SystemCritical) } else { Brush::Theme(ThemeBrush::PrimaryText) })
             .opacity(if *error { 1.0 } else { 0.6 })
             .margin(Thickness::new(36.0, 6.0, 36.0, 10.0))
-            .grid_row(1);
+            .grid_row(2);
         // A scroll area per page (keyed by it), so that each page opens at its top; Meters has its own.
         let tag = PAGES.iter().find(|(p, ..)| *p == self.page).map_or("general", |(_, t, ..)| *t);
         let content: View = if self.page == Page::Meters {
@@ -213,10 +265,14 @@ impl Component for Settings {
         } else {
             ScrollViewer::new().content(StackPanel::new().max_width(1000.0).margin(Thickness::new(36.0, 24.0, 36.0, 36.0)).children([page]))
         };
-        let body = Grid::new().rows([GridLength::STAR, GridLength::Auto]).keyed_children([KeyedView::new(tag, Border::new().grid_row(0).content(content)), KeyedView::new("status", status)]);
+        let body = Grid::new().rows([GridLength::Auto, GridLength::STAR, GridLength::Auto]).keyed_children([
+            KeyedView::new("problem", self.problem_banner(cx)),
+            KeyedView::new(tag, Border::new().grid_row(1).content(content)),
+            KeyedView::new("status", status),
+        ]);
         // The small print, where nobody can claim not to have seen it; there's no room for it in a narrow pane.
         let footer: View = if self.pane_open && self.pane_mode == NavigationViewDisplayMode::Expanded {
-            ScrollViewer::new().height(300.0).vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(TextBlock::new().text(copy::LEGAL).font_size(9.0).opacity(0.55).text_wrapping(TextWrapping::Wrap).margin(Thickness::new(14.0, 6.0, 12.0, 8.0)))
+            ScrollViewer::new().height(130.0).vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(TextBlock::new().text(copy::LEGAL).font_size(9.0).opacity(0.55).text_wrapping(TextWrapping::Wrap).margin(Thickness::new(14.0, 6.0, 12.0, 8.0)))
         } else {
             Border::new().into()
         };
@@ -240,8 +296,15 @@ impl Component for Settings {
             .close_button_text("Cancel")
             .on_closed(cx.callback(Msg::Reset))
             .content(TextBlock::new().text(self.m.warning(question)).text_wrapping(TextWrapping::Wrap));
+        let confirm_all = ContentDialog::new()
+            .is_open(self.confirm_all)
+            .title("Reset every setting?")
+            .primary_button_text("Reset")
+            .close_button_text("Cancel")
+            .on_closed(cx.callback(Msg::ResetAll))
+            .content(TextBlock::new().text(copy::RESET_ALL_ASK).text_wrapping(TextWrapping::Wrap));
         // The dollars first: over the acrylic, under everything else.
-        Grid::new().children((SwapChainPanel::new().element_ref(&self.panel), window, confirm))
+        Grid::new().children((SwapChainPanel::new().element_ref(&self.panel), window, confirm, confirm_all))
     }
 }
 
@@ -329,6 +392,16 @@ fn card_lines(title: &str, help: &str, key: Option<&str>) -> Vec<View> {
     lines
 }
 
+/// Something to download: what it is, a few words about it, where it comes from on a line of its own, and its button.
+fn download_card(title: &str, help: &str, from: &str, controls: impl Into<View>) -> View {
+    let mut lines = card_lines(title, help, None);
+    lines.push(TextBlock::new().text(format!("From {from}")).font_size(11.0).opacity(0.55).text_wrapping(TextWrapping::Wrap).is_text_selection_enabled(true).into());
+    card(Grid::new().columns([GridLength::STAR, GridLength::Auto]).column_spacing(16.0).children((
+        children(text_panel().grid_column(0), lines),
+        Border::new().grid_column(1).vertical_alignment(VerticalAlignment::Center).content(controls),
+    )))
+}
+
 /// A card: an optional icon, its text, and its controls on the right.
 fn settings_card(glyph: Option<&str>, title: &str, help: &str, key: Option<&str>, controls: impl Into<View>) -> View {
     let lines = card_lines(title, help, key);
@@ -359,21 +432,56 @@ fn reset_slot(changed: bool, reset: Option<Callback<()>>) -> View {
     reset_button(changed, reset).unwrap_or_else(|| Border::new().width(RESET_W).into())
 }
 
+thread_local! {
+    /// The settings that couldn't be used, and what to say under each: for `row` to mark in red as it draws.
+    static PROBLEMS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// A setting: its title, description and key (copy.rs), its control, and Reset when it isn't the default.
 fn row(id: &str, changed: bool, reset: Option<Callback<()>>, control: impl Into<View>) -> View {
     let (title, help) = copy::setting(id);
     let controls = StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((Border::new().vertical_alignment(VerticalAlignment::Center).content(control), reset_slot(changed, reset)));
-    settings_card(None, title, help, Some(copy::key(id)), controls)
+    marked(id, settings_card(None, title, help, Some(copy::key(id)), controls))
+}
+
+/// `card`, the setting `id`'s, outlined in red with what was wrong beneath it, if its value couldn't be used.
+fn marked(id: &str, card: View) -> View {
+    let Some(words) = PROBLEMS.with_borrow(|p| p.iter().find(|(s, _)| s == id).map(|(_, w)| w.clone())) else { return card };
+    StackPanel::new()
+        .spacing(2.0)
+        .children((
+            Border::new().border_brush(Brush::Theme(ThemeBrush::SystemCritical)).border_thickness(Thickness::uniform(2.0)).corner_radius(CornerRadius::uniform(6.0)).content(card),
+            TextBlock::new().text(words).text_wrapping(TextWrapping::Wrap).font_size(12.0).foreground(Brush::Theme(ThemeBrush::SystemCritical)).margin(Thickness::new(4.0, 0.0, 4.0, 4.0)),
+        ))
 }
 
 /// A setting whose control is too wide to sit beside its text (a list, say): the control goes under it.
 fn wide_row(id: &str, changed: bool, reset: Option<Callback<()>>, control: impl Into<View>) -> View {
     let (title, help) = copy::setting(id);
     let text = children(text_panel().grid_column(0), card_lines(title, help, Some(copy::key(id))));
-    card(StackPanel::new().spacing(12.0).children((
+    let card = card(StackPanel::new().spacing(12.0).children((
         Grid::new().columns([GridLength::STAR, GridLength::Auto]).column_spacing(16.0).children((text, Border::new().grid_column(1).vertical_alignment(VerticalAlignment::Top).content(reset_slot(changed, reset)))),
         control.into(),
-    )))
+    )));
+    marked(id, card)
+}
+
+/// A program of PimpMyShell's that isn't beside this one (pms::parts), said at the top of the page of what needs it.
+fn missing_part(file: &'static str) -> View {
+    if pms::parts::here(file) {
+        return Border::new().into();
+    }
+    InfoBar::new().title(format!("{file} is missing")).message(copy::part_missing(file)).severity(InfoBarSeverity::Error).is_open(true).is_closable(false).into()
+}
+
+/// A widget on the Widgets page: its icon, its name and what it is, and the arrows that move it along the taskbar.
+fn widget_row(cx: &Cx, at: usize, glyph: &str, title: &str, what: &str, (left, right): (bool, bool)) -> View {
+    let step = |left: bool| act(cx, move |s: &mut Settings| s.m.move_widget(at, left));
+    let arrows = StackPanel::new().orientation(Orientation::Horizontal).spacing(4.0).children((
+        Button::new().is_enabled(left).on_click(step(true)).content(FontIcon::new().glyph("\u{E70E}")).tooltip("Further left"),
+        Button::new().is_enabled(right).on_click(step(false)).content(FontIcon::new().glyph("\u{E70D}")).tooltip("Further right"),
+    ));
+    settings_card(Some(glyph), title, what, None, arrows)
 }
 
 /// A table that's in the file or not (`[hotmic]`, say): a card with its icon and switch.
@@ -673,13 +781,22 @@ impl Settings {
             )),
             Border::new().grid_column(2).vertical_alignment(VerticalAlignment::Center).content(start_stop),
         )));
-        let startup = group(
-            "Startup",
+        let logs = pms_tap::logfile::dir().display().to_string();
+        let files = group(
+            "Your files",
             vec![
-                settings_card(Some("\u{E7E8}"), "Start when I sign in", "Run PimpMyShell automatically when you sign in to Windows", None, switch(m.autostarts(), edit(cx, |s, on: bool| s.m.set_autostart(on)))),
-                settings_card(Some("\u{E81C}"), "Last log entry", &m.last_log, None, TextBlock::new()),
+                settings_card(Some("\u{E8A5}"), "Settings file", &m.path.display().to_string(), None, Button::new().on_click(act(cx, |s| s.m.show_config())).content("Show in File Explorer")),
+                settings_card(Some("\u{E728}"), "Twatch TV watchlist", &pms::config::watchlist_path(&m.path).display().to_string(), None, Button::new().on_click(act(cx, |s| s.m.show_watchlist())).content("Show in File Explorer")),
+                settings_card(Some("\u{E774}"), "Network settings", &pms::config::network_path(&m.path).display().to_string(), None, Button::new().on_click(act(cx, |s| s.m.show_network())).content("Show in File Explorer")),
+                TextBlock::new().text(copy::PRIVATE_FILES).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7).margin(Thickness::new(1.0, 2.0, 0.0, 6.0)).into(),
+                settings_card(Some("\u{E81C}"), "Logs", &logs, None, Button::new().on_click(act(cx, |s| s.m.show_logs())).content("Show in File Explorer")),
+                settings_card(None, "Last log entry", &m.last_log, None, TextBlock::new()),
                 TextBlock::new().text(copy::LOG_PRIVACY).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7).margin(Thickness::new(1.0, 2.0, 0.0, 0.0)).into(),
             ],
+        );
+        let startup = group(
+            "Startup",
+            vec![settings_card(Some("\u{E7E8}"), "Start when I sign in", "Run PimpMyShell automatically when you sign in to Windows", None, switch(m.autostarts(), edit(cx, |s, on: bool| s.m.set_autostart(on))))],
         );
         let taskbar = group_reset(
             cx,
@@ -725,9 +842,10 @@ impl Settings {
             ],
         );
         let window = group(
-            "Settings",
+            "Other",
             vec![
-                settings_card(Some("\u{E8A5}"), "Settings file", &m.path.display().to_string(), None, Button::new().on_click(act(cx, |s| s.m.show_config())).content("Show in File Explorer")),
+                row("notify_explorer", !self.m.config.notify_explorer, Some(act(cx, |s| s.m.config.notify_explorer = true)), toggle(cx, self.m.config.notify_explorer, |s, v| s.m.config.notify_explorer = v)),
+                settings_card(Some("\u{E72C}"), "Restart Explorer", "Gives back what Explorer's holding. It won't, with a folder window or file copy open", None, Button::new().on_click(act(cx, |s| s.m.restart_explorer())).content("Restart now")),
                 settings_card(
                     Some("\u{E789}"),
                     "Welcome",
@@ -742,10 +860,11 @@ impl Settings {
                     None,
                     Button::new().on_click(act(cx, |s| s.m.open_classic())).content("Open"),
                 ),
+                settings_card(Some("\u{E777}"), copy::RESET_ALL.0, copy::RESET_ALL.1, None, Button::new().on_click(act(cx, |s| s.confirm_all = true)).content("Reset...")),
             ],
         );
         let legal = group("Legal", vec![card(TextBlock::new().text(copy::LEGAL).text_wrapping(TextWrapping::Wrap).font_size(11.0).opacity(0.7))]);
-        StackPanel::new().spacing(4.0).children((heading(copy::GENERAL), header, startup, self.software_update(cx), taskbar, advanced, window, legal))
+        StackPanel::new().spacing(4.0).children((heading(copy::GENERAL), header, files, startup, self.software_update(cx), taskbar, advanced, window, legal))
     }
 
     fn software_update(&self, cx: &Cx) -> View {
@@ -807,7 +926,7 @@ impl Settings {
             .on_click(act(cx, move |s| s.m.start_check(pms::update::Ask { install: installed, automatic: false, force: false, latest })))
             .content("Check for updates");
         let mut cards = vec![
-            settings_card(Some("\u{E895}"), &format!("Version {}", pms::version::CURRENT), &format!("Checks start at {}", pms::update::first_url(latest)), None, check),
+            settings_card(Some("\u{E895}"), &format!("Version {}", pms::version::CURRENT), &pms::update::addresses(), None, check),
         ];
         if !found.is_empty() {
             cards.push(card(children(StackPanel::new().spacing(8.0), found)));
@@ -842,11 +961,14 @@ impl Settings {
 
     fn meters(&self, cx: &Cx) -> View {
         let meters = &self.m.config.meters;
-        let selected = self.meter.min(meters.len().saturating_sub(1));
-        // The list: a swatch, the name, the style; a gap between groups.
+        // The meters, not the TVs (they're widgets of their own), and which is selected.
+        let plain = self.m.plain_meters();
+        let selected = if plain.contains(&self.meter) { self.meter } else { plain.first().copied().unwrap_or(0) };
+        // The list, in the taskbar's order: a swatch, the name, the style; a gap between groups.
         let mut list: Vec<View> = Vec::new();
         let mut group_of: Option<&str> = None;
-        for (i, m) in meters.iter().enumerate() {
+        for &i in &plain {
+            let m = &meters[i];
             let swatch = m.color.as_ref().or(m.colors.first()).map(|c| parse_color(c)).unwrap_or(Color::rgb(0x80, 0x80, 0x80));
             let style = copy::STYLES.iter().find(|(s, _)| *s == format!("{:?}", m.style).to_lowercase()).map_or("", |(_, l)| *l);
             let line = Grid::new().columns([GridLength::Pixel(6.0), GridLength::STAR, GridLength::Auto]).column_spacing(12.0).children((
@@ -854,7 +976,7 @@ impl Settings {
                 TextBlock::new().grid_column(1).text(m.label.clone()).font_weight(FontWeight::SEMI_BOLD).vertical_alignment(VerticalAlignment::Center),
                 TextBlock::new().grid_column(2).text(style).opacity(0.65).font_size(12.0).vertical_alignment(VerticalAlignment::Center),
             ));
-            let top = if i > 0 && m.group.as_deref() != group_of { 12.0 } else { 0.0 };
+            let top = if i != plain[0] && m.group.as_deref() != group_of { 12.0 } else { 0.0 };
             group_of = m.group.as_deref();
             let button = Button::new()
                 .horizontal_alignment(HorizontalAlignment::Stretch)
@@ -892,46 +1014,29 @@ impl Settings {
                     .content(line)
             );
         }
-        let n = meters.len();
+        let (first, last) = (plain.first() == Some(&selected), plain.last() == Some(&selected));
         let add = Button::new()
             .horizontal_alignment(HorizontalAlignment::Stretch)
             .on_click(act(cx, |s| {
-                s.m.config.meters.push(model::toml_meter(model::NEW_METER));
-                s.meter = s.m.config.meters.len() - 1;
+                let at = s.m.new_meter_at();
+                s.m.config.meters.insert(at, model::toml_meter(model::NEW_METER));
+                s.meter = at;
             }))
             .content(StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((SymbolIcon::new().symbol(Symbol::Add), TextBlock::new().text("Add meter"))));
         let arrange = StackPanel::new().orientation(Orientation::Horizontal).spacing(6.0).children((
+            Button::new().is_enabled(!plain.is_empty() && !first).on_click(act(cx, move |s| s.meter = s.m.move_meter(selected, true))).content(FontIcon::new().glyph("\u{E70E}")).tooltip("Move up"),
+            Button::new().is_enabled(!plain.is_empty() && !last).on_click(act(cx, move |s| s.meter = s.m.move_meter(selected, false))).content(FontIcon::new().glyph("\u{E70D}")).tooltip("Move down"),
             Button::new()
-                .is_enabled(selected > 0)
+                .is_enabled(!plain.is_empty())
                 .on_click(act(cx, move |s| {
-                    if selected > 0 && selected < s.m.config.meters.len() {
-                        s.m.config.meters.swap(selected, selected - 1);
-                        s.meter = selected - 1;
-                    }
-                }))
-                .content(FontIcon::new().glyph("\u{E70E}"))
-                .tooltip("Move up"),
-            Button::new()
-                .is_enabled(selected + 1 < n)
-                .on_click(act(cx, move |s| {
-                    if selected + 1 < s.m.config.meters.len() {
-                        s.m.config.meters.swap(selected, selected + 1);
-                        s.meter = selected + 1;
-                    }
-                }))
-                .content(FontIcon::new().glyph("\u{E70D}"))
-                .tooltip("Move down"),
-            Button::new()
-                .is_enabled(n > 0)
-                .on_click(act(cx, move |s| {
-                    if selected < s.m.config.meters.len() {
+                    if s.m.config.meters.get(selected).is_some_and(|m| !model::is_screen(m)) {
                         s.m.config.meters.remove(selected);
                     }
                 }))
                 .content(SymbolIcon::new().symbol(Symbol::Delete))
                 .tooltip("Remove meter"),
         ));
-        let editor = if meters.is_empty() { TextBlock::new().text("You don't have any meters. Select Add meter to make one.").into() } else { self.meter_editor(cx, selected) };
+        let editor = if plain.is_empty() { TextBlock::new().text("You don't have any meters. Select Add meter to make one.").into() } else { self.meter_editor(cx, selected) };
         // The list and the selected meter's settings scroll on their own, with the buttons under the list: selecting a
         // meter of another length moves nothing but what's on the right. (One scroll area for the page moved it all
         // whenever the shorter settings of another meter made the page shorter than where it was scrolled to.)
@@ -988,6 +1093,7 @@ impl Settings {
             meter_opt!(cx, meters, base, i, group, String::new(), "meter.group", |v, set| text(cx, &v, "For example, memory", 220.0, set)),
             meter_opt!(cx, meters, base, i, snug, false, "meter.snug", |v, set| toggle(cx, v, set)),
             meter_opt!(cx, meters, base, i, caption, true, "meter.caption", |v, set| toggle(cx, v, set)),
+            meter_opt!(cx, meters, base, i, sideways, matches!(m.style, Style::Disks | Style::Nics), "meter.sideways", |v, set| toggle(cx, v, set)),
             row(
                 "meter.style",
                 style != shipped_style,
@@ -1111,6 +1217,12 @@ impl Settings {
         if style == Style::Pie {
             rows.push(meter_opt!(cx, meters, base, i, per_gpu, false, "meter.per_gpu", |v, set| toggle(cx, v, set)));
             rows.push(meter_opt!(cx, meters, base, i, label_inside, "never".to_string(), "meter.label_inside", |v, set| choice(cx, &v, copy::INSIDE, set)));
+            rows.push(meter_opt!(cx, meters, base, i, slice_glow, String::new(), "meter.slice_glow", |v, set| text(cx, &v, "For example, modified", 180.0, move |s, x| set(s, x))));
+            rows.push(meter_opt!(cx, meters, base, i, slice_glow_extend, 2.5, "meter.slice_glow_extend", |v, set| number(cx, v, 0.0, 8.0, " px", move |s, x| set(s, x))));
+            rows.push(meter_opt!(cx, meters, base, i, slice_glow_radius, 4.0, "meter.slice_glow_radius", |v, set| number(cx, v, 1.0, 24.0, " px", move |s, x| set(s, x))));
+            rows.push(meter_opt!(cx, meters, base, i, slice_glow_strength, 1.0, "meter.slice_glow_strength", |v, set| number(cx, v, 0.1, 1.0, "", move |s, x| set(s, x))));
+            rows.push(meter_opt!(cx, meters, base, i, slice_glow_color, String::new(), "meter.slice_glow_color", |v, set| text(cx, &v, "#FFB74D", 120.0, move |s, x| set(s, x))));
+            rows.push(meter_opt!(cx, meters, base, i, slice_glow_pulse_ms, 0, "meter.slice_glow_pulse_ms", |v, set| number(cx, v as f64, 0.0, 10_000.0, " ms", move |s, x| set(s, x as u64))));
             rows.push(meter_opt!(cx, meters, base, i, pressure, 0.8, "meter.pressure", |v, set| number(cx, v, 0.5, 0.99, "", move |s, x| set(s, x))));
         }
         if style == Style::History {
@@ -1346,6 +1458,7 @@ impl Settings {
                 row("hotmic.low", h.low != d.low, reset!(low), level(cx, h.low, 1.0, mic!(low))),
                 row("hotmic.high", h.high != d.high, reset!(high), level(cx, h.high, 1.0, mic!(high))),
                 row("hotmic.broad_ms", h.broad_ms != d.broad_ms, reset!(broad_ms), number(cx, f64::from(h.broad_ms), 0.0, 60_000.0, "ms", |s, v| mic!(broad_ms)(s, v as u32))),
+                row("hotmic.position", h.position != d.position, reset!(position), choice(cx, &h.position, copy::MIC_POSITIONS, mic!(position))),
                 wide_row("hotmic.ignore", !h.ignore.is_empty(), Some(act(cx, |s| {
                     if let Some(h) = s.m.config.hotmic.as_mut() {
                         h.ignore.clear();
@@ -1354,6 +1467,399 @@ impl Settings {
             ]);
         }
         StackPanel::new().spacing(4.0).children((heading(copy::HOTMIC), group_reset(cx, "Alert", Section::Hotmic, self.m.at_default(Section::Hotmic), cards)))
+    }
+
+    /// What's along the taskbar, in its order: the meters, together; each TV and Twatch TV; and the Hot Mic's label at an end.
+    fn widgets(&self, cx: &Cx) -> View {
+        let meters = &self.m.config.meters;
+        let mut rows: Vec<View> = Vec::new();
+        for (at, w) in self.m.widgets().into_iter().enumerate() {
+            let arrows = (self.m.can_move_widget(at, true), self.m.can_move_widget(at, false));
+            rows.push(match w {
+                Widget::Meters => {
+                    let names: Vec<&str> = self.m.plain_meters().iter().map(|&i| meters[i].label.as_str()).collect();
+                    widget_row(cx, at, "\u{E9D9}", "Meters", &names.join(", "), arrows)
+                }
+                Widget::Screen(i) if model::is_twatch(&meters[i]) => widget_row(cx, at, "\u{E714}", &meters[i].label, "Twatch TV", arrows),
+                Widget::Screen(i) => widget_row(cx, at, "\u{E7F4}", &meters[i].label, "TV", arrows),
+                Widget::Mic => widget_row(cx, at, "\u{E720}", "Hot Mic", if at == 0 { copy::WIDGET_MIC_FIRST } else { copy::WIDGET_MIC_LAST }, arrows),
+            });
+        }
+        let note = |text: &str| TextBlock::new().text(text.to_string()).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7);
+        let mut parts: Vec<View> = vec![heading(copy::WIDGETS)];
+        parts.push(if rows.is_empty() { note(copy::WIDGETS_NONE).into() } else { group("Left to right", rows) });
+        if self.m.config.hotmic.is_none() {
+            parts.push(note(copy::WIDGETS_NO_MIC).into());
+        }
+        parts.push(note(copy::ORDER_NOTE).into());
+        children(StackPanel::new().spacing(4.0), parts)
+    }
+
+    fn tv(&self, cx: &Cx) -> View {
+        let sets = self.m.tvs().len();
+        let tvs = settings_card(
+            Some("\u{E7F4}"),
+            "TVs on your taskbar",
+            &if sets == 1 && pms::tv::console_running() {
+                "You have 1. Removing it quits POOM, and anything you haven't saved is lost.".to_string()
+            } else {
+                format!("You have {sets}. Each has its own channel and remote, and they can all watch the same game.")
+            },
+            None,
+            StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+                Button::new().is_enabled(sets > 0).on_click(act(cx, |s| s.m.remove_tv())).content("Remove one"),
+                Button::new().style(ButtonStyle::Accent).on_click(act(cx, |s| s.m.add_tv())).content("Add a TV"),
+            )),
+        );
+
+        let (intro, shipped) = (self.m.config.tv_intro, self.m.baseline.tv_intro);
+        let mut surf = vec![tvs, row("tv_intro", intro != shipped, Some(act(cx, move |s| s.m.config.tv_intro = shipped)), toggle(cx, intro, |s, v| s.m.config.tv_intro = v))];
+        if intro {
+            let (from, to) = (self.m.config.tv_intro_from, self.m.config.tv_intro_to);
+            let (usual_from, usual_to) = (self.m.baseline.tv_intro_from, self.m.baseline.tv_intro_to);
+            surf.push(row("tv_intro_from", from != usual_from, Some(act(cx, move |s| s.m.config.tv_intro_from = usual_from)), choice(cx, &from.to_string(), &copy::TV_CHANNELS, |s, v| s.m.config.tv_intro_from = v.parse().unwrap_or(pms::tv::INTRO_FROM))));
+            surf.push(row("tv_intro_to", to != usual_to, Some(act(cx, move |s| s.m.config.tv_intro_to = usual_to)), choice(cx, &to.to_string(), &copy::TV_CHANNELS, |s, v| s.m.config.tv_intro_to = v.parse().unwrap_or(pms::tv::INTRO_TO))));
+        }
+
+        let (every, jitter) = (self.m.config.shuffle_seconds, self.m.config.shuffle_jitter);
+        let (usual_every, usual_jitter) = (self.m.baseline.shuffle_seconds, self.m.baseline.shuffle_jitter);
+        let shuffling = vec![
+            row("shuffle_seconds", every != usual_every, Some(act(cx, move |s| s.m.config.shuffle_seconds = usual_every)), number(cx, f64::from(every), 5.0, 3600.0, "s", |s, v| s.m.config.shuffle_seconds = v as u32)),
+            row("shuffle_jitter", jitter != usual_jitter, Some(act(cx, move |s| s.m.config.shuffle_jitter = usual_jitter)), toggle(cx, jitter, |s, v| s.m.config.shuffle_jitter = v)),
+        ];
+        let note = |text: &str| TextBlock::new().text(text.to_string()).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7);
+        StackPanel::new().spacing(4.0).children((heading(copy::TV), group("Your TVs", surf), group("Shuffling", shuffling), note(copy::TV_HELP), note(copy::ORDER_HINT)))
+    }
+
+    /// The console on channel 6: which game is in it, more to get, and whether a TV tuning in switches it on.
+    fn poom(&self, cx: &Cx) -> View {
+        use pms::wads::Wad;
+        let wads = pms::wads::list();
+        let playing = pms::wads::chosen().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        let job = self.m.wad_job.lock().unwrap().clone();
+        let busy = matches!(job, WadJob::Getting(..));
+        let have = |name: &str| wads.iter().any(|w| w.eq_ignore_ascii_case(name));
+
+        // What's in the console: pick one.
+        let mut games: Vec<View> = wads
+            .iter()
+            .map(|file| {
+                let is_on = playing.as_deref() == Some(file.as_str());
+                let (to_play, to_remove) = (file.clone(), file.clone());
+                settings_card(
+                    None,
+                    &pms::wads::title(file),
+                    if is_on { "In the console now, on channel 6" } else { file },
+                    None,
+                    StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+                        Button::new().on_click(act(cx, move |s| s.m.remove_wad(&to_remove))).content("Remove"),
+                        Button::new().is_enabled(!is_on).style(ButtonStyle::Accent).on_click(act(cx, move |s| s.m.choose_wad(&to_play))).content(if is_on { "Playing" } else { "Play this" }),
+                    )),
+                )
+            })
+            .collect();
+        if games.is_empty() {
+            games.push(card(TextBlock::new().text("No games yet. Get one below, and it goes on channel 6.").text_wrapping(TextWrapping::Wrap)));
+        }
+
+        // More games.
+        let mut more: Vec<View> = Vec::new();
+        if !have("freedoom1.wad") {
+            more.push(download_card("Freedoom", "Free, with its own art and levels, under a BSD license. 24 MB.", pms::wads::url(Wad::Freedoom), Button::new().is_enabled(!busy).on_click(act(cx, |s| s.m.get_wad(Wad::Freedoom))).content("Download")));
+        }
+        if !have("doom1.wad") {
+            more.push(download_card("Doom (shareware episode)", "The first episode, unmodified. 1.4 MB. You'll see id Software's license first, and nothing is downloaded unless you agree.", pms::wads::url(Wad::Shareware), Button::new().is_enabled(!busy).on_click(act(cx, |s| s.m.get_wad(Wad::Shareware))).content("Download")));
+        }
+        more.push(settings_card(None, "A game of your own", "Put an IWAD, like doom2.wad, in this folder, and it appears above.", None, Button::new().on_click(act(cx, |s| s.m.show_wads())).content("Open folder")));
+        match job {
+            WadJob::Getting(done, total) => more.push(card(StackPanel::new().spacing(6.0).children((
+                TextBlock::new().text(if total == 0 { "Waiting for you...".to_string() } else { format!("Downloading... {} of {} KB", done / 1024, total / 1024) }),
+                ProgressBar::new().minimum(0.0).maximum(total.max(1) as f64).value(done as f64).is_indeterminate(total == 0),
+            )))),
+            WadJob::Failed(e) => more.push(card(TextBlock::new().text(format!("That didn't work: {e}")).text_wrapping(TextWrapping::Wrap))),
+            WadJob::Idle => {}
+        }
+
+        let auto = self.m.config.console_autostart;
+        let shipped = self.m.baseline.console_autostart;
+        let console = vec![row("console_autostart", auto != shipped, Some(act(cx, move |s| s.m.config.console_autostart = shipped)), toggle(cx, auto, |s, v| s.m.config.console_autostart = v))];
+        let note = |text: &str| TextBlock::new().text(text.to_string()).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7);
+        StackPanel::new().spacing(4.0).children((heading(copy::POOM), missing_part(pms::parts::POOM), group("Which game plays", games), group("The console", console), group("Get more games", more), note(copy::POOM_HELP), note(copy::TV_NOTICE)))
+    }
+
+    /// What's wrong with the settings file, where, and the ways out, above every page.
+    fn problem_banner(&self, cx: &Cx) -> View {
+        let Some(p) = &self.m.problem else { return self.ignored_banner(cx) };
+        let name = self.m.path.file_name().map_or("your settings file".into(), |n| n.to_string_lossy().into_owned());
+        let place = p.line.map_or(String::new(), |n| format!("Line {n}"));
+        let source = p.source.clone().unwrap_or_default();
+        let what = [Some(p.what.clone()), p.hint.clone()].into_iter().flatten().collect::<Vec<_>>().join(" ");
+        let restore = self.m.has_last_good();
+        let lines: [View; 5] = [
+            InfoBar::new().title(format!("There's a problem in {name}")).message("Your file hasn't been changed. You're seeing the defaults here, and nothing is saved until it's fixed. Save the file and this goes away by itself.").severity(InfoBarSeverity::Error).is_open(true).is_closable(false).into(),
+            TextBlock::new().text(place).font_size(12.0).opacity(0.7).into(),
+            TextBlock::new().text(source).text_wrapping(TextWrapping::Wrap).into(),
+            TextBlock::new().text(what).text_wrapping(TextWrapping::Wrap).into(),
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .children((
+                    Button::new().style(ButtonStyle::Accent).on_click(act(cx, |s| s.m.open_config())).content("Open settings file"),
+                    Button::new().on_click(act(cx, |s| s.m.show_config())).content("Show in File Explorer"),
+                    Button::new().is_enabled(restore).on_click(act(cx, |s| s.m.restore_last_good())).content("Restore last working settings"),
+                )),
+        ];
+        Border::new().grid_row(0).padding(Thickness::new(36.0, 16.0, 36.0, 12.0)).content(StackPanel::new().max_width(1000.0).spacing(6.0).children(lines))
+    }
+
+    /// Lines of the file that aren't settings: left out, with everything else loaded, and said in yellow, above every page.
+    fn ignored_banner(&self, cx: &Cx) -> View {
+        let issues = self.m.issues();
+        if issues.is_empty() {
+            return Border::new().grid_row(0).into();
+        }
+        let name = self.m.path.file_name().map_or("your settings file".into(), |n| n.to_string_lossy().into_owned());
+        // A value that couldn't be used is more than a line nobody knows: red, as its setting is.
+        let unusable = self.m.config.issues.iter().any(|e| !pms::config::issue_is_unknown(e));
+        let (title, severity) = if unusable { (format!("Some settings in {name} couldn't be used"), InfoBarSeverity::Error) } else { (format!("Some lines in {name} aren't settings"), InfoBarSeverity::Warning) };
+        let mut lines: Vec<View> = vec![InfoBar::new().title(title).message(copy::IGNORED_LINES).severity(severity).is_open(true).is_closable(false).into()];
+        for (_, on, words) in issues {
+            let page = PAGES.iter().find(|(_, tag, ..)| *tag == on).map_or(Page::General, |(p, ..)| *p);
+            let name = PAGES.iter().find(|(_, tag, ..)| *tag == on).map_or("General", |(.., (name, _))| *name);
+            lines.push(
+                Grid::new()
+                    .columns([GridLength::STAR, GridLength::Auto])
+                    .column_spacing(12.0)
+                    .children((
+                        TextBlock::new().grid_column(0).text(words).text_wrapping(TextWrapping::Wrap).font_size(12.0),
+                        Button::new().grid_column(1).vertical_alignment(VerticalAlignment::Center).on_click(act(cx, move |s| s.page = page)).content(format!("Go to {name}")),
+                    )),
+            );
+        }
+        lines.push(
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .children((Button::new().on_click(act(cx, |s| s.m.open_config())).content("Open settings file"), Button::new().on_click(act(cx, |s| s.m.show_config())).content("Show in File Explorer"))),
+        );
+        Border::new().grid_row(0).padding(Thickness::new(36.0, 16.0, 36.0, 12.0)).content(children(StackPanel::new().max_width(1000.0).spacing(6.0), lines))
+    }
+
+    /// Your favorites, as a list to put in order, or as text. A name only becomes a favorite when it's added or saved: one typed
+    /// halfway could be somebody else's channel.
+    fn favorites(&self, cx: &Cx, list: &[String]) -> View {
+        let note = self.m.favorites_note.clone();
+        let mut parts: Vec<View> = vec![TextBlock::new().text(copy::TWATCH_FAVORITES).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7).into()];
+        if let Some(text) = &self.m.favorites_text {
+            parts.push(TextBlock::new().text(copy::TWATCH_AS_TEXT).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7).into());
+            // A new box is given its text before it's told it may have more than one line, and keeps only the first, which saving
+            // would make your whole list. So it starts empty, and gets the text a moment later, knowing what it is by then.
+            let ready = self.box_ready;
+            let on_change = edit(cx, |s, v: String| {
+                if s.box_ready {
+                    s.m.favorites_text = Some(v);
+                }
+            });
+            parts.push(TextBox::new().text(if ready { text.as_str() } else { "" }).accepts_return(true).text_wrapping(TextWrapping::Wrap).height(220.0).on_text_changed(on_change).into());
+            parts.push(StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+                Button::new().is_enabled(ready).style(ButtonStyle::Accent).on_click(act(cx, |s| s.m.save_favorites_text())).content("Save"),
+                Button::new().on_click(act(cx, |s| s.m.cancel_favorites_text())).content("Cancel"),
+            )));
+        } else {
+            for (i, handle) in list.iter().enumerate() {
+                let swap = move |s: &mut Settings, other: usize| {
+                    let l = &mut s.m.twatch().favorites;
+                    if i < l.len() && other < l.len() {
+                        l.swap(i, other);
+                    }
+                };
+                let line = Grid::new().columns([GridLength::Pixel(28.0), GridLength::Pixel(230.0), GridLength::Auto]).children((
+                    TextBlock::new().grid_column(0).text(format!("{}", i + 1)).opacity(0.6).vertical_alignment(VerticalAlignment::Center),
+                    TextBlock::new().grid_column(1).text(handle.clone()).vertical_alignment(VerticalAlignment::Center),
+                    StackPanel::new().grid_column(2).orientation(Orientation::Horizontal).spacing(8.0).children((
+                        Button::new().is_enabled(i > 0).on_click(act(cx, move |s| swap(s, i.wrapping_sub(1)))).content("\u{25B2}").tooltip("Higher"),
+                        Button::new().is_enabled(i + 1 < list.len()).on_click(act(cx, move |s| swap(s, i + 1))).content("\u{25BC}").tooltip("Lower"),
+                        Button::new()
+                            .on_click(act(cx, move |s| {
+                                let l = &mut s.m.twatch().favorites;
+                                if i < l.len() {
+                                    l.remove(i);
+                                }
+                            }))
+                            .content(SymbolIcon::new().symbol(Symbol::Delete))
+                            .tooltip("Remove"),
+                    )),
+                ));
+                parts.push(line);
+            }
+            parts.push(StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+                text(cx, &self.m.new_favorite, "A channel's name, or a link to it", 258.0, |s, v| s.m.new_favorite = v),
+                Button::new().is_enabled(!self.m.new_favorite.trim().is_empty()).on_click(act(cx, |s| s.m.add_favorite())).content("Add"),
+                Button::new().on_click(act(cx, |s| s.m.favorites_as_text())).content("Edit as text"),
+            )));
+        }
+        if !note.is_empty() {
+            parts.push(TextBlock::new().text(note).text_wrapping(TextWrapping::Wrap).font_size(12.0).foreground(Brush::Theme(ThemeBrush::SystemCritical)).into());
+        }
+        card(children(StackPanel::new().spacing(8.0), parts))
+    }
+
+    fn twatch(&self, cx: &Cx) -> View {
+        let on = self.m.twatch_on();
+        let t = self.m.config.twatch.clone().unwrap_or_default();
+        let job = self.m.streamlink_job.lock().unwrap().clone();
+        let busy = matches!(job, WadJob::Getting(..));
+        let have = pms::streamlink::exe().is_some();
+
+        let set = settings_card(
+            Some("\u{E714}"),
+            "Twatch TV on your taskbar",
+            "A 16:9 set of its own, added at the end: move it on the Widgets page. Sound starts off.",
+            None,
+            toggle(cx, on, |s, v| s.m.set_twatch_on(v)),
+        );
+        let favorites = self.favorites(cx, &t.favorites);
+        // What ships, which Reset puts back.
+        let d = self.m.baseline.twatch.clone().unwrap_or_default();
+        let (top, more) = (d.top_quality.clone(), d.more_sets);
+        let (pictures, notify, reset_top) = (d.pictures.clone(), d.notify_live, top.clone());
+        let (volume, metered) = (d.volume, d.metered_pictures);
+        let reset_pictures = pictures.clone();
+        let (higher, check, check_extra) = (d.higher_favorite.clone(), d.check_seconds, d.check_extra_seconds);
+        let reset_higher = higher.clone();
+        let (media, reset_media) = (d.media_controls.clone(), d.media_controls.clone());
+        let playing = vec![
+            row("twatch.higher_favorite", t.higher_favorite != higher, Some(act(cx, move |s| s.m.twatch().higher_favorite = reset_higher.clone())), choice(cx, &t.higher_favorite, &copy::TWATCH_HIGHER, |s, v| s.m.twatch().higher_favorite = v)),
+            row("twatch.check_seconds", t.check_seconds != check, Some(act(cx, move |s| s.m.twatch().check_seconds = check)), choice(cx, &t.check_seconds.to_string(), &copy::TWATCH_CHECKS, |s, v| s.m.twatch().check_seconds = v.parse().unwrap_or(pms::twatch::live::USUAL_CHECK))),
+            row("twatch.check_extra_seconds", t.check_extra_seconds != check_extra, Some(act(cx, move |s| s.m.twatch().check_extra_seconds = check_extra)), choice(cx, &t.check_extra_seconds.to_string(), &copy::TWATCH_CHECK_EXTRAS, |s, v| s.m.twatch().check_extra_seconds = v.parse().unwrap_or(pms::twatch::live::USUAL_CHECK_EXTRA))),
+            row("twatch.notify_live", t.notify_live != notify, Some(act(cx, move |s| s.m.twatch().notify_live = notify)), toggle(cx, t.notify_live, |s, v| s.m.twatch().notify_live = v)),
+            row("twatch.volume", t.volume != volume, Some(act(cx, move |s| s.m.twatch().volume = volume)), number(cx, f64::from(t.volume), 0.0, 100.0, "%", |s, v| s.m.twatch().volume = v as u32)),
+            row("twatch.metered_pictures", t.metered_pictures != metered, Some(act(cx, move |s| s.m.twatch().metered_pictures = metered)), toggle(cx, t.metered_pictures, |s, v| s.m.twatch().metered_pictures = v)),
+            row("twatch.pictures", t.pictures != pictures, Some(act(cx, move |s| s.m.twatch().pictures = reset_pictures.clone())), choice(cx, &t.pictures, &copy::TWATCH_PICTURES, |s, v| s.m.twatch().pictures = v)),
+            row("twatch.top_quality", t.top_quality != top, Some(act(cx, move |s| s.m.twatch().top_quality = reset_top.clone())), choice(cx, &t.top_quality, &copy::TWATCH_QUALITIES, |s, v| s.m.twatch().top_quality = v)),
+            row("twatch.media_controls", t.media_controls != media, Some(act(cx, move |s| s.m.twatch().media_controls = reset_media.clone())), choice(cx, &t.media_controls, &copy::TWATCH_MEDIA_CONTROLS, |s, v| s.m.twatch().media_controls = v)),
+            row("twatch.more_sets", t.more_sets != more, Some(act(cx, move |s| s.m.twatch().more_sets = more)), choice(cx, &t.more_sets.to_string(), &copy::TWATCH_MORE_SETS, |s, v| s.m.twatch().more_sets = v.parse().unwrap_or(0))),
+        ];
+
+        let note_now = self.m.streamlink_note.lock().unwrap().clone();
+        let mut stream = vec![if have {
+            let version = pms::streamlink::version().unwrap_or_default();
+            settings_card(
+                None,
+                &format!("Streamlink {version} is installed"),
+                &format!("From {}. If it stops working on a live channel and there's a newer one, we'll tell you. Nothing new is installed unless you select Get the newest. {note_now}", pms::streamlink::URL),
+                None,
+                StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+                    Button::new().is_enabled(!busy).on_click(act(cx, |s| s.m.remove_streamlink())).content("Remove"),
+                    Button::new().is_enabled(!busy).on_click(act(cx, |s| s.m.get_streamlink())).content("Get the newest"),
+                )),
+            )
+        } else {
+            settings_card(None, "Streamlink", &format!("Live video needs it, to turn a channel into a stream. About 85 MB: the newest stable build, from {}", pms::streamlink::URL), None, Button::new().is_enabled(!busy).style(ButtonStyle::Accent).on_click(act(cx, |s| s.m.get_streamlink())).content("Download"))
+        }];
+        match job {
+            WadJob::Getting(done, total) => stream.push(card(StackPanel::new().spacing(6.0).children((
+                TextBlock::new().text(format!("Downloading... {} of {} MB", done >> 20, total >> 20)),
+                ProgressBar::new().minimum(0.0).maximum(total.max(1) as f64).value(done as f64).is_indeterminate(total == 0),
+            )))),
+            WadJob::Failed(e) => stream.push(card(TextBlock::new().text(format!("That didn't work: {e}")).text_wrapping(TextWrapping::Wrap))),
+            WadJob::Idle => {}
+        }
+        let note = |text: &str| TextBlock::new().text(text.to_string()).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7);
+        // Favorites and no way to play them: the first thing on the page says so, until there's a way.
+        let stuck = on && !have && !busy && !t.favorites.is_empty() && t.pictures != "always";
+        let (title, words) = copy::TWATCH_NO_STREAMLINK;
+        let warning: View = if stuck { InfoBar::new().title(title).message(words).severity(InfoBarSeverity::Warning).is_open(true).is_closable(false).into() } else { Border::new().into() };
+        StackPanel::new().spacing(4.0).children((heading(copy::TWATCH), missing_part(pms::parts::TWATCH), warning, group("Streamlink", stream), group("Your Twatch TV", vec![set]), group("Favorites", vec![favorites]), group_reset(cx, "How it plays", Section::Twatch, self.m.at_default(Section::Twatch), playing), note(copy::TWATCH_NETWORK), note(copy::ORDER_HINT), note(copy::TWATCH_NOTICE)))
+    }
+
+    /// The proxy, and what goes through it: every way PimpMyShell uses the network, each with its switch.
+    fn network(&self, cx: &Cx) -> View {
+        use pms::net::Use;
+        let n = self.m.config.network.clone().unwrap_or_default();
+        let typed = self.m.proxy_text.trim().to_string();
+        let wrong = (!typed.is_empty()).then(|| pms::net::check(&typed).err()).flatten();
+        // While the file won't load there's no proxy to compare with: only one typed in can replace it.
+        let applied = if n.proxy == pms::config::NETWORK_UNREAD { "" } else { n.proxy.as_str() };
+        let pending = typed != applied;
+        let proxy_card = settings_card(
+            Some("\u{E968}"),
+            copy::PROXY.0,
+            copy::PROXY.1,
+            Some("proxy"),
+            StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+                text(cx, &self.m.proxy_text, "socks5h://127.0.0.1:9050", 250.0, |s, v| s.m.proxy_text = v),
+                Button::new().style(ButtonStyle::Accent).is_enabled(pending && wrong.is_none()).on_click(act(cx, |s| s.m.apply_proxy())).content(if typed.is_empty() && pending { "Remove" } else { "Apply" }),
+                Button::new().is_enabled(!applied.is_empty() && !pending).on_click(act(cx, |s| s.m.test_proxy())).content("Test"),
+            )),
+        );
+        let mut proxy = vec![proxy_card];
+        if let Some(e) = pms::config::network_trouble(&self.m.path) {
+            let file = pms::config::network_path(&self.m.path);
+            proxy.insert(0, InfoBar::new().title("Your network settings didn't load").message(copy::NETWORK_UNREAD).severity(InfoBarSeverity::Error).is_open(true).is_closable(false).into());
+            proxy.insert(1, TextBlock::new().text(pms::problem::Problem::of(&file, &e).words()).text_wrapping(TextWrapping::Wrap).font_size(12.0).margin(Thickness::new(4.0, 2.0, 4.0, 2.0)).into());
+            proxy.insert(2, Button::new().on_click(act(cx, |s| s.m.show_network())).content("Show in File Explorer"));
+        }
+        if !n.proxy.is_empty() && !self.m.uses_proxy() {
+            proxy.push(InfoBar::new().title(copy::PROXY_UNUSED.0).message(copy::PROXY_UNUSED.1).severity(InfoBarSeverity::Warning).is_open(true).is_closable(false).into());
+        }
+        let said = self.m.proxy_note.lock().unwrap().clone();
+        for (line, bad) in [(wrong.unwrap_or_default(), true), (said, false)] {
+            if !line.is_empty() {
+                let words = TextBlock::new().text(line).text_wrapping(TextWrapping::Wrap).font_size(12.0).margin(Thickness::new(4.0, 2.0, 4.0, 0.0));
+                proxy.push(if bad { words.foreground(Brush::Theme(ThemeBrush::SystemCritical)).into() } else { words.opacity(0.8).into() });
+            }
+        }
+        proxy.push(settings_card(None, copy::PROXY_ISOLATE.0, copy::PROXY_ISOLATE.1, Some("isolate"), toggle(cx, n.isolate, |s, v| s.m.network().isolate = v)));
+        proxy.push(InfoBar::new().title("Nothing is airtight").message(copy::PROXY_LIMITS).severity(InfoBarSeverity::Informational).is_open(true).is_closable(false).into());
+        let on = |what: Use| match what {
+            Use::Live => n.live_checks,
+            Use::Streams | Use::Video => n.streams,
+            Use::Updates => n.updates,
+            Use::Downloads => n.downloads,
+        };
+        let all_on = pms::net::USES.iter().all(|(what, ..)| on(*what));
+        let head = Grid::new().columns([GridLength::STAR, GridLength::Auto]).margin(Thickness::new(1.0, 24.0, 0.0, 2.0)).children((
+            TextBlock::new().grid_column(0).text("What PimpMyShell uses the network for").font_weight(FontWeight::SEMI_BOLD).vertical_alignment(VerticalAlignment::Center),
+            Button::new().grid_column(1).on_click(act(cx, move |s| s.m.all_through_proxy(!all_on))).content(if all_on { "Turn off all" } else { "Turn on all" }),
+        ));
+        let notes = self.m.use_notes.lock().unwrap().clone();
+        let mut uses: Vec<View> = vec![head];
+        // Grouped by what they're part of, in the order they first come.
+        let mut groups: Vec<&str> = Vec::new();
+        for (_, _, who, _) in &pms::net::USES {
+            if !groups.contains(who) {
+                groups.push(who);
+            }
+        }
+        for who in groups {
+            uses.push(TextBlock::new().text(who).font_size(13.0).opacity(0.8).margin(Thickness::new(1.0, 12.0, 0.0, 2.0)).into());
+            for (at, (what, title, _, words)) in pms::net::USES.iter().enumerate().filter(|(_, u)| u.2 == who) {
+                let what = *what;
+                let switch = toggle(cx, on(what), move |s, v| {
+                    let n = s.m.network();
+                    match what {
+                        Use::Live => n.live_checks = v,
+                        Use::Streams | Use::Video => n.streams = v,
+                        Use::Updates => n.updates = v,
+                        Use::Downloads => n.downloads = v,
+                    }
+                });
+                let controls = StackPanel::new().orientation(Orientation::Horizontal).spacing(10.0).children((
+                    Button::new().is_enabled(notes[at] != "Trying...").on_click(act(cx, move |s| s.m.try_use(at))).content("Test"),
+                    TextBlock::new().text("Use proxy").opacity(if n.proxy.is_empty() { 0.5 } else { 0.8 }).vertical_alignment(VerticalAlignment::Center),
+                    switch,
+                ));
+                uses.push(settings_card(None, title, words, None, controls));
+                if !notes[at].is_empty() {
+                    let bad = notes[at].starts_with("That didn't") || notes[at].starts_with("Streamlink isn't");
+                    let line = TextBlock::new().text(notes[at].clone()).text_wrapping(TextWrapping::Wrap).font_size(12.0).margin(Thickness::new(4.0, 0.0, 4.0, 4.0));
+                    uses.push(if bad { line.foreground(Brush::Theme(ThemeBrush::SystemCritical)).into() } else { line.opacity(0.8).into() });
+                }
+            }
+        }
+        let note = |text: &str| TextBlock::new().text(text.to_string()).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7);
+        StackPanel::new().spacing(4.0).children((heading(copy::NETWORK), group("Proxy", proxy), children(StackPanel::new().spacing(4.0), uses), note(copy::PROXY_STRICT), note(copy::NETWORK_ELSE)))
     }
 
     fn toasts(&self, cx: &Cx) -> View {
@@ -1408,6 +1914,23 @@ impl Settings {
                     }),
                 ),
                 row(
+                    "toasts.position",
+                    t.position != d.position,
+                    {
+                        let to = d.position.clone();
+                        Some(act(cx, move |s| {
+                            if let Some(t) = s.m.config.toasts.as_mut() {
+                                t.position = to.clone();
+                            }
+                        }))
+                    },
+                    choice(cx, &t.position, copy::TOAST_POSITIONS, |s, v| {
+                        if let Some(t) = s.m.config.toasts.as_mut() {
+                            t.position = v;
+                        }
+                    }),
+                ),
+                row(
                     "toasts.style",
                     t.style != d.style,
                     {
@@ -1447,6 +1970,7 @@ fn style_named(name: &str) -> Option<Style> {
         "engines" => Style::Engines,
         "disks" => Style::Disks,
         "nics" => Style::Nics,
+        "screen" => Style::Screen,
         _ => return None,
     })
 }
@@ -1561,6 +2085,10 @@ pub struct Question {
     pub check_note: String,
     /// Exact details, each a label and a value: with these it's a question about something specific, drawn as such.
     pub rows: Vec<(String, String)>,
+    /// Facts that go with an ordinary question, each a label and a value, grouped on a card under its words.
+    pub details: Vec<(String, String)>,
+    /// A last line, quieter than the rest.
+    pub note: String,
 }
 
 /// See `Question::check`.
@@ -1569,7 +2097,7 @@ const CHECKED: i32 = 16;
 impl Question {
     /// From `--ask`'s arguments.
     pub fn from_args(args: &[String]) -> Question {
-        let mut q = Question { heading: String::new(), text: String::new(), link: None, buttons: Vec::new(), check: None, check_note: String::new(), rows: Vec::new() };
+        let mut q = Question { heading: String::new(), text: String::new(), link: None, buttons: Vec::new(), check: None, check_note: String::new(), rows: Vec::new(), details: Vec::new(), note: String::new() };
         let mut it = args.iter();
         while let Some(a) = it.next() {
             match a.as_str() {
@@ -1580,6 +2108,12 @@ impl Question {
                         q.rows.push((label.clone(), value.clone()));
                     }
                 }
+                "--detail" => {
+                    if let (Some(label), Some(value)) = (it.next(), it.next()) {
+                        q.details.push((label.clone(), value.clone()));
+                    }
+                }
+                "--note" => q.note = it.next().cloned().unwrap_or_default(),
                 "--check-note" => q.check_note = it.next().cloned().unwrap_or_default(),
                 "--text" => q.text = it.next().cloned().unwrap_or_default(),
                 "--link" => q.link = it.next().cloned(),
@@ -1602,23 +2136,51 @@ pub fn ask(q: Question) -> i32 {
     }
 }
 
-/// Shows the welcome, for the settings at `path`: the exit code says only that it ran (255 where there's no WinUI 3).
-pub fn welcome(path: PathBuf) -> i32 {
+/// Shows the welcome, for the settings at `path`: the exit code says only that it ran (255 where there's no WinUI 3). `news`: only
+/// what's new since the last version, for somebody who's been here before.
+pub fn welcome(path: PathBuf, news: bool) -> i32 {
+    WHATS_NEW.store(news, std::sync::atomic::Ordering::Relaxed);
     match App::run_component::<Welcome>(path) {
         Ok(()) => 0,
         Err(_) => 255,
     }
 }
 
+/// The welcome is only what's new.
+static WHATS_NEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The welcome's pages.
+#[derive(Clone, Copy, PartialEq)]
+enum Stop {
+    Hello,
+    Style,
+    Confirm,
+    Tv,
+    Poom,
+    Twatch,
+    Fresh,
+    /// What's new, for somebody who's been here before.
+    News,
+}
+
+/// A first run's pages, and what's new since the version before for everybody else.
+const FIRST_RUN: [Stop; 7] = [Stop::Hello, Stop::Style, Stop::Confirm, Stop::Tv, Stop::Poom, Stop::Twatch, Stop::Fresh];
+const NEWS: [Stop; 4] = [Stop::News, Stop::Tv, Stop::Poom, Stop::Twatch];
+
 /// The first run: a few choices, with what they look like, in the settings' clothes. Nothing's kept until the end, so
 /// closing it leaves the defaults.
 struct Welcome {
     m: Model,
+    pages: &'static [Stop],
     step: usize,
+    /// There's a TV.
+    tv: bool,
     style: String,
     confirm: String,
     updates: bool,
     startup: bool,
+    autostart: bool,
+    twatch: bool,
     dollars: Layer,
     panel: ElementRef<SwapChainPanel>,
 }
@@ -1631,9 +2193,12 @@ enum WelcomeMsg {
     Confirm(String),
     Updates(bool),
     Startup(bool),
+    Autostart(bool),
+    Twatch(bool),
+    Tv(bool),
+    Get(pms::wads::Wad),
+    ShowWads,
 }
-
-const WELCOME_STEPS: usize = 4;
 
 fn welcome_tick(context: &ComponentContext<Welcome>) {
     context.spawn_background(|_| {
@@ -1650,8 +2215,15 @@ impl Component for Welcome {
         welcome_tick(context);
         let m = Model::open(path.clone());
         let toasts = m.config.toasts.clone().unwrap_or_default();
-        let (updates, startup) = (m.config.update_check.unwrap_or(true), true);
-        Welcome { m, step: 0, style: toasts.style, confirm: toasts.confirm_clicks, updates, startup, dollars: Layer::default(), panel: ElementRef::new() }
+        let news = WHATS_NEW.load(std::sync::atomic::Ordering::Relaxed);
+        // A first run (settings all as shipped), and what's new, offer a Twatch TV; asked again later, it says whether there is one.
+        let twatch = m.twatch_on() || pms::config::untouched(&m.config) || news;
+        let (updates, startup, autostart) = (m.config.update_check.unwrap_or(true), true, m.config.console_autostart);
+        // A first run suggests not asking; asked again later, it says what you chose.
+        let confirm = if pms::config::untouched(&m.config) { "off".to_string() } else { toasts.confirm_clicks };
+        let pages: &'static [Stop] = if news { &NEWS } else { &FIRST_RUN };
+        let tv = !m.tvs().is_empty();
+        Welcome { m, pages, step: 0, tv, style: toasts.style, confirm, updates, startup, autostart, twatch, dollars: Layer::default(), panel: ElementRef::new() }
     }
 
     fn update(&mut self, msg: WelcomeMsg, context: &ComponentContext<Self>) {
@@ -1661,32 +2233,41 @@ impl Component for Welcome {
                 welcome_tick(context);
             }
             WelcomeMsg::Back => self.step = self.step.saturating_sub(1),
-            WelcomeMsg::Next if self.step + 1 < WELCOME_STEPS => self.step += 1,
+            WelcomeMsg::Next if self.step + 1 < self.pages.len() => self.step += 1,
             WelcomeMsg::Next => self.finish(),
             WelcomeMsg::Style(v) => self.style = v,
             WelcomeMsg::Confirm(v) => self.confirm = v,
             WelcomeMsg::Updates(v) => self.updates = v,
             WelcomeMsg::Startup(v) => self.startup = v,
+            WelcomeMsg::Autostart(v) => self.autostart = v,
+            WelcomeMsg::Twatch(v) => self.twatch = v,
+            WelcomeMsg::Tv(v) => self.tv = v,
+            WelcomeMsg::Get(wad) => self.m.get_wad(wad),
+            WelcomeMsg::ShowWads => self.m.show_wads(),
         }
     }
 
     fn view(&self, _: &PathBuf, cx: &mut ViewContext<Self>) -> View {
-        cx.window_title("Welcome to PimpMyShell");
-        let visuals = WindowVisuals::new().backdrop(WindowBackdrop::Acrylic).client_size(640.0, 600.0);
+        let news = self.pages[0] == Stop::News;
+        cx.window_title(if news { "What's new in PimpMyShell" } else { "Welcome to PimpMyShell" });
+        let visuals = WindowVisuals::new().backdrop(WindowBackdrop::Acrylic).client_size(680.0, 720.0);
         cx.window_visuals(match icon() {
             Some(icon) => visuals.icon(icon),
             None => visuals,
         });
-        self.dollars.set_pane(0);
-        let (title, help, body): (&str, &str, View) = match self.step {
-            0 => ("Welcome to the good life", "Three quick choices, and your taskbar is pimped. You can change all of it later in Settings.", Image::new().source_data(EncodedImage::new(LOGO)).width(160.0).height(160.0).horizontal_alignment(HorizontalAlignment::Left).into()),
-            1 => ("To pimp, or not to pimp?", "Notifications show up in your taskbar. Here's how they can look.", {
+        // The first page shows the bills as they are; the rest, where there's reading to do, has them blurred.
+        self.dollars.set_pane(if self.step == 0 { u32::MAX } else { 0 });
+        let page = self.pages.get(self.step).copied().unwrap_or(Stop::Fresh);
+        let (title, help, body): (&str, &str, View) = match page {
+            Stop::News => (copy::WHATS_NEW.0, copy::WHATS_NEW.1, Image::new().source_data(EncodedImage::new(LOGO)).width(160.0).height(160.0).horizontal_alignment(HorizontalAlignment::Left).into()),
+            Stop::Hello => ("Welcome to the good life", "A few quick stops, and your taskbar is pimped. You can change all of it later in Settings.", Image::new().source_data(EncodedImage::new(LOGO)).width(160.0).height(160.0).horizontal_alignment(HorizontalAlignment::Left).into()),
+            Stop::Style => ("To pimp, or not to pimp?", "Notifications show up in your taskbar. Here's how they can look.", {
                 let pick = |value: &str, name: &str, words: &str, pimped: bool| {
                     option(cx, self.style == value, name, words, Some(sample(pimped)), WelcomeMsg::Style(value.to_string()))
                 };
                 children(StackPanel::new().spacing(10.0), vec![pick("standard", "Standard", "Clean, like the rest of Windows", false), pick("pimped", "Pimped", "Gold, with a sheen that sweeps across", true)])
             }),
-            2 => ("Look before you leap?", "Selecting a notification can open programs and links. We can show you exactly what first.", {
+            Stop::Confirm => ("Inspect before you dip?", "Selecting a notification can open programs and links. We can show you exactly what first.", {
                 let pick = |value: &str, name: &str, words: &str| option(cx, self.confirm == value, name, words, None, WelcomeMsg::Confirm(value.to_string()));
                 children(
                     StackPanel::new().spacing(10.0),
@@ -1697,9 +2278,23 @@ impl Component for Welcome {
                     ],
                 )
             }),
-            _ => ("Stay fresh", "Last thing. Both are easy to change later.", {
+            Stop::Tv => {
+                let on = settings_card(None, copy::WELCOME_TV_ON.0, copy::WELCOME_TV_ON.1, None, switch(self.tv, cx.callback(WelcomeMsg::Tv)));
+                (copy::WELCOME_TV.0, copy::WELCOME_TV.1, points(&copy::WELCOME_TV_POINTS, vec![on]))
+            }
+            Stop::Poom => (copy::WELCOME_POOM.0, copy::WELCOME_POOM.1, self.poom(cx)),
+            Stop::Twatch => {
+                let words = match (self.no_channels(), self.twatch) {
+                    (true, true) => copy::WELCOME_TWATCH_NEXT,
+                    (true, false) => copy::WELCOME_TWATCH_OFF,
+                    (false, _) => copy::WELCOME_TWATCH_ON.1,
+                };
+                let on = settings_card(None, copy::WELCOME_TWATCH_ON.0, words, None, switch(self.twatch, cx.callback(WelcomeMsg::Twatch)));
+                (copy::WELCOME_TWATCH.0, copy::WELCOME_TWATCH.1, points(&copy::WELCOME_TWATCH_POINTS, vec![on]))
+            }
+            Stop::Fresh => ("Stay fresh", "Last thing. Both are easy to change later.", {
                 let line = |title: &str, words: &str, on: bool, msg: fn(bool) -> WelcomeMsg| {
-                    settings_card(None, title, words, None, ToggleSwitch::new().is_on(on).on_toggled(cx.callback(msg)))
+                    settings_card(None, title, words, None, switch(on, cx.callback(msg)))
                 };
                 children(
                     StackPanel::new().spacing(10.0),
@@ -1710,24 +2305,27 @@ impl Component for Welcome {
                 )
             }),
         };
-        let last = self.step + 1 == WELCOME_STEPS;
+        let last = self.step + 1 == self.pages.len();
         let next = match self.step {
             0 => "Let's ride",
+            _ if last && news => "Done",
             _ if last => "Get pimped",
             _ => "Next",
         };
-        let dots = (0..WELCOME_STEPS).map(|i| {
+        let dots = (0..self.pages.len()).map(|i| {
             let dot = Border::new().width(8.0).height(8.0).corner_radius(CornerRadius::uniform(4.0)).background(Brush::Theme(ThemeBrush::PrimaryText)).opacity(if i == self.step { 0.9 } else { 0.25 });
             KeyedView::new(i.to_string(), dot)
         });
         let back = Button::new().grid_column(0).is_enabled(self.step > 0).opacity(if self.step > 0 { 1.0 } else { 0.0 }).min_width(90.0).on_click(cx.callback(|()| WelcomeMsg::Back)).content("Back");
-        let forward = Button::new().grid_column(2).style(ButtonStyle::Accent).min_width(120.0).on_click(cx.callback(|()| WelcomeMsg::Next)).content(next);
+        // Going on, or closing, would take a download with it.
+        let getting = matches!(*self.m.wad_job.lock().unwrap(), WadJob::Getting(..));
+        let forward = Button::new().grid_column(2).style(ButtonStyle::Accent).min_width(120.0).is_enabled(!getting).on_click(cx.callback(|()| WelcomeMsg::Next)).content(next);
         let page = Grid::new().rows([GridLength::Auto, GridLength::STAR, GridLength::Auto]).margin(Thickness::new(44.0, 40.0, 44.0, 28.0)).row_spacing(24.0).children((
             StackPanel::new().grid_row(0).spacing(8.0).children((
                 TextBlock::new().text(title).font_size(32.0).font_weight(FontWeight::SEMI_BOLD).text_wrapping(TextWrapping::Wrap),
                 TextBlock::new().text(help).font_size(15.0).opacity(0.75).text_wrapping(TextWrapping::Wrap),
             )),
-            Border::new().grid_row(1).content(body),
+            ScrollViewer::new().grid_row(1).vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(body),
             Grid::new().grid_row(2).columns([GridLength::Auto, GridLength::STAR, GridLength::Auto]).children((
                 back,
                 StackPanel::new().grid_column(1).orientation(Orientation::Horizontal).spacing(8.0).horizontal_alignment(HorizontalAlignment::Center).vertical_alignment(VerticalAlignment::Center).keyed_children(dots),
@@ -1738,17 +2336,78 @@ impl Component for Welcome {
     }
 }
 
+/// What's worth knowing about something, a card each, and then `after`.
+fn points(items: &[(&str, &str, &str)], after: Vec<View>) -> View {
+    let cards = items.iter().map(|(glyph, title, words)| settings_card(Some(glyph), title, words, None, TextBlock::new()));
+    children(StackPanel::new().spacing(8.0), cards.chain(after).collect())
+}
+
 impl Welcome {
-    /// Keeps the choices, and that's that.
+    /// The choices of game: one to fetch now, or the place to put your own.
+    fn poom(&self, cx: &mut ViewContext<Self>) -> View {
+        use pms::wads::Wad;
+        let wads = pms::wads::list();
+        let have = |name: &str| wads.iter().any(|w| w.eq_ignore_ascii_case(name));
+        let job = self.m.wad_job.lock().unwrap().clone();
+        let busy = matches!(job, WadJob::Getting(..));
+        let get = |cx: &ViewContext<Self>, wad: Wad, words: &str, owned: bool| -> View {
+            if owned {
+                TextBlock::new().text("You've got it").vertical_alignment(VerticalAlignment::Center).opacity(0.7).into()
+            } else {
+                Button::new().is_enabled(!busy).on_click(cx.callback(move |()| WelcomeMsg::Get(wad))).content(words.to_string())
+            }
+        };
+        let mut cards = vec![
+            download_card("Freedoom", "Free, with its own art and levels. 24 MB.", pms::wads::url(Wad::Freedoom), get(cx, Wad::Freedoom, "Download", have("freedoom1.wad"))),
+            download_card("Doom (shareware episode)", "The real first episode, unmodified. 1.4 MB. You'll see id Software's license first.", pms::wads::url(Wad::Shareware), get(cx, Wad::Shareware, "Download", have("doom1.wad"))),
+            settings_card(None, "A game of your own", "Own the real thing? Drop an IWAD, like doom2.wad, in this folder", None, Button::new().on_click(cx.callback(|()| WelcomeMsg::ShowWads)).content("Open folder")),
+        ];
+        match job {
+            WadJob::Getting(done, total) => cards.push(card(StackPanel::new().spacing(6.0).children((
+                TextBlock::new().text(if total == 0 { "Waiting for you...".to_string() } else { format!("Downloading... {} of {} KB", done / 1024, total / 1024) }),
+                ProgressBar::new().minimum(0.0).maximum(total.max(1) as f64).value(done as f64).is_indeterminate(total == 0),
+            )))),
+            WadJob::Failed(e) => cards.push(card(TextBlock::new().text(format!("That didn't work: {e}")).text_wrapping(TextWrapping::Wrap))),
+            WadJob::Idle => {}
+        }
+        let (title, words) = copy::setting("console_autostart");
+        cards.push(settings_card(None, title, words, None, switch(self.autostart, cx.callback(WelcomeMsg::Autostart))));
+        cards.push(TextBlock::new().text(copy::TV_NOTICE).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7).margin(Thickness::new(4.0, 6.0, 4.0, 0.0)).into());
+        // This one scrolls: room for the scroll bar, so that it covers nothing.
+        children(StackPanel::new().spacing(8.0).margin(Thickness::new(0.0, 0.0, 14.0, 0.0)), cards)
+    }
+
+    /// There are no Twatch TV channels yet.
+    fn no_channels(&self) -> bool {
+        self.m.config.twatch.as_ref().is_none_or(|t| t.favorites.is_empty())
+    }
+
+    /// Keeps the choices, and that's that. What's new keeps only what it asked about. A Twatch TV with no channels has nothing to
+    /// show, so that's where Settings opens next.
     fn finish(&mut self) {
-        let toasts = self.m.config.toasts.get_or_insert_with(Toasts::default);
-        toasts.style = self.style.clone();
-        toasts.confirm_clicks = self.confirm.clone();
-        self.m.config.update_check = Some(self.updates);
-        if self.startup != self.m.autostarts() {
-            self.m.set_autostart(self.startup);
+        let next = self.twatch && self.no_channels();
+        if !self.pages.contains(&Stop::News) {
+            let toasts = self.m.config.toasts.get_or_insert_with(Toasts::default);
+            toasts.style = self.style.clone();
+            toasts.confirm_clicks = self.confirm.clone();
+            self.m.config.update_check = Some(self.updates);
+            if self.startup != self.m.autostarts() {
+                self.m.set_autostart(self.startup);
+            }
+        }
+        self.m.config.console_autostart = self.autostart;
+        if self.twatch != self.m.twatch_on() {
+            self.m.set_twatch_on(self.twatch);
+        }
+        match (self.tv, self.m.tvs().is_empty()) {
+            (true, true) => self.m.add_tv(),
+            (false, false) => self.m.remove_tvs(),
+            _ => {}
         }
         self.m.save_now();
+        if next && let Ok(me) = std::env::current_exe() {
+            let _ = std::process::Command::new(me).arg("--page=twatch").arg(&self.m.path).spawn();
+        }
         std::process::exit(0);
     }
 }
@@ -1918,7 +2577,10 @@ impl Component for Asking {
         }
         // Sized for its text (a line holds about 70 characters at this width), as a dialog is.
         let lines: usize = q.text.split('\n').map(|l| l.chars().count() / 70 + 1).sum();
-        let height = 150.0 + lines as f64 * 20.0 + if q.link.is_some() { 36.0 } else { 0.0 } + if q.check.is_some() { 44.0 } else { 0.0 };
+        let detail_lines: usize = q.details.iter().map(|(_, value)| value.chars().count() / 62 + 1).sum();
+        let details_h = if q.details.is_empty() { 0.0 } else { 16.0 + q.details.len() as f64 * 18.0 + detail_lines as f64 * 19.0 };
+        let note_h = if q.note.is_empty() { 0.0 } else { 8.0 + (q.note.chars().count() / 80 + 1) as f64 * 17.0 };
+        let height = 150.0 + lines as f64 * 20.0 + details_h + note_h + if q.link.is_some() { 36.0 } else { 0.0 } + if q.check.is_some() { 44.0 } else { 0.0 };
         cx.window_title("PimpMyShell");
         let visuals = WindowVisuals::new().backdrop(WindowBackdrop::Mica).client_size(520.0, height.min(640.0));
         cx.window_visuals(match icon() {
@@ -1928,6 +2590,29 @@ impl Component for Asking {
         let mut body: Vec<View> = vec![TextBlock::new().text(q.heading.clone()).font_size(20.0).font_weight(FontWeight::SEMI_BOLD).text_wrapping(TextWrapping::Wrap).into()];
         for paragraph in q.text.split("\n\n") {
             body.push(TextBlock::new().text(paragraph).text_wrapping(TextWrapping::Wrap).is_text_selection_enabled(true).into());
+        }
+        // The facts, together on a card of their own: each a small label over its value.
+        if !q.details.is_empty() {
+            let rows = q.details.iter().enumerate().map(|(i, (label, value))| {
+                KeyedView::new(
+                    i.to_string(),
+                    StackPanel::new().spacing(2.0).children((
+                        TextBlock::new().text(label.clone()).font_size(11.0).opacity(0.6),
+                        TextBlock::new().text(value.clone()).font_size(13.0).text_wrapping(TextWrapping::Wrap).is_text_selection_enabled(true),
+                    )),
+                )
+            });
+            body.push(
+                Border::new()
+                    .corner_radius(CornerRadius::uniform(8.0))
+                    .background(Brush::Theme(ThemeBrush::CardBackground))
+                    .border_brush(Brush::Theme(ThemeBrush::CardStroke))
+                    .border_thickness(Thickness::uniform(1.0))
+                    .content(StackPanel::new().spacing(10.0).margin(Thickness::xy(14.0, 12.0)).keyed_children(rows)),
+            );
+        }
+        if !q.note.is_empty() {
+            body.push(TextBlock::new().text(q.note.clone()).font_size(12.0).opacity(0.7).text_wrapping(TextWrapping::Wrap).into());
         }
         if let Some(link) = &q.link
             && let Ok(button) = HyperlinkButton::new().navigate_uri(link.clone())
@@ -1943,8 +2628,9 @@ impl Component for Asking {
             let style = if i == 0 { ButtonStyle::Accent } else { ButtonStyle::Default };
             KeyedView::new(i.to_string(), Button::new().style(style).min_width(110.0).on_click(cx.callback(move |()| AskMsg::Pressed(i))).content(label.clone()))
         });
+        // Its words scroll when there are more than fit, a license say: the buttons stay where they are.
         Grid::new().rows([GridLength::STAR, GridLength::Auto]).children((
-            children(StackPanel::new().grid_row(0).spacing(12.0).margin(Thickness::new(24.0, 20.0, 24.0, 12.0)), body),
+            ScrollViewer::new().grid_row(0).vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(children(StackPanel::new().spacing(12.0).margin(Thickness::new(24.0, 20.0, 24.0, 12.0)), body)),
             Border::new().grid_row(1).padding(Thickness::xy(24.0, 16.0)).background(Brush::Theme(ThemeBrush::SolidBackground)).content(
                 StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).horizontal_alignment(HorizontalAlignment::Right).keyed_children(buttons),
             ),

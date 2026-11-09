@@ -150,7 +150,7 @@ impl Watchdog {
     }
 
     pub fn bench(&mut self, why: String) -> String {
-        log(format!("watchdog: {why}; leaving explorer alone until PimpMyShell restarts (or the tray's Retry)"));
+        log(format!("watchdog: {why}; leaving Explorer alone until Retry or a restart"));
         self.benched = Some(why.clone());
         why
     }
@@ -176,7 +176,7 @@ impl Watchdog {
                 self.pending = Some(Crash { app, pid, code, at: Instant::now() });
                 self.restart_at = Some(Instant::now() + RESTART_GRACE);
             } else {
-                log(format!("watchdog: {app} (pid {pid}) was ended (exit code {code}); not starting it again"));
+                log(format!("watchdog: {app} (pid {pid}) was closed (exit code {code}); not starting it again"));
             }
         }
         if let Some(c) = &self.pending {
@@ -196,7 +196,7 @@ impl Watchdog {
                 // Windows' own error mode, not ours: a daemon started from a shell that turns crash reporting off (Git
                 // Bash does) would pass that on, and a crash of the explorer we started would go unrecorded.
                 if let Err(e) = std::process::Command::new(&self.shell).creation_flags(CREATE_DEFAULT_ERROR_MODE.0).spawn() {
-                    log(format!("watchdog: couldn't start explorer: {e}"));
+                    log(format!("watchdog: couldn't start Explorer: {e}"));
                 }
             }
         }

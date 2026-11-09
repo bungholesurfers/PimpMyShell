@@ -34,6 +34,24 @@ theme = "auto"
 # (WARP), which Windows keeps for when there's no GPU driver, and whose "GPU" work is really CPU work.
 # software_gpus = true
 
+# A TV arriving on channel 6, even by shuffling, switches its console on (the default). Off, channel 6 shows no signal until
+# you switch the console on yourself.
+# console_autostart = false
+
+# A TV starting up (PimpMyShell starting, or a TV added) flips up through its channels, from tv_intro_from to tv_intro_to,
+# where it stays: by default from Captain Midnight's 1295, round to the console on channel 6. Off, it comes on where it was left.
+# tv_intro      = false
+# tv_intro_from = 1295
+# tv_intro_to   = 6
+
+# How long a shuffling TV stays on a channel, for all of them: 5 to 3600 seconds. Each is late by its own random amount, up to a
+# quarter of that, unless shuffle_jitter is off, when they all change together.
+# shuffle_seconds = 30
+# shuffle_jitter  = false
+
+# A notification when Explorer has at least 10 old copies of our DLL and 300 MB of memory. Explorer only restarts if you ask.
+# notify_explorer = false
+
 # Software update. update_check: whether the daemon checks GitHub for a newer version by itself - a while
 # after each start (1 to 30 minutes), then every day or two - and downloads it; it installs only once you
 # say so. On by default, but the first run asks you first (a minute in), and checks nothing until you
@@ -65,6 +83,39 @@ low       = 0.25      # opacity range of the breath
 high      = 0.7
 broad_ms  = 5000      # whole-taskbar warning first, then it settles around the "in use by" label
 ignore    = []        # e.g. ["obs64.exe"]: substrings of the app's consent-store key
+position  = "tray"    # where the "in use by" label goes: "tray", after the meters, or "start", before them
+
+# [twatch]: a Twatch TV plays your favorite Twitch channels. It's off until there's a meter for it, which Settings > Twatch TV adds:
+#
+#   [[meter]]
+#   label = "Twatch TV"
+#   style = "screen"
+#   set   = "twatch"
+#
+#   [twatch]
+#   (your favorites live beside this file, in pms-twatch-watchlist.txt: one channel per line, best first)
+#   more_sets   = 0                            # up to 2 more sets by themselves, while more favorites are live
+#   pictures    = "low_memory"                 # stills in place of video: "never", "initial" (until a set is clicked), "low_memory" or "always"
+#   notify_live = true                         # a notification when a favorite goes live
+#   volume      = 100                          # how loud every set is, 0 to 100, when its sound is on
+#   metered_pictures = true                    # stills in place of video while Windows says the connection is metered
+#   top_quality = "480p"                       # "1080p60", "720p60", "720p", "480p" or "360p"; it goes lower by itself
+#   higher_favorite = "switch"                 # a higher favorite going live: "switch" to it, or "stay" until this one ends
+#   check_seconds = 600                        # how often each favorite is looked at: in no order, spread out, never two at once
+#   check_extra_seconds = 300                  # plus a random wait of up to this for each, picked afresh each time
+#   media_controls = "never"                   # in Windows' media controls (volume flyout, lock screen, media keys): "never", "unmuted" or "playing"
+
+# The network settings live in a file of their own beside this one, pms-network.toml, so that this file can be shared without
+# them: a SOCKS5 proxy, and what goes through it (Settings > Network says what each sends where). Nothing goes through it until
+# it's switched on, and whatever's switched on and can't reach the proxy fails, rather than go without it. In pms-network.toml:
+#
+#   proxy       = "socks5h://127.0.0.1:9050"   # socks5h looks names up at the proxy too; "user:password@" before the host if it wants them
+#   live_checks = true                         # Twatch TV: who's live, and pictures
+#   streams     = true                         # Twitch streams: Streamlink finding them (it's told --http-proxy) and the video
+#                                              # itself (PimpMyShell fetches it, not Windows), together, as the same somebody
+#   updates     = true                         # PimpMyShell's update checks and downloads
+#   downloads   = true                         # games, and Streamlink itself
+#   isolate     = true                         # each of those with a random user name and password of its own (Tor stream isolation)
 
 # [toasts]: show notifications inside the taskbar (the tray slides away meanwhile) instead of
 # as popups - modern toasts and old-style tray balloons alike. Native banners are switched off per app (every app
@@ -76,6 +127,9 @@ ignore    = []        # e.g. ["obs64.exe"]: substrings of the app's consent-stor
 duration_ms = 7000    # each toast in front (one that comes forward again with more behind it: at most 4 s). Toasts that
                       # ask for duration="long" get at least 25 s, and alarms, calls and reminders with a button stay
                       # until you answer them, as they do in Windows
+# position  = "tray"    # where cards stop: left of "clock" (default), "tray", "tv" (your first TV) or "mic" (the Hot Mic
+                        # label). Those two, and what's right of them, stay in sight; one that isn't showing counts as
+                        # the tray. On a full taskbar, cards cover the whole tray
 # style     = "pimped"  # gold cards with a sheen sweeping across (default: "standard")
 # confirm_clicks = "window"  # before a notification opens something, ask in a window with room for every detail
                              # (default: "card", in the notification itself; "off": don't ask)
@@ -135,6 +189,8 @@ press_radius = 130
 #   names        pie / bars: a name per slice or bar, for the tooltip; disks / nics: each device's two bars
 #   bar_width    cores / engines / bars / disks / nics: DIPs per bar
 #   caption      false: no label beside the meter on the taskbar (the tooltip still has it)
+#   sideways     true: the label on its side, reading down, for less room across (a disk's or GPU's too); on by
+#                default for disks and nics
 #   snug         true: right against the meter before it, no separator or spacing
 #   glow         cores / engines: "level" (default: by load now), "heat" (by how hot the bars have got
 #                working: full in ~8 s at 100%, cold ~30 s after; brighter fills too), or "off"
@@ -188,7 +244,13 @@ style  = "pie"
 # Like Task Manager's memory composition: in use, modified (waiting to be written), standby (cache).
 expr   = ["ram_total - mem_avail - modified", "modified", "standby_n + standby_r + standby_c"]
 names  = ["in use", "modified", "standby"]
-colors = ["#AED581", "#B0FFB74D", "#50AED581"]
+colors = ["#AED581", "#FFFFFF", "#50AED581"]  # modified: white, next to the green: wet ink, written but not yet saved to disk
+slice_glow = "modified"    # this slice glows, following it as it grows and shrinks (by its name above)
+slice_glow_extend   = 2.5  # how far it can stand out past the pie's edge: at rest not at all, and more the faster its amount changes
+slice_glow_radius   = 4    # how far the glow reaches
+slice_glow_strength = 1    # 0 to 1
+# slice_glow_color    = "#FFB74D"  # default: the slice's own
+# slice_glow_pulse_ms = 2000       # a slow pulse (default 0: it holds steady)
 max    = "ram_total"
 unit   = "bytes"
 value  = false
@@ -280,3 +342,7 @@ value     = false
 # or all interfaces together:
 # style = "bars"
 # expr  = ["net_tx", "net_rx"]
+
+[[meter]]
+label = "TV"                 # a little TV: hover for its remote. With a game (Settings > TV), Space Pimpin' is on channel
+style = "screen"             # 6. Add another [[meter]] with its own label and style = "screen" for another set.

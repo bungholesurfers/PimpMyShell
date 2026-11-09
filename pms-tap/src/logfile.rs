@@ -1,4 +1,4 @@
-//! The log files in `%APPDATA%\PimpMyShell\logs` (where VS Code keeps its own: `%APPDATA%\Code\logs`), kept small: once
+//! The log files in `%LOCALAPPDATA%\PimpMyShell\logs`, kept small: once
 //! one passes `MAX` bytes it starts over, the full
 //! one kept beside it as `NAME.1.log` and the one before that as `NAME.2.log`, so each log holds at most three
 //! files, about 3 MB.
@@ -41,20 +41,35 @@ impl Log {
     }
 }
 
-/// Where the logs live.
+/// Where the logs live: with this PC's own files, not in the roaming profile. A log is about this PC, it's written all the time,
+/// and tap.log from inside Explorer: where the roaming folder is a network share (folder redirection), every line would be a
+/// network write from the taskbar's thread, and a roaming profile would carry them all to the server and back at every sign-in.
 pub fn dir() -> PathBuf {
-    std::env::var_os("APPDATA").map_or_else(|| data_dir().join("logs"), |d| PathBuf::from(d).join("PimpMyShell").join("logs"))
+    data_dir().join("logs")
 }
 
-/// Brings the logs from where they were before 0.1.4 (`data_dir()`): each moves, unless one has started in its place.
+/// The logs' earlier homes, newest first: the roaming folder (0.1.4), then `data_dir()` itself (before that).
+fn old_dirs() -> Vec<PathBuf> {
+    let roaming = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("PimpMyShell").join("logs"));
+    roaming.into_iter().chain([data_dir()]).collect()
+}
+
+/// Brings the logs from where they were before: each moves, unless one is in its place already (from a newer home, or begun).
+/// A folder they leave empty goes too.
 pub fn move_old() {
     let new = dir();
     let _ = std::fs::create_dir_all(&new);
-    for name in [Log::Daemon, Log::Tap].iter().flat_map(|l| l.names()) {
-        let (from, to) = (data_dir().join(name), new.join(name));
-        if std::fs::symlink_metadata(&from).is_ok_and(|m| m.file_type().is_file()) && !to.exists() {
-            let _ = std::fs::rename(from, to);
+    for old in old_dirs() {
+        for name in [Log::Daemon, Log::Tap].iter().flat_map(|l| l.names()) {
+            let (from, to) = (old.join(name), new.join(name));
+            if std::fs::symlink_metadata(&from).is_ok_and(|m| m.file_type().is_file()) && !to.exists() {
+                let _ = std::fs::rename(from, to);
+            }
         }
+    }
+    if let Some(roaming) = old_dirs().first().filter(|d| **d != new) {
+        // Only an empty folder can be removed this way: anything left in it stays.
+        let _ = std::fs::remove_dir(roaming);
     }
 }
 
@@ -123,7 +138,8 @@ fn redact_for(line: &str, profile: &str, user: &str) -> String {
 
 /// Appends `line` to `log` (redacted), then starts the log over if that took it past `MAX`.
 pub fn append(log: Log, line: &str) {
-    let line = redact(line);
+    // One entry, one line: a multi-line error would leave lines with no time, and the settings window's "last entry" a fragment.
+    let line = redact(&line.trim_end().replace("\r\n", " | ").replace('\n', " | "));
     let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _ = std::fs::create_dir_all(dir());
     let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log.path()) else { return };

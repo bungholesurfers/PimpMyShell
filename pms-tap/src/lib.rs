@@ -14,6 +14,9 @@ mod dwm;
 mod glow;
 mod layout;
 mod meters;
+mod remote;
+mod remote_modern;
+mod screen;
 mod pace;
 pub mod ipc;
 pub mod logfile;
@@ -55,8 +58,10 @@ pub fn data_dir() -> PathBuf {
     base.join("PimpMyShell")
 }
 
+/// A line of tap.log, timed as daemon.log's are, so that the two can be read side by side.
 fn log(msg: impl AsRef<str>) {
-    logfile::append(logfile::Log::Tap, &format!("[pid {}] {}", std::process::id(), msg.as_ref()));
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    logfile::append(logfile::Log::Tap, &format!("{:02}:{:02}:{:02} [pid {}] {}", t.wHour, t.wMinute, t.wSecond, std::process::id(), msg.as_ref()));
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -262,9 +267,14 @@ pub(crate) fn detach() -> Result<String, String> {
         return Ok("already detached".into());
     }
     // Undo what lives on the UI thread while our tree mirror still resolves names.
-    let teardown = run_on_ui(reset);
+    let teardown = run_on_ui(|ctx| {
+        let done = reset(ctx);
+        meters::drop_spare_bars();
+        backdrop::forget();
+        done
+    });
     DETACHED.store(true, Ordering::Release);
-    log(format!("detach teardown: {teardown:?}"));
+    log(match &teardown { Ok(s) => format!("detaching: {s}"), Err(e) => format!("detaching: error: {e}") });
     let hr = unsafe { ctx.service.UnadviseVisualTreeChange(ctx.callback.as_raw()) };
     lock(&TREE).clear();
     log(format!("detached (Unadvise -> {hr:?})"));
@@ -282,11 +292,11 @@ struct Tap {
 impl IObjectWithSite_Impl for Tap_Impl {
     fn SetSite(&self, site: Ref<IUnknown>) -> windows_core::Result<()> {
         let Some(site) = site.as_ref() else {
-            log("SetSite(null)");
+            log("let go of Explorer's XAML (SetSite(null))");
             *lock(&self.site) = None;
             return Ok(());
         };
-        log("SetSite: got IXamlDiagnostics site");
+        log("attached to Explorer's XAML (SetSite)");
         let service: IVisualTreeService3 = site.cast()?;
         let diag: IXamlDiagnostics = site.cast()?;
         *lock(&self.site) = Some(site.clone());
@@ -299,7 +309,7 @@ impl IObjectWithSite_Impl for Tap_Impl {
         std::thread::spawn(move || {
             let (service, callback, diag) = args.get();
             let hr = unsafe { service.AdviseVisualTreeChange(callback.as_raw()) };
-            log(format!("AdviseVisualTreeChange -> {hr:?}"));
+            log(format!("watching the taskbar's visual tree (AdviseVisualTreeChange -> {hr:?})"));
             let dispatcher = (|| {
                 let mut d = None;
                 unsafe { diag.GetDispatcher(&mut d).ok()? };
@@ -310,7 +320,7 @@ impl IObjectWithSite_Impl for Tap_Impl {
                     let _ = CTX.set(Ctx { service, diag, callback, dispatcher });
                     server::start();
                 }
-                Err(e) => log(format!("no CoreDispatcher: {e}")),
+                Err(e) => log(format!("couldn't get the taskbar's UI thread (CoreDispatcher): {e}")),
             }
         });
         Ok(())

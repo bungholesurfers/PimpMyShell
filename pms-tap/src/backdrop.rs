@@ -65,6 +65,8 @@ struct Backdrop {
 
 thread_local! {
     static STATE: RefCell<Option<Backdrop>> = const { RefCell::new(None) };
+    /// The grain's noise, decoded once for as long as this TAP is here: it's the same every time.
+    static NOISE: RefCell<Option<LoadedImageSurface>> = const { RefCell::new(None) };
 }
 
 fn w(e: windows_core::Error) -> String {
@@ -167,7 +169,21 @@ fn noise_png() -> Vec<u8> {
     out
 }
 
+/// For a TAP that's leaving: what it keeps for next time goes with it.
+pub(crate) fn forget() {
+    NOISE.with_borrow_mut(Option::take);
+}
+
 fn noise_surface() -> R<LoadedImageSurface> {
+    if let Some(noise) = NOISE.with_borrow(Clone::clone) {
+        return Ok(noise);
+    }
+    let noise = decode_noise()?;
+    NOISE.with_borrow_mut(|n| *n = Some(noise.clone()));
+    Ok(noise)
+}
+
+fn decode_noise() -> R<LoadedImageSurface> {
     let png = noise_png();
     let stream = unsafe { SHCreateMemStream(Some(&png)) }.ok_or("SHCreateMemStream failed")?;
     let stream: IRandomAccessStream = unsafe { CreateRandomAccessStreamOverStream(&stream, BSOS_DEFAULT) }.map_err(w)?;

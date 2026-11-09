@@ -66,10 +66,21 @@ Source: "{#Bin}\pmsd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms_tap.dll"; DestDir: "{app}"; Flags: ignoreversion
+; Doom's engine: a program of its own, under the GPL, with what the GPL asks for beside it.
+Source: "{#Bin}\pms-poom.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Bin}\pms-twatch.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\pms-poom\COPYING"; DestDir: "{app}"; DestName: "pms-poom-COPYING.txt"; Flags: ignoreversion
+Source: "..\pms-poom\engine\NOTICE.md"; DestDir: "{app}"; DestName: "pms-poom-NOTICE.md"; Flags: ignoreversion
 Source: "..\pms.example.toml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 ; The notice the background needs, as in the settings: read by the code below, and not installed.
 Source: "..\pms-gui\src\legal.txt"; Flags: dontcopy
+
+; What earlier versions installed under names that have changed: POOM was pms-doom before 0.1.5.
+[InstallDelete]
+Type: files; Name: "{app}\pms-doom.exe"
+Type: files; Name: "{app}\pms-doom-COPYING.txt"
+Type: files; Name: "{app}\pms-doom-NOTICE.md"
 
 [Icons]
 Name: "{autoprograms}\PimpMyShell"; Filename: "{app}\pms-gui.exe"; Comment: "PimpMyShell's settings"
@@ -96,7 +107,7 @@ Type: files; Name: "{localappdata}\PimpMyShell\daemon.2.log"
 Type: files; Name: "{localappdata}\PimpMyShell\tap.log"
 Type: files; Name: "{localappdata}\PimpMyShell\tap.1.log"
 Type: files; Name: "{localappdata}\PimpMyShell\tap.2.log"
-; Where the logs are from 0.1.4 on; the ones above are older.
+; Where the logs were in 0.1.4; the ones above are older.
 Type: files; Name: "{userappdata}\PimpMyShell\logs\daemon.log"
 Type: files; Name: "{userappdata}\PimpMyShell\logs\daemon.1.log"
 Type: files; Name: "{userappdata}\PimpMyShell\logs\daemon.2.log"
@@ -104,10 +115,44 @@ Type: files; Name: "{userappdata}\PimpMyShell\logs\tap.log"
 Type: files; Name: "{userappdata}\PimpMyShell\logs\tap.1.log"
 Type: files; Name: "{userappdata}\PimpMyShell\logs\tap.2.log"
 Type: dirifempty; Name: "{userappdata}\PimpMyShell\logs"
+; Where the logs are now, with the report saved beside them.
+Type: files; Name: "{localappdata}\PimpMyShell\logs\daemon.log"
+Type: files; Name: "{localappdata}\PimpMyShell\logs\daemon.1.log"
+Type: files; Name: "{localappdata}\PimpMyShell\logs\daemon.2.log"
+Type: files; Name: "{localappdata}\PimpMyShell\logs\tap.log"
+Type: files; Name: "{localappdata}\PimpMyShell\logs\tap.1.log"
+Type: files; Name: "{localappdata}\PimpMyShell\logs\tap.2.log"
+Type: files; Name: "{localappdata}\PimpMyShell\logs\pms-report.txt"
+Type: dirifempty; Name: "{localappdata}\PimpMyShell\logs"
+; What Settings > TV fetched, which can be fetched again. A WAD you put there yourself stays, as do saved games.
+Type: files; Name: "{localappdata}\PimpMyShell\wads\freedoom1.wad"
+Type: files; Name: "{localappdata}\PimpMyShell\wads\doom1.wad"
+Type: files; Name: "{localappdata}\PimpMyShell\wads\freedoom-COPYING.txt"
+Type: files; Name: "{localappdata}\PimpMyShell\wads\chosen.txt"
+Type: dirifempty; Name: "{localappdata}\PimpMyShell\wads"
+; Where they are from 0.1.5 on, inside POOM's own folder among the games. Saved games stay, and so do the folders with them.
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\freedoom1.wad"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\doom1.wad"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\freedoom-COPYING.txt"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\chosen.txt"
+Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\poom\wads"
+Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\poom"
+Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya"
+; Streamlink, fetched the same way.
+Type: filesandordirs; Name: "{localappdata}\PimpMyShell\streamlink"
+Type: files; Name: "{localappdata}\PimpMyShell\twatch.txt"
+Type: files; Name: "{localappdata}\PimpMyShell\settings-page.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\tree.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\update-checked.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\taskbar-told.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\welcomed.txt"
+; Also kept for this PC alone: the request a restart of Explorer leaves for the daemon, the icons and pictures toasts were
+; shown with, and where TV state was kept before it moved beside the config. Not seashell-carried-over.txt: it outlives an
+; uninstall, or a reinstall with the settings gone would bring SeaShell's old ones back.
+Type: files; Name: "{localappdata}\PimpMyShell\restart-explorer.txt"
+Type: files; Name: "{localappdata}\PimpMyShell\pms.ico"
+Type: filesandordirs; Name: "{localappdata}\PimpMyShell\icons"
+Type: files; Name: "{localappdata}\PimpMyShell\tv.txt"
 
 [Run]
 Filename: "{app}\pmsd.exe"; Description: "Start PimpMyShell now"; Flags: nowait postinstall skipifsilent
@@ -177,8 +222,58 @@ begin
   end;
 end;
 
+// Ends the processes called Name that run from this install's folder, and only those: a copy of the same program elsewhere
+// (a portable one, a build being worked on) isn't this install's, and has nothing of it open. Returns how many it ended,
+// or -1 if Windows couldn't say which they are.
+function EndFromApp(Name: String): Integer;
+var
+  Locator, Service, Found, Process: Variant;
+  I: Integer;
+  Here, Path: String;
+begin
+  Result := 0;
+  Here := Lowercase(AddBackslash(ExpandConstant('{app}')));
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Locator.ConnectServer('.', 'root\CIMV2');
+    Found := Service.ExecQuery('SELECT ProcessId, ExecutablePath FROM Win32_Process WHERE Name = ''' + Name + '''');
+    for I := 0 to Found.Count - 1 do
+    begin
+      Process := Found.ItemIndex(I);
+      if not VarIsNull(Process.ExecutablePath) then
+      begin
+        Path := Process.ExecutablePath;
+        Path := Lowercase(Path);
+        if (Pos(Here, Path) = 1) and (Process.Terminate(0) = 0) then
+          Result := Result + 1;
+      end;
+    end;
+  except
+    Log('Ending ' + Name + ': ' + GetExceptionMessage);
+    Result := -1;
+  end;
+end;
+
+// Ends this install's Name, as EndFromApp does. Should Windows not say which processes are this install's, it ends every
+// one called Name, as installs before 0.1.5 did: better that than files left in use and an update half done. Returns
+// whether any was running.
+function EndOurs(Name: String): Boolean;
+var
+  Ended, Code: Integer;
+begin
+  Ended := EndFromApp(Name);
+  if Ended >= 0 then
+    Result := Ended > 0
+  else
+  begin
+    Log('Ending every ' + Name + ', wherever it runs from');
+    Result := Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im ' + Name, '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+  end;
+end;
+
 // Stops a running PimpMyShell: the daemon is asked to stop, which puts the stock taskbar (and notification banners)
-// back; the settings window is closed. Notes what ran, so that a silent update starts it again.
+// back; the settings window is closed. Notes what ran, so that a silent update starts it again. Only what runs from this
+// install's folder is ended.
 procedure StopPimpMyShell();
 var
   Code: Integer;
@@ -189,8 +284,12 @@ begin
       WasRunning := True;
     Sleep(1500);
   end;
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im pmsd.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  if Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im pms-gui.exe', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
+  EndOurs('pmsd.exe');
+  EndOurs('pms-poom.exe');
+  // What POOM was called before 0.1.5, for an update from one of those.
+  EndOurs('pms-doom.exe');
+  EndOurs('pms-twatch.exe');
+  if EndOurs('pms-gui.exe') then
     SettingsWereOpen := True;
   Sleep(300);
 end;

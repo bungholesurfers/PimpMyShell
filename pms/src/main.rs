@@ -83,14 +83,22 @@ fn demo(which: Option<&str>) -> Result<()> {
     Ok(result?)
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let arg = |i: usize| args.get(i).map(String::as_str);
     match arg(0) {
         None => repl(),
         Some("inject") => pms::inject().map(|s| println!("{s}")).map_err(Into::into),
         Some("layout") if arg(1) == Some("watch") => watch_layout(),
-        Some("meters") if args.len() == 2 && std::path::Path::new(&args[1]).is_file() => Ok(pms::meters::run(&args[1])?),
+        Some("meters") if args.len() == 2 && std::path::Path::new(&args[1]).is_file() => pms::meters::run(&args[1]).map_err(|e| pms::problem::Problem::of(std::path::Path::new(&args[1]), &e).words().into()),
+        Some("restart-explorer") => pms::explorer::ask().map_err(Into::into),
         Some("daemon") if arg(1) == Some("stop") => daemon::stop().map(|s| println!("{s}")).map_err(Into::into),
         Some("demo") => demo(arg(1)),
         Some("daemon") => {

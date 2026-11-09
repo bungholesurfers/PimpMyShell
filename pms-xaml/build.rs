@@ -25,6 +25,11 @@ const TYPES: &[&str] = &[
     "Windows.UI.Xaml.Shapes.Rectangle",
     "Windows.UI.Xaml.Media.Brush",
     "Windows.UI.Xaml.Media.SolidColorBrush",
+    // The remote's title bar.
+    "Windows.UI.Xaml.Media.GradientBrush",
+    "Windows.UI.Xaml.Media.LinearGradientBrush",
+    "Windows.UI.Xaml.Media.GradientStop",
+    "Windows.UI.Xaml.Media.GradientStopCollection",
     "Windows.UI.Xaml.Media.LoadedImageSurface",
     "Windows.UI.Xaml.Controls.Border",
     "Windows.UI.Xaml.CornerRadius",
@@ -57,6 +62,7 @@ const TYPES: &[&str] = &[
     "Windows.UI.Xaml.Media.CompositionTarget",
     "Windows.UI.Xaml.Controls.Primitives.Popup",
     "Windows.UI.Xaml.XamlRoot",
+    "Windows.UI.Xaml.XamlRootChangedEventArgs",
     // Start's and the app buttons' hover and press (and Start's checked state: its menu open), for their glows
     // (glow.rs).
     "Windows.UI.Xaml.Controls.Primitives.ButtonBase",
@@ -66,6 +72,9 @@ const TYPES: &[&str] = &[
     // App buttons' icons, rendered to pixels for their colors.
     "Windows.UI.Xaml.Media.Imaging.RenderTargetBitmap",
     "Windows.UI.Xaml.Media.ImageSource",
+    // A `screen` meter's live picture.
+    "Windows.UI.Xaml.Media.Imaging.BitmapSource",
+    "Windows.UI.Xaml.Media.Imaging.WriteableBitmap",
     "Windows.UI.Xaml.Controls.Image",
     "Windows.UI.Xaml.DependencyProperty",
     "Windows.UI.Xaml.DependencyPropertyChangedCallback",

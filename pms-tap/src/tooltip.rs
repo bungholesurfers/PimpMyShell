@@ -42,6 +42,8 @@ struct Zone {
     rect: Rectangle,
     meter: usize,
     left: f64,
+    top: f64,
+    width: f64,
     bars: Vec<(f64, f64)>,
     bar0: usize,
     device: Option<usize>,
@@ -128,6 +130,11 @@ pub fn set_zones(specs: Vec<ZoneSpec>) {
                     Ok(())
                 });
                 el.PointerEntered(&moved).map_err(w)?;
+                el.Tapped(&pms_xaml::TappedEventHandler::new(move |_, _| {
+                    tapped(i);
+                    Ok(())
+                }))
+                .map_err(w)?;
                 el.PointerMoved(&moved).map_err(w)?;
                 el.PointerExited(&PointerEventHandler::new(move |_, _| {
                     leave(i);
@@ -135,7 +142,7 @@ pub fn set_zones(specs: Vec<ZoneSpec>) {
                 }))
                 .map_err(w)?;
                 children.Append(&el).map_err(w)?;
-                t.zones.push(Zone { rect, meter: usize::MAX, left: 0.0, bars: Vec::new(), bar0: 0, device: None });
+                t.zones.push(Zone { rect, meter: usize::MAX, left: 0.0, top: 0.0, width: 0.0, bars: Vec::new(), bar0: 0, device: None });
             }
             for (i, z) in t.zones.iter_mut().enumerate() {
                 let el = ui(&z.rect)?;
@@ -145,6 +152,7 @@ pub fn set_zones(specs: Vec<ZoneSpec>) {
                         Canvas::SetTop(&el, (s.rect.Y - origin.Y) as f64).map_err(w)?;
                         z.rect.SetWidth(s.rect.Width as f64).map_err(w)?;
                         z.rect.SetHeight(s.rect.Height as f64).map_err(w)?;
+                        (z.top, z.width) = (s.rect.Y as f64, s.rect.Width as f64);
                         (z.meter, z.left, z.bars, z.bar0, z.device) = (s.meter, s.rect.X as f64, s.bars.clone(), s.bar0, s.device);
                     }
                     None => {
@@ -164,6 +172,14 @@ pub fn set_zones(specs: Vec<ZoneSpec>) {
     }
 }
 
+/// A click in zone `i`: a screen wants to know.
+fn tapped(i: usize) {
+    let meter = TIPS.with_borrow(|s| s.as_ref().and_then(|t| t.zones.get(i)).map(|z| z.meter));
+    if let Some(source) = meter.and_then(crate::meters::screen_source) {
+        crate::screen::click(&source);
+    }
+}
+
 /// Zones stop catching the pointer while the strip is out of sight (a toast covers it).
 pub fn set_enabled(on: bool) {
     TIPS.with_borrow(|s| {
@@ -177,6 +193,17 @@ pub fn set_enabled(on: bool) {
 }
 
 fn hover(zone: usize, p: Point) {
+    // A screen's tooltip is its remote.
+    let tile = TIPS.with_borrow(|s| {
+        let t = s.as_ref()?;
+        let z = t.zones.get(zone).filter(|z| z.meter != usize::MAX)?;
+        let source = crate::meters::screen_source(z.meter)?;
+        Some((t.popup.XamlRoot().ok()?, source, z.left, z.top, z.width))
+    });
+    if let Some((root, source, left, top, width)) = tile {
+        crate::remote::over_tile(&root, &source, left, top, width);
+        return;
+    }
     let target = TIPS.with_borrow_mut(|s| {
         let t = s.as_mut()?;
         let z = t.zones.get(zone).filter(|z| z.meter != usize::MAX)?;
@@ -205,6 +232,7 @@ fn dist(x: f64, (a, b): (f64, f64)) -> f64 {
 }
 
 fn leave(zone: usize) {
+    crate::remote::off_tile();
     TIPS.with_borrow_mut(|s| {
         if let Some(t) = s.as_mut().filter(|t| t.hover.is_some_and(|h| h.0 == zone)) {
             t.hover = None;
@@ -253,12 +281,15 @@ fn show(text: Option<String>) {
 
 /// For reset/detach.
 pub(crate) fn off() {
+    crate::remote::off();
     if let Some(t) = TIPS.with_borrow_mut(Option::take) {
         let _ = t.popup.SetIsOpen(false);
+        crate::stage::unbuild_popup(&t.popup);
         if let Ok(parent) = t.overlay.Parent().and_then(|p| p.cast::<pms_xaml::Panel>())
             && let (Ok(children), Ok(el)) = (parent.Children(), ui(&t.overlay)) {
                 let mut i = 0;
                 if children.IndexOf(&el, &mut i).unwrap_or(false) {
+                    crate::stage::unbuild(&el);
                     let _ = children.RemoveAt(i);
                 }
             }

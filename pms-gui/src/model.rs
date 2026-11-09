@@ -13,6 +13,35 @@ use crate::copy;
 
 /// How long edits settle before they're saved.
 pub const SAVE_AFTER: Duration = Duration::from_millis(500);
+/// What the settings window is called, which is how another start of this program finds it.
+pub const WINDOW_TITLE: &str = "PimpMyShell Settings";
+
+/// Where a page asked for from outside waits for the window that's open.
+fn page_file() -> PathBuf {
+    pms_tap::data_dir().join("settings-page.txt")
+}
+
+/// Sends the settings window that's open, if there is one, to `page`, and brings it to the front: false if there's none.
+pub fn go_to_page(page: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow};
+    let Ok(window) = (unsafe { FindWindowW(windows_core::PCWSTR::null(), &windows_core::HSTRING::from(WINDOW_TITLE)) }) else { return false };
+    let _ = std::fs::write(page_file(), page);
+    unsafe {
+        if IsIconic(window).as_bool() {
+            let _ = ShowWindow(window, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(window);
+    }
+    true
+}
+
+/// The page asked for since this was last asked, if any.
+pub fn page_asked() -> Option<String> {
+    let file = page_file();
+    let page = std::fs::read_to_string(&file).ok()?;
+    let _ = std::fs::remove_file(&file);
+    Some(page.trim().to_string())
+}
 
 /// A counter as an editable row (the config keeps them in a map keyed by name).
 pub struct CounterRow {
@@ -33,6 +62,7 @@ pub enum Section {
     Backdrop,
     StartGlow,
     AppGlow,
+    Twatch,
     Hotmic,
     Toasts,
 }
@@ -48,10 +78,20 @@ impl Section {
             Section::Backdrop => "Background",
             Section::StartGlow => "Start button",
             Section::AppGlow => "App buttons",
-            Section::Hotmic => "Microphone alert",
-            Section::Toasts => "Notifications",
+            Section::Twatch => "How it plays",
+            Section::Hotmic => "Hot Mic",
+            Section::Toasts => "Notification Toast",
         }
     }
+}
+
+/// Fetching a WAD, written by its thread.
+#[derive(Clone, Default)]
+pub enum WadJob {
+    #[default]
+    Idle,
+    Getting(u64, u64),
+    Failed(String),
 }
 
 /// The updater's state, written by its thread.
@@ -68,14 +108,38 @@ pub enum Update {
 pub struct Model {
     pub path: PathBuf,
     pub config: Config,
+    /// What came of asking for the newest Streamlink, if there's anything to say.
+    pub streamlink_note: Arc<Mutex<String>>,
+    /// The favorites as text, while they're being edited that way. Nothing's a favorite until it's saved: a name half typed could
+    /// be somebody else's channel.
+    pub favorites_text: Option<String>,
+    /// A channel being typed, to add.
+    pub new_favorite: String,
+    /// What was wrong with the last list or name.
+    pub favorites_note: String,
+    /// The proxy's address as it's being typed, until it's applied; and what came of trying it.
+    pub proxy_text: String,
+    pub proxy_note: Arc<Mutex<String>>,
+    /// What came of trying each use's way out, by its place in `pms::net::USES`.
+    pub use_notes: Arc<Mutex<Vec<String>>>,
+    pub wad_job: Arc<Mutex<WadJob>>,
+    /// Fetching Streamlink.
+    pub streamlink_job: Arc<Mutex<WadJob>>,
     /// What ships (pms.example.toml): what a setting's Reset goes back to, and what counts as "changed".
     pub baseline: Config,
     pub counters: Vec<CounterRow>,
     /// What's on disk, to notice edits; and when the last edit happened.
     pub saved: String,
     pub edited_at: Option<Instant>,
+    /// The config as it stood at the last look, while it's waiting to be saved: any change starts the wait again, so that it's
+    /// after the edits stop, and not during them, that it's saved.
+    typed: Option<String>,
+    /// The last config that a `Sampler` took.
+    checked: Option<Config>,
     /// Last save outcome, or why the config can't be saved yet.
     pub message: (String, bool),
+    /// What's wrong with the file. While there is something, nothing here is saved: it's someone's work.
+    pub problem: Option<pms::problem::Problem>,
     pub daemon_running: bool,
     pub autostart: String,
     pub last_log: String,
@@ -86,6 +150,16 @@ pub struct Model {
     disk: Option<String>,
 }
 
+const SAVES: &str = "Changes save automatically";
+const NOT_SAVING: &str = "Nothing here is saved until your settings file is fixed";
+
+/// What's on disk now, to tell when that changes: the settings, and the favorites and network settings beside them.
+fn on_disk(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let beside = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap_or_default();
+    Some(format!("{text}\0{}\0{}", beside(config::watchlist_path(path)), beside(config::network_path(path))))
+}
+
 impl Model {
     pub fn open(path: PathBuf) -> Model {
         // A file from before 0.1.4: only what its owner changed, from now on. A daemon does this as it starts, so one
@@ -94,29 +168,43 @@ impl Model {
             let _ = config::adopt_layers(&path);
         }
         let path_read = path.clone();
-        let (config, message) = match config::load(&path) {
-            Ok(c) => (c, ("Changes save automatically".to_string(), false)),
-            Err(_) if !path.exists() => (example(), ("You don't have a settings file yet. Your first change creates it".to_string(), false)),
-            Err(e) => (example(), (format!("We couldn't read your settings file, so you're seeing the defaults. Nothing is saved until you change something. ({e})"), true)),
+        let (config, message, problem) = match config::load(&path) {
+            Ok(c) => (c, (SAVES.to_string(), false), None),
+            Err(_) if !path.exists() => (example(), ("You don't have a settings file yet. Your first change creates it".to_string(), false), None),
+            Err(e) => (example(), (NOT_SAVING.to_string(), true), Some(pms::problem::Problem::of(&path, &e))),
         };
         let counters = config.counters.iter().map(|(name, spec)| counter_row(name, spec)).collect();
         let mut gui = Model {
             path,
             config,
+            streamlink_note: Arc::default(),
+            favorites_text: None,
+            new_favorite: String::new(),
+            favorites_note: String::new(),
+            proxy_text: String::new(),
+            proxy_note: Arc::default(),
+            use_notes: Arc::new(Mutex::new(vec![String::new(); pms::net::USES.len()])),
+            typed: None,
+            checked: None,
+            wad_job: Arc::default(),
+            streamlink_job: Arc::default(),
             baseline: example(),
             counters,
             saved: String::new(),
             edited_at: None,
             message,
+            problem,
             daemon_running: false,
             autostart: String::new(),
             last_log: String::new(),
             polled: Instant::now() - Duration::from_secs(10),
             update: Arc::default(),
-            disk: std::fs::read_to_string(&path_read).ok(),
+            disk: on_disk(&path_read),
         };
+        gui.proxy_text = shown_proxy(&gui.config);
         // Compare against the config as the editor states it, so opening isn't an edit.
-        gui.saved = config::to_toml(&gui.current()).unwrap_or_default();
+        gui.saved = config::comparable(&gui.current()).unwrap_or_default();
+        gui.note_watchlist();
         gui.poll_daemon();
         gui
     }
@@ -151,21 +239,32 @@ impl Model {
 
     /// Save once edits have settled, if the config is valid (the same check the daemon makes).
     pub fn autosave(&mut self) {
-        let config = self.current();
-        let Ok(text) = config::to_toml(&config) else { return };
-        if text == self.saved {
-            self.edited_at = None;
+        if self.problem.is_some() && !self.follow_disk() {
             return;
         }
+        let config = self.current();
+        let Ok(text) = config::comparable(&config) else { return };
+        if text == self.saved {
+            (self.edited_at, self.typed) = (None, None);
+            return;
+        }
+        if self.typed.as_ref().is_some_and(|typed| *typed != text) {
+            self.edited_at = Some(Instant::now());
+        }
+        self.typed = Some(text.clone());
         let at = *self.edited_at.get_or_insert_with(Instant::now);
         if at.elapsed() < SAVE_AFTER {
             return;
         }
-        self.edited_at = None;
-        if let Err(e) = pms::meters::Sampler::new(&config) {
-            self.message = (format!("Your change wasn't saved: {e}"), true);
-            self.saved = text; // don't retry until the next edit
-            return;
+        (self.edited_at, self.typed) = (None, None);
+        // Only what a sampler goes by can be wrong for one, and making one takes a moment.
+        if !self.checked.as_ref().is_some_and(|c| pms::meters::same_sampler(c, &config)) {
+            if let Err(e) = pms::meters::Sampler::new(&config) {
+                self.message = (format!("Your change wasn't saved: {e}"), true);
+                self.saved = text; // don't retry until the next edit
+                return;
+            }
+            self.checked = Some(config.clone());
         }
         if !self.follow_disk() {
             return;
@@ -178,7 +277,9 @@ impl Model {
         match config::save(&self.path, &config) {
             Ok(()) => {
                 self.saved = text;
-                self.disk = std::fs::read_to_string(&self.path).ok();
+                self.disk = on_disk(&self.path);
+                // What wasn't a setting isn't in the file any more.
+                self.config.issues.clear();
                 let saved = if self.daemon_running { "Saved" } else { "Saved. Start PimpMyShell to see your changes" };
                 self.message = (saved.to_string(), false);
             }
@@ -194,6 +295,7 @@ impl Model {
 
     /// Starts a check (and, for the installed copy, the download) on a thread of its own.
     pub fn start_check(&mut self, ask: pms::update::Ask) {
+        pms::net::follow(&self.config);
         let shared = self.update.clone();
         *shared.lock().unwrap() = Update::Checking;
         std::thread::spawn(move || {
@@ -204,6 +306,229 @@ impl Model {
                 Err(e) => Update::Failed(e),
             };
         });
+    }
+
+    /// Fetches a WAD on a thread of its own: the daemon notices it, and the screen changes over. The shareware's licence
+    /// comes first.
+    pub fn get_wad(&self, wad: pms::wads::Wad) {
+        pms::net::follow(&self.config);
+        let shared = self.wad_job.clone();
+        *shared.lock().unwrap() = WadJob::Getting(0, 0);
+        std::thread::spawn(move || {
+            if wad == pms::wads::Wad::Shareware && !pms::notices::accepts_shareware_license() {
+                *shared.lock().unwrap() = WadJob::Idle;
+                return;
+            }
+            let progress = |done, total| *shared.lock().unwrap() = WadJob::Getting(done, total);
+            *shared.lock().unwrap() = match pms::wads::get(wad, &progress) {
+                Ok(_) => WadJob::Idle,
+                Err(e) => WadJob::Failed(e),
+            };
+        });
+    }
+
+    pub fn remove_wad(&self, name: &str) {
+        if let Err(e) = pms::wads::remove(name) {
+            *self.wad_job.lock().unwrap() = WadJob::Failed(e);
+        }
+    }
+
+    /// Puts `name` in the console: the daemon notices.
+    pub fn choose_wad(&self, name: &str) {
+        if let Err(e) = pms::wads::choose(name) {
+            *self.wad_job.lock().unwrap() = WadJob::Failed(e);
+        }
+    }
+
+    /// The TVs: the labels of the `screen` meters.
+    pub fn tvs(&self) -> Vec<String> {
+        self.config.meters.iter().filter(|m| is_tv(m)).map(|m| m.label.clone()).collect()
+    }
+
+    /// Whether there's a Twatch TV.
+    pub fn twatch_on(&self) -> bool {
+        self.config.meters.iter().any(is_twatch)
+    }
+
+    /// Puts a Twatch TV on the taskbar, at the end of the strip, or takes it off.
+    pub fn set_twatch_on(&mut self, on: bool) {
+        self.config.meters.retain(|m| !is_twatch(m));
+        if on {
+            self.config.meters.push(toml_meter("label = \"Twatch TV\"\nstyle = \"screen\"\nset = \"twatch\""));
+            self.twatch();
+        }
+    }
+
+    /// Its settings.
+    pub fn twatch(&mut self) -> &mut pms::config::Twatch {
+        self.config.twatch.get_or_insert_with(Default::default)
+    }
+
+    /// Starts editing the favorites as text.
+    pub fn favorites_as_text(&mut self) {
+        let favorites = self.config.twatch.as_ref().map_or(Vec::new(), |t| t.favorites.clone());
+        self.favorites_text = Some(favorites.join("\n"));
+        self.favorites_note.clear();
+    }
+
+    /// Makes the text the favorites, if every line of it can be one. If not, nothing changes, and the text stays to be put right.
+    pub fn save_favorites_text(&mut self) {
+        let Some(text) = &self.favorites_text else { return };
+        let (good, bad) = pms::twatch::live::parse_list(text);
+        if !bad.is_empty() {
+            self.favorites_note = format!("Nothing's been saved. These can't be channel names: {}", bad.join(", "));
+            return;
+        }
+        self.twatch().favorites = good;
+        self.favorites_text = None;
+        self.favorites_note.clear();
+    }
+
+    pub fn cancel_favorites_text(&mut self) {
+        self.favorites_text = None;
+        self.favorites_note.clear();
+    }
+
+    /// Adds what's been typed to the end of the favorites, if it can be a channel.
+    pub fn add_favorite(&mut self) {
+        let (good, bad) = pms::twatch::live::parse_list(&self.new_favorite);
+        if !bad.is_empty() {
+            self.favorites_note = format!("That can't be a channel name: {}", bad.join(", "));
+            return;
+        }
+        let favorites = &mut self.twatch().favorites;
+        for handle in good {
+            if !favorites.iter().any(|f| f.eq_ignore_ascii_case(&handle)) {
+                favorites.push(handle);
+            }
+        }
+        self.new_favorite.clear();
+        self.favorites_note.clear();
+    }
+
+    /// Fetches Streamlink, on a thread of its own.
+    pub fn get_streamlink(&self) {
+        pms::net::follow(&self.config);
+        let (shared, note) = (self.streamlink_job.clone(), self.streamlink_note.clone());
+        *shared.lock().unwrap() = WadJob::Getting(0, 0);
+        note.lock().unwrap().clear();
+        std::thread::spawn(move || {
+            let progress = |done, total| *shared.lock().unwrap() = WadJob::Getting(done, total);
+            *shared.lock().unwrap() = match pms::streamlink::install(&progress) {
+                Ok(fetched) => {
+                    if !fetched {
+                        *note.lock().unwrap() = "That's the newest there is.".into();
+                    }
+                    WadJob::Idle
+                }
+                Err(e) => WadJob::Failed(e),
+            };
+        });
+    }
+
+    pub fn remove_streamlink(&self) {
+        if let Err(e) = pms::streamlink::remove() {
+            *self.streamlink_job.lock().unwrap() = WadJob::Failed(e);
+        }
+    }
+
+    /// One more TV.
+    pub fn add_tv(&mut self) {
+        pms::tv::add_tv(&mut self.config);
+    }
+
+    /// One TV fewer: the last one added.
+    pub fn remove_tv(&mut self) {
+        if let Some(i) = self.config.meters.iter().rposition(is_tv) {
+            self.config.meters.remove(i);
+        }
+    }
+
+    /// The network settings, made if they aren't there.
+    pub fn network(&mut self) -> &mut pms::config::Network {
+        self.config.network.get_or_insert_with(Default::default)
+    }
+
+    /// The proxy as typed becomes the proxy, if it can be one, or none, if it's empty.
+    pub fn apply_proxy(&mut self) {
+        let typed = self.proxy_text.trim().to_string();
+        if let Err(e) = (!typed.is_empty()).then(|| pms::net::check(&typed)).transpose() {
+            *self.proxy_note.lock().unwrap() = format!("Not applied: {e}");
+            return;
+        }
+        // A proxy that nothing goes through protects nothing: one applied with every switch off switches them all on.
+        let none_on = !self.uses_proxy();
+        self.network().proxy = typed.clone();
+        let said = if !typed.is_empty() && none_on {
+            self.all_through_proxy(true);
+            "Everything below now goes through it. Switch off whatever shouldn't."
+        } else {
+            ""
+        };
+        self.proxy_text = typed;
+        *self.proxy_note.lock().unwrap() = said.into();
+    }
+
+    /// Whether anything is switched on to go through the proxy.
+    pub fn uses_proxy(&self) -> bool {
+        self.config.network.as_ref().is_some_and(|n| n.live_checks || n.streams || n.updates || n.downloads)
+    }
+
+    /// Tries the proxy that's applied, on a thread of its own: one small request to GitHub, which every update check makes too.
+    pub fn test_proxy(&self) {
+        let note = self.proxy_note.clone();
+        let Some(proxy) = self.config.network.as_ref().map(|n| n.proxy.clone()).filter(|p| !p.is_empty()) else {
+            *note.lock().unwrap() = "There's no proxy to try.".into();
+            return;
+        };
+        *note.lock().unwrap() = "Trying...".into();
+        std::thread::spawn(move || {
+            let config = pms::config::parse(&format!("[network]\nproxy = \"{}\"\n", proxy.replace(['"', '\\'], ""))).ok();
+            let said = match config {
+                Some(config) => {
+                    let began = Instant::now();
+                    pms::net::follow(&config);
+                    let agent = pms::net::agent(pms::net::Use::Updates, Duration::from_secs(20), 0, "PimpMyShell (proxy test)");
+                    match agent.head(pms::update::STABLE_URL).call() {
+                        Ok(r) if r.status().is_success() => format!("It works: the proxy reached GitHub in {} ms.", began.elapsed().as_millis()),
+                        Ok(r) => format!("The proxy answered, but GitHub said {}.", r.status()),
+                        Err(e) => format!("That didn't work: {e}"),
+                    }
+                }
+                None => "That address can't be used.".into(),
+            };
+            *note.lock().unwrap() = said;
+        });
+    }
+
+    /// Every use through the proxy, or none.
+    pub fn all_through_proxy(&mut self, on: bool) {
+        let n = self.network();
+        (n.live_checks, n.streams, n.updates, n.downloads) = (on, on, on, on);
+    }
+
+    /// Tries the way use number `at` goes out, as the settings now have it, on a thread of its own.
+    pub fn try_use(&self, at: usize) {
+        let Some((what, ..)) = pms::net::USES.get(at).copied() else { return };
+        pms::net::follow(&self.config);
+        let notes = self.use_notes.clone();
+        notes.lock().unwrap()[at] = "Trying...".into();
+        std::thread::spawn(move || {
+            let said = pms::net::try_out(what).unwrap_or_else(|e| e);
+            notes.lock().unwrap()[at] = said;
+        });
+    }
+
+    /// No TVs at all.
+    pub fn remove_tvs(&mut self) {
+        self.config.meters.retain(|m| !is_tv(m));
+    }
+
+    /// The folder WADs go in, in Explorer.
+    pub fn show_wads(&self) {
+        let dir = pms::wads::dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::process::Command::new("explorer.exe").arg(dir).spawn();
     }
 
     /// Whether a check or a download is under way.
@@ -272,7 +597,69 @@ impl Model {
 
     /// The config file, selected in Explorer.
     pub fn show_config(&self) {
-        let _ = std::process::Command::new("explorer.exe").arg("/select,").arg(&self.path).spawn();
+        pms::notices::show_file(&self.path);
+    }
+
+    pub fn show_watchlist(&self) {
+        // There's nothing to pick out until there are favorites: then it's the folder.
+        let list = config::watchlist_path(&self.path);
+        pms::notices::show_file(if list.is_file() { &list } else { &self.path });
+    }
+
+    /// The network settings' file, or the folder it would be in.
+    pub fn show_network(&self) {
+        let file = config::network_path(&self.path);
+        pms::notices::show_file(if file.is_file() { &file } else { &self.path });
+    }
+
+    pub fn open_config(&self) {
+        let _ = pms::notices::open_file(&self.path.display().to_string());
+    }
+
+    pub fn has_last_good(&self) -> bool {
+        config::last_good(&self.path).is_some()
+    }
+
+    /// Goes back to the last settings that loaded. What was there is kept beside them.
+    pub fn restore_last_good(&mut self) {
+        match config::restore_last_good(&self.path) {
+            Ok(()) => {
+                self.follow_disk();
+            }
+            Err(e) => self.message = (format!("That didn't work: {e}"), true),
+        }
+    }
+
+    /// Every setting back to its default, but for the favorites, the network settings, the games and the answer about updates.
+    pub fn reset_all(&mut self) {
+        match config::reset(&self.path) {
+            Ok(()) => {
+                self.follow_disk();
+                self.message = ("Settings are back to their defaults. What they were is kept beside them, in pms.toml.before-reset".to_string(), false);
+            }
+            Err(e) => self.message = (format!("That didn't work: {e}"), true),
+        }
+    }
+
+    pub fn restart_explorer(&mut self) {
+        self.message = match pms::explorer::ask() {
+            Ok(()) => ("Restarting Explorer. Your taskbar comes back in a few seconds".to_string(), false),
+            Err(e) => (e, true),
+        };
+    }
+
+    /// Says which lines of the watchlist were skipped, unless the favorites are being edited.
+    fn note_watchlist(&mut self) {
+        if self.favorites_text.is_none() {
+            let bad: Vec<String> = config::watchlist_trouble(&self.path).into_iter().map(|(n, text)| format!("line {n}: {text}")).collect();
+            self.favorites_note = if bad.is_empty() { String::new() } else { format!("Skipped, as they can't be channels: {}", bad.join(", ")) };
+        }
+    }
+
+    /// The logs, with the daemon's selected in Explorer.
+    pub fn show_logs(&self) {
+        let log = pms_tap::logfile::Log::Daemon.path();
+        let _ = std::process::Command::new("explorer.exe").arg("/select,").arg(log).spawn();
     }
 
     /// Installs a downloaded version (the installer runs silently, then PimpMyShell starts again if it was running):
@@ -292,6 +679,30 @@ pub fn open_page(url: &str) {
 
 pub fn example() -> Config {
     config::parse(config::EXAMPLE).expect("the bundled example parses")
+}
+
+pub fn is_twatch(m: &MeterSpec) -> bool {
+    m.style == pms::config::Style::Screen && m.set.as_deref() == Some("twatch")
+}
+
+fn is_tv(m: &MeterSpec) -> bool {
+    m.style == pms::config::Style::Screen && !is_twatch(m)
+}
+
+/// A TV or a Twatch TV, which are widgets of their own rather than meters.
+pub fn is_screen(m: &MeterSpec) -> bool {
+    m.style == pms::config::Style::Screen
+}
+
+/// Something along the taskbar, for the Widgets page.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Widget {
+    /// All the meters, together.
+    Meters,
+    /// A TV or a Twatch TV: where it is in the config's list of meters.
+    Screen(usize),
+    /// The Hot Mic's label, at one end.
+    Mic,
 }
 
 pub fn toml_meter(s: &str) -> MeterSpec {
@@ -331,6 +742,11 @@ impl Model {
             Section::Backdrop => c.backdrop = b.backdrop,
             Section::StartGlow => c.start_glow = b.start_glow,
             Section::AppGlow => c.app_glow = b.app_glow,
+            // Your favorites are yours.
+            Section::Twatch => {
+                let favorites = c.twatch.take().map(|t| t.favorites).unwrap_or_default();
+                c.twatch = if favorites.is_empty() { b.twatch } else { Some(pms::config::Twatch { favorites, ..b.twatch.unwrap_or_default() }) };
+            }
             Section::Hotmic => {
                 let ignore = c.hotmic.take().map(|h| h.ignore);
                 c.hotmic = b.hotmic;
@@ -367,6 +783,7 @@ impl Model {
         let mut kept = Vec::new();
         match section {
             Section::Updates if c.update_check.is_some() => kept.push(copy::setting("update_check").0),
+            Section::Twatch if c.twatch.as_ref().is_some_and(|t| !t.favorites.is_empty()) => kept.push("Your favorites"),
             Section::Hotmic if c.hotmic.as_ref().is_some_and(|h| !h.ignore.is_empty()) => kept.push(copy::setting("hotmic.ignore").0),
             Section::Toasts => match &c.toasts {
                 Some(t) => {
@@ -420,25 +837,32 @@ impl Model {
     /// after taking something in, nor while what's there doesn't load: that's someone's work, not to be saved over.
     fn follow_disk(&mut self) -> bool {
         let Ok(text) = std::fs::read_to_string(&self.path) else { return true };
-        if self.disk.as_ref() == Some(&text) {
-            return true;
+        let seen = on_disk(&self.path);
+        if self.disk == seen {
+            return self.problem.is_none();
         }
-        let config = match config::parse(&text) {
+        self.disk = seen;
+        let config = match config::parse_at(&self.path, &text) {
             Ok(c) => c,
             Err(e) => {
-                self.message = (format!("Your settings file has an error, so changes here aren't being saved. Fix the file to continue. ({e})"), true);
+                self.problem = Some(pms::problem::Problem::of(&self.path, &e));
+                self.message = (NOT_SAVING.to_string(), true);
                 return false;
             }
         };
-        self.disk = Some(text);
+        if self.problem.take().is_some() {
+            self.message = (SAVES.to_string(), false);
+        }
+        self.note_watchlist();
         // Only comments or spacing changed: nothing to take in.
-        if config::to_toml(&config).is_ok_and(|t| t == self.saved) {
+        if config::comparable(&config).is_ok_and(|t| t == self.saved) {
             return true;
         }
-        let unsaved = config::to_toml(&self.current()).is_ok_and(|t| t != self.saved);
+        let unsaved = config::comparable(&self.current()).is_ok_and(|t| t != self.saved);
         self.counters = config.counters.iter().map(|(name, spec)| counter_row(name, spec)).collect();
         self.config = config;
-        self.saved = config::to_toml(&self.current()).unwrap_or_default();
+        self.proxy_text = shown_proxy(&self.config);
+        self.saved = config::comparable(&self.current()).unwrap_or_default();
         self.edited_at = None;
         self.message = if unsaved {
             ("Your settings file changed outside this window, so we loaded it. Make your last change again".to_string(), true)
@@ -453,10 +877,109 @@ impl Model {
         self.baseline.meters.iter().find(|b| b.label.eq_ignore_ascii_case(label))
     }
 
-    /// The shipped meters you don't have (going by their names), for Add back.
+    /// The shipped meters you don't have (going by their names), for Add back. Not TVs: the TV page has those.
     pub fn missing_meters(&self) -> Vec<&MeterSpec> {
         let have = |label: &str| self.config.meters.iter().any(|m| m.label.eq_ignore_ascii_case(label));
-        self.baseline.meters.iter().filter(|b| !have(&b.label)).collect()
+        self.baseline.meters.iter().filter(|b| !is_screen(b) && !have(&b.label)).collect()
+    }
+
+    /// The meters, not the TVs or Twatch TVs: where each is in the config's list, in order.
+    pub fn plain_meters(&self) -> Vec<usize> {
+        self.config.meters.iter().enumerate().filter(|(_, m)| !is_screen(m)).map(|(i, _)| i).collect()
+    }
+
+    /// What's along the taskbar, in its order: the meters together, where the first of them is; each TV and Twatch TV; and the
+    /// Hot Mic's label at whichever end it goes, while it's on.
+    pub fn widgets(&self) -> Vec<Widget> {
+        let mic = self.config.hotmic.is_some().then(|| self.config.mic_position() == "start");
+        let mut out = Vec::new();
+        if mic == Some(true) {
+            out.push(Widget::Mic);
+        }
+        for (i, m) in self.config.meters.iter().enumerate() {
+            if is_screen(m) {
+                out.push(Widget::Screen(i));
+            } else if !out.contains(&Widget::Meters) {
+                out.push(Widget::Meters);
+            }
+        }
+        if mic == Some(false) {
+            out.push(Widget::Mic);
+        }
+        out
+    }
+
+    /// Whether widget `at` (in `widgets()`) can move a step up (`up`) or down: the Hot Mic's label always can, to the other end;
+    /// the rest move among themselves, between its ends.
+    pub fn can_move_widget(&self, at: usize, up: bool) -> bool {
+        let widgets = self.widgets();
+        match widgets.get(at) {
+            Some(Widget::Mic) => (at == 0) != up,
+            Some(w) => {
+                let middle: Vec<&Widget> = widgets.iter().filter(|w| **w != Widget::Mic).collect();
+                let k = middle.iter().position(|m| *m == w).unwrap_or(0);
+                if up { k > 0 } else { k + 1 < middle.len() }
+            }
+            None => false,
+        }
+    }
+
+    /// Moves widget `at` (in `widgets()`) a step up (`up`) or down. The Hot Mic's label goes to the other end. Moving anything
+    /// writes the list with the meters together, where the widgets say.
+    pub fn move_widget(&mut self, at: usize, up: bool) {
+        if !self.can_move_widget(at, up) {
+            return;
+        }
+        let mut widgets = self.widgets();
+        let moving = widgets[at];
+        if moving == Widget::Mic {
+            if let Some(h) = self.config.hotmic.as_mut() {
+                h.position = if up { "start" } else { "tray" }.into();
+            }
+            return;
+        }
+        widgets.retain(|w| *w != Widget::Mic);
+        let k = widgets.iter().position(|w| *w == moving).unwrap_or(0);
+        widgets.swap(k, if up { k - 1 } else { k + 1 });
+        let plain = self.plain_meters();
+        self.arrange(&widgets, &plain);
+    }
+
+    /// Moves meter `i` (in the config's list) a step up or down among the meters, past any TV between them. Returns where it is
+    /// now.
+    pub fn move_meter(&mut self, i: usize, up: bool) -> usize {
+        let mut plain = self.plain_meters();
+        let Some(k) = plain.iter().position(|&p| p == i) else { return i };
+        let other = if up { k.checked_sub(1) } else { (k + 1 < plain.len()).then_some(k + 1) };
+        let Some(other) = other else { return i };
+        plain.swap(k, other);
+        let widgets: Vec<Widget> = self.widgets().into_iter().filter(|w| *w != Widget::Mic).collect();
+        self.arrange(&widgets, &plain)[i]
+    }
+
+    /// Where a new meter goes: after the last meter, so before any TV that follows them.
+    pub fn new_meter_at(&self) -> usize {
+        self.plain_meters().last().map_or(0, |i| i + 1)
+    }
+
+    /// Writes the config's list in `widgets`' order, the meters together in `plain`'s. Returns where each one went.
+    fn arrange(&mut self, widgets: &[Widget], plain: &[usize]) -> Vec<usize> {
+        let old = std::mem::take(&mut self.config.meters);
+        let mut went = vec![0; old.len()];
+        let mut order = Vec::with_capacity(old.len());
+        for w in widgets {
+            match w {
+                Widget::Meters => order.extend_from_slice(plain),
+                Widget::Screen(i) => order.push(*i),
+                Widget::Mic => {}
+            }
+        }
+        for (new, &i) in order.iter().enumerate() {
+            went[i] = new;
+        }
+        let mut old: Vec<Option<MeterSpec>> = old.into_iter().map(Some).collect();
+        self.config.meters = order.iter().filter_map(|&i| old[i].take()).collect();
+        went
     }
 
     /// Puts shipped meter `label` back, after the shipped meter before it that you still have (with the counters it
@@ -514,6 +1037,36 @@ mod tests {
     }
 
     #[test]
+    fn widgets_move_with_the_meters_together_and_the_mic_at_an_end() {
+        let mut m = stripped();
+        let mut tv2 = m.config.meters[1].clone();
+        tv2.label = "TV 2".into();
+        let mut ram = m.config.meters[0].clone();
+        ram.label = "RAM".into();
+        // CPU, TV, RAM, TV 2: the meters show as one, where the first is.
+        m.config.meters = vec![m.config.meters[0].clone(), m.config.meters[1].clone(), ram, tv2];
+        m.config.hotmic = Some(Default::default());
+        let labels = |m: &Model| m.config.meters.iter().map(|x| x.label.clone()).collect::<Vec<_>>();
+        assert_eq!(m.widgets(), [Widget::Meters, Widget::Screen(1), Widget::Screen(3), Widget::Mic]);
+        // Nothing passes the mic, which goes to the other end.
+        assert!(!m.can_move_widget(2, false) && !m.can_move_widget(0, true));
+        m.move_widget(3, true);
+        assert_eq!((m.config.mic_position(), m.widgets()[0]), ("start", Widget::Mic));
+        // TV up past the meters: the meters come together after it.
+        m.move_widget(2, true);
+        assert_eq!(labels(&m), ["TV", "CPU", "RAM", "TV 2"]);
+        assert_eq!(m.widgets(), [Widget::Mic, Widget::Screen(0), Widget::Meters, Widget::Screen(3)]);
+        // A meter moves among the meters, and says where it went; past the first, it stays.
+        assert_eq!(m.move_meter(2, true), 1);
+        assert_eq!(labels(&m), ["TV", "RAM", "CPU", "TV 2"]);
+        assert_eq!(m.move_meter(1, true), 1);
+        assert_eq!(m.new_meter_at(), 3);
+        // The TV isn't a meter to add back.
+        m.config.meters.retain(|x| !is_screen(x));
+        assert!(m.missing_meters().iter().all(|b| !is_screen(b)));
+    }
+
+    #[test]
     fn a_meter_comes_back_with_its_counters() {
         let mut m = stripped();
         m.restore_meter("SWAP").unwrap();
@@ -523,7 +1076,11 @@ mod tests {
 
     /// A model of a file of its own holding the shipped config.
     fn on_file(name: &str) -> Model {
-        let path = std::env::temp_dir().join(format!("pms-gui-test-{name}-{}.toml", std::process::id()));
+        // A folder each: what's beside a settings file goes with it.
+        let dir = std::env::temp_dir().join(format!("pms-gui-test-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pms.toml");
+        let _ = std::fs::remove_file(config::watchlist_path(&path));
         std::fs::write(&path, "config_version = 2\n").unwrap();
         Model::open(path)
     }
@@ -547,6 +1104,7 @@ mod tests {
             Section::Backdrop,
             Section::StartGlow,
             Section::AppGlow,
+            Section::Twatch,
             Section::Hotmic,
             Section::Toasts,
         ];
@@ -561,6 +1119,7 @@ mod tests {
         c.start_glow = None;
         c.app_glow = None;
         c.hotmic = None;
+        c.twatch = Some(pms::config::Twatch { more_sets: 1, ..Default::default() });
         c.toasts.as_mut().unwrap().style = "pimped".into();
         m.counters.pop();
         for s in sections {
@@ -569,6 +1128,60 @@ mod tests {
             assert!(m.at_default(s), "{s:?} reset");
         }
         assert_eq!(config::to_toml(&m.current()), config::to_toml(&m.baseline), "back to writing nothing");
+        std::fs::remove_file(&m.path).unwrap();
+    }
+
+    #[test]
+    fn saving_waits_for_the_edits_to_stop() {
+        let mut m = on_file("settle");
+        m.config.theme = "dark".into();
+        m.autosave();
+        std::thread::sleep(SAVE_AFTER / 2);
+        m.config.theme = "light".into();
+        m.autosave();
+        std::thread::sleep(SAVE_AFTER * 3 / 4);
+        m.autosave();
+        assert!(!std::fs::read_to_string(&m.path).unwrap().contains("theme = \"light\""), "still typing: it's only been a moment since the last edit");
+        std::thread::sleep(SAVE_AFTER / 2);
+        m.autosave();
+        assert!(std::fs::read_to_string(&m.path).unwrap().contains("theme = \"light\""));
+        std::fs::remove_file(&m.path).unwrap();
+    }
+
+    #[test]
+    fn a_list_of_favorites_only_changes_when_its_saved_and_right() {
+        let mut m = on_file("favorites-text");
+        m.twatch().favorites = vec!["crab".into()];
+        m.favorites_as_text();
+        assert_eq!(m.favorites_text.as_deref(), Some("crab"));
+        m.favorites_text = Some("lobs".into());
+        assert_eq!(m.twatch().favorites, ["crab"], "a half-typed name isn't a favorite");
+        m.favorites_text = Some("lobster\nnot a-name\n".into());
+        m.save_favorites_text();
+        assert_eq!(m.twatch().favorites, ["crab"]);
+        assert!(m.favorites_note.contains("a-name") && m.favorites_text.is_some(), "it says what's wrong and keeps your text");
+        m.favorites_text = Some("lobster\nhttps://www.twitch.tv/Shrimp\n".into());
+        m.save_favorites_text();
+        assert_eq!(m.twatch().favorites, ["lobster", "shrimp"]);
+        assert!(m.favorites_text.is_none() && m.favorites_note.is_empty());
+        m.new_favorite = "@prawn".into();
+        m.add_favorite();
+        m.new_favorite = "PRAWN".into();
+        m.add_favorite();
+        assert_eq!(m.twatch().favorites, ["lobster", "shrimp", "prawn"]);
+        assert!(m.new_favorite.is_empty());
+        let _ = std::fs::remove_file(&m.path);
+    }
+
+    #[test]
+    fn a_reset_of_how_it_plays_leaves_your_favorites() {
+        let mut m = on_file("twatch-reset");
+        m.config.twatch = Some(pms::config::Twatch { favorites: vec!["crab".into()], top_quality: "1080p60".into(), ..Default::default() });
+        assert!(!m.at_default(Section::Twatch));
+        assert_eq!(m.kept(Section::Twatch), ["Your favorites"]);
+        m.reset(Section::Twatch);
+        let t = m.config.twatch.clone().unwrap();
+        assert_eq!((t.favorites, t.top_quality.as_str()), (vec!["crab".to_string()], "480p"));
         std::fs::remove_file(&m.path).unwrap();
     }
 
@@ -633,6 +1246,41 @@ mod tests {
     }
 
     #[test]
+    fn a_file_broken_before_the_window_opened_is_left_alone_too() {
+        let path = std::env::temp_dir().join(format!("pms-gui-test-opened-broken-{}.toml", std::process::id()));
+        std::fs::write(&path, "config_version = 2\n[twatch\n").unwrap();
+        let mut m = Model::open(path.clone());
+        assert_eq!(m.problem.as_ref().and_then(|p| p.line), Some(2));
+        m.config.interval_ms = 2000;
+        m.edited_at = Some(Instant::now() - SAVE_AFTER);
+        m.autosave();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "config_version = 2\n[twatch\n", "a change here doesn't overwrite it");
+        std::fs::write(&path, "config_version = 2\ninterval_ms = 777\n").unwrap();
+        m.autosave();
+        assert!(m.problem.is_none(), "fixing the file is noticed");
+        assert_eq!(m.config.interval_ms, 777);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn favorites_are_saved_to_their_own_file_and_followed_from_it() {
+        let mut m = on_file("watchlist");
+        let list = config::watchlist_path(&m.path);
+        let _ = std::fs::remove_file(&list);
+        m.twatch().favorites = vec!["crab".into()];
+        m.edited_at = Some(Instant::now() - SAVE_AFTER);
+        m.autosave();
+        m.autosave();
+        assert!(std::fs::read_to_string(&list).is_ok_and(|t| t.contains("crab\n")), "in the watchlist");
+        assert!(!std::fs::read_to_string(&m.path).unwrap().contains("crab"), "and not in the settings");
+        std::fs::write(&list, "lobster\n").unwrap();
+        m.poll_daemon();
+        assert_eq!(m.config.twatch.as_ref().unwrap().favorites, ["lobster"]);
+        std::fs::remove_file(&list).unwrap();
+        std::fs::remove_file(&m.path).unwrap();
+    }
+
+    #[test]
     fn a_file_that_does_not_load_is_left_alone() {
         let mut m = on_file("broken");
         m.config.interval_ms = 2000;
@@ -643,4 +1291,26 @@ mod tests {
         assert_eq!(m.config.interval_ms, 2000, "what you changed here stays, for when the file is fixed");
         std::fs::remove_file(&m.path).unwrap();
     }
+}
+
+impl Model {
+    /// What's wrong with each setting that couldn't be used: the setting, the page it's on, and what to say, for the settings to
+    /// mark it in red.
+    pub fn issues(&self) -> Vec<(String, &'static str, String)> {
+        self.config
+            .issues
+            .iter()
+            .map(|e| {
+                let id = config::issue_setting(e);
+                let then = if config::issue_is_unknown(e) { "It's left out." } else { "It's back to its default for now." };
+                let words = format!("{}\n{then}", pms::problem::Problem::of(&self.path, e).words());
+                (id.clone(), config::settings_page(&id), words)
+            })
+            .collect()
+    }
+}
+
+/// The proxy as the settings show it: none, while the network settings' file won't load (the banner says why).
+fn shown_proxy(config: &Config) -> String {
+    config.network.as_ref().map(|n| n.proxy.clone()).filter(|p| p != pms::config::NETWORK_UNREAD).unwrap_or_default()
 }

@@ -14,7 +14,8 @@ pub fn knob(ui: &mut egui::Ui, value: &mut f32, min: f32, max: f32) -> egui::Res
         t = (t - response.drag_delta().y / 160.0 + response.drag_delta().x / 320.0).clamp(0.0, 1.0);
     }
     if response.hovered() {
-        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+        // The wheel as it turned, not smoothed: a notch is a step.
+        let scroll: f32 = ui.input(|i| i.raw.events.iter().map(|e| if let egui::Event::MouseWheel { delta, .. } = e { delta.y } else { 0.0 }).sum());
         if scroll != 0.0 {
             t = (t + scroll.signum() / 44.0).clamp(0.0, 1.0);
         }

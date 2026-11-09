@@ -12,6 +12,7 @@
 //!                                        engines/bars/devices: fraction per bar
 //!   meters presence <i> on|off           show, or slowly shrink away (N/A meters)
 //!   meters mic <apps>|off                the "MICROPHONE IN USE BY" label
+//!   meters micat tray|start              where that label goes: after the meters, beside the tray (default), or before them
 //!
 //! Cores topology: cores separated by `,`, L3 groups by `/`, NUMA nodes by `|`; a core is its
 //! thread count, prefixed `e` for an efficiency core.
@@ -81,6 +82,7 @@ enum Style {
     /// Named bars (`meters bars` names them): a GPU's engines (`engines`), plain bars (`bars`), or a pair per disk or
     /// network interface (`devices`).
     Engines,
+    Screen,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -124,6 +126,10 @@ struct Spec {
     pending_labels: Option<Vec<String>>,
     /// Whether the label shows beside the meter (it's in the tooltip either way).
     caption: bool,
+    /// The labels on their sides, reading down: the caption in a column of its own on the left, and each device's or GPU's
+    /// left of its bars. Its line's height is all the room the caption takes across.
+    sideways: bool,
+    caption_h: f64,
     /// Right against the meter before it: no spacing between.
     snug: bool,
     /// GPUs labelled NV, RAD rather than by ticker.
@@ -147,6 +153,23 @@ struct Spec {
     /// samples back.
     log_time: bool,
     span: usize,
+    /// Screen: the name of the screen it shows, its shape, and whether it's put away for now.
+    source: String,
+    aspect: f64,
+    small: bool,
+    /// Pie: the slice that glows.
+    slice_glow: Option<SliceGlow>,
+}
+
+#[derive(Clone, Copy)]
+struct SliceGlow {
+    slice: usize,
+    /// How far it stands out past the pie's edge.
+    extend: f64,
+    radius: f32,
+    strength: f32,
+    color: Option<Color>,
+    pulse_ms: i64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -159,6 +182,17 @@ enum Inside {
 
 fn inside(m: &Spec, fit: &Fit) -> bool {
     m.style == Style::Pie && m.caption && (m.inside == Inside::Always || (m.inside == Inside::Auto && fit.pies_inside))
+}
+
+/// Between a label on its side and what's beside it.
+const SIDEWAYS_GAP: f64 = 2.0;
+/// How much room across a GPU's maker or a device's name takes on its side, and a power state beside it.
+const SIDEWAYS_VENDOR: f64 = 13.0;
+const SIDEWAYS_STATE: f64 = 11.0;
+
+/// The column a caption on its side takes at the left of the cell: none if it isn't on its side, or isn't there.
+fn side_col(m: &Spec, fit: &Fit) -> f64 {
+    if m.sideways && m.caption && !m.label.is_empty() && m.style != Style::Screen && !inside(m, fit) { m.caption_h + SIDEWAYS_GAP } else { 0.0 }
 }
 
 struct Meter {
@@ -193,9 +227,11 @@ enum Parts {
     History { bars: Vec<SpriteVisual>, xs: Vec<(f64, f64)>, buckets: Vec<usize>, h: f64 },
     Bar { fill: Rectangle, peak: Rectangle, span: f64 },
     /// `glow`: the rim's, and the (opacity, reach) it was last given.
-    Pie { wedges: Vec<Path>, d: f64, glow: Option<Glow>, lit: Cell<(f32, f32)> },
+    Pie { wedges: Vec<Path>, d: f64, glow: Option<Glow>, lit: Cell<(f32, f32)>, shines: Option<Shine> },
     /// `nodes`: each topology node's (GPU's, device's) x range in the cell: its label and bars.
     Cores { bars: Vec<CoreBar>, states: Vec<Option<TextBlock>>, nodes: Vec<(f64, f64)> },
+    /// A live picture (screen.rs), which looks after itself.
+    Screen,
 }
 
 struct CoreBar {
@@ -244,18 +280,70 @@ fn bar_layer(cell: &Canvas, width: f64, h: f64) -> R<ContainerVisual> {
     host.SetWidth(width).map_err(w)?;
     host.SetHeight(h).map_err(w)?;
     put(cell, &host, 0.0, 0.0)?;
-    let c = visual(&host)?.Compositor().map_err(w)?;
+    let c = compositor(&host)?;
     let layer = c.CreateContainerVisual().map_err(w)?;
     ElementCompositionPreview::SetElementChildVisual(&ui(&host)?, &layer).map_err(w)?;
     Ok(layer)
 }
 
+/// The most bars kept for reuse: about what a full strip has.
+const MOST_SPARE_BARS: usize = 512;
+
+thread_local! {
+    /// Bars from cells that have gone. Explorer never gives back the memory of a sprite that has been on screen, closed or not,
+    /// and cells are built again all day, whenever a GPU's engines change: so a sprite, once made, is used again.
+    static SPARE_BARS: RefCell<Vec<SpriteVisual>> = const { RefCell::new(Vec::new()) };
+}
+
 fn bar_sprite(layer: &ContainerVisual, color: Color) -> R<SpriteVisual> {
+    let color = crate::themed(color);
+    let again = |s: &SpriteVisual| -> R<()> {
+        s.Brush().map_err(w)?.cast::<CompositionColorBrush>().map_err(w)?.SetColor(color).map_err(w)?;
+        layer.Children().map_err(w)?.InsertAtTop(s).map_err(w)
+    };
+    // One that won't go back in (the taskbar has been rebuilt on another compositor, say) is simply let go.
+    while let Some(s) = SPARE_BARS.with_borrow_mut(Vec::pop) {
+        if again(&s).is_ok() {
+            return Ok(s);
+        }
+    }
     let c = layer.Compositor().map_err(w)?;
     let s = c.CreateSpriteVisual().map_err(w)?;
-    s.SetBrush(&c.CreateColorBrushWithColor(crate::themed(color)).map_err(w)?).map_err(w)?;
+    s.SetBrush(&c.CreateColorBrushWithColor(color).map_err(w)?).map_err(w)?;
     layer.Children().map_err(w)?.InsertAtTop(&s).map_err(w)?;
     Ok(s)
+}
+
+/// Takes a bar off its layer and keeps it. It's left with no size, so that it shows nothing until `set_bar` says what it's to be.
+fn retire_bar(s: &SpriteVisual) -> R<()> {
+    let _ = s.StopAnimation(&HSTRING::from("Offset.Y"));
+    s.SetShadow(None::<&CompositionShadow>).map_err(w)?;
+    s.Parent().map_err(w)?.Children().map_err(w)?.Remove(s).map_err(w)?;
+    s.SetSize(Vector2::default()).map_err(w)?;
+    s.SetOffset(Vector3::default()).map_err(w)?;
+    SPARE_BARS.with_borrow_mut(|spare| {
+        if spare.len() < MOST_SPARE_BARS {
+            spare.push(s.clone());
+        }
+    });
+    Ok(())
+}
+
+/// Keeps the bars of a cell that's going.
+fn retire_bars(cell: &MeterCell) {
+    let kept = match &cell.parts {
+        Parts::History { bars, .. } => bars.iter().try_for_each(retire_bar),
+        Parts::Cores { bars, .. } => bars.iter().try_for_each(|b| [&b.track, &b.kernel, &b.user].into_iter().try_for_each(retire_bar)),
+        _ => Ok(()),
+    };
+    if let Err(e) = kept {
+        crate::log(format!("retiring bars: {e}"));
+    }
+}
+
+/// Lets go of the spare bars: this copy of the TAP is done.
+pub(crate) fn drop_spare_bars() {
+    SPARE_BARS.with_borrow_mut(Vec::clear);
 }
 
 /// Size a bar standing on `bottom`, `fraction` of `full` tall, pixel-exact.
@@ -320,16 +408,24 @@ struct Strip {
     panel: StackPanel,
     meters: Vec<Meter>,
     mic: Option<Mic>,
+    /// The mic's label goes before the meters, not after them.
+    mic_first: bool,
     height_mode: f64,
     bar_mode: f64,
     fit: Option<Fit>,
     pending_sep: bool,
     /// The panel glides when the strip's width changes (attached after its first placement).
     panel_glides: bool,
+    /// The taskbar's height when the strip was last placed, for the hover zones.
+    zone_h: f32,
 }
 
 thread_local! {
+    /// The strip's being put together: it waits for the last of it to be built.
+    static HELD: Cell<bool> = const { Cell::new(false) };
+    static COMPOSITOR: RefCell<Option<windows::UI::Composition::Compositor>> = const { RefCell::new(None) };
     static STRIP: RefCell<Option<Strip>> = const { RefCell::new(None) };
+    static SCALE_WATCH: RefCell<Option<(pms_xaml::XamlRoot, i64)>> = const { RefCell::new(None) };
 }
 
 fn w(e: windows_core::Error) -> String {
@@ -348,14 +444,40 @@ fn ms(n: i64) -> TimeSpan {
     TimeSpan { Duration: n * 10_000 }
 }
 
+/// An element's visual. This is the slow one: 7 ms a call on the taskbar's own thread, against microseconds for all else that goes
+/// into a cell, so a cell only asks where it has to.
 fn visual(e: &impl Interface) -> R<Visual> {
     ElementCompositionPreview::GetElementVisual(&ui(e)?).map_err(w)
+}
+
+/// The taskbar's compositor, from `e` the first time: it's what most things want a visual for.
+fn compositor(e: &impl Interface) -> R<windows::UI::Composition::Compositor> {
+    if let Some(c) = COMPOSITOR.with_borrow(Clone::clone) {
+        return Ok(c);
+    }
+    let c = visual(e)?.Compositor().map_err(w)?;
+    COMPOSITOR.set(Some(c.clone()));
+    Ok(c)
 }
 
 pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
     let arg = |i: usize| args.get(i).map(String::as_str);
     match arg(0) {
-        Some("clear") | Some("off") => clear(ctx),
+        Some("clear") | Some("off") => {
+            HELD.set(false);
+            COMPOSITOR.set(None);
+            clear(ctx)
+        }
+        // hold, then whatever's to be added, then release: one rebuild for the lot, and rebuilding is what takes the time.
+        Some("hold") => {
+            HELD.set(true);
+            Ok("held".into())
+        }
+        Some("release") => {
+            HELD.set(false);
+            refit(true);
+            Ok("released".into())
+        }
         Some("height") => {
             let mode = |word: Option<&str>| match word {
                 Some("compact") => Ok(0.75),
@@ -369,6 +491,19 @@ pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
             with_strip(|s| (s.height_mode, s.bar_mode) = (meters, bars));
             refit(true);
             Ok(format!("meter height {}, bars {}", arg(1).unwrap_or("tall"), arg(2).or(arg(1)).unwrap_or("tall")))
+        }
+        Some("micat") => {
+            let first = match arg(1) {
+                Some("start") => true,
+                Some("tray") | None => false,
+                Some(other) => return Err(format!("unknown place `{other}` (tray|start)")),
+            };
+            strip(ctx)?;
+            let moved = with_strip(|s| std::mem::replace(&mut s.mic_first, first) != first).unwrap_or(false);
+            if moved {
+                refit(true);
+            }
+            Ok(format!("mic label {}", if first { "before the meters" } else { "beside the tray" }))
         }
         Some("add") => add(ctx, &args[1..]),
         Some("sep") => {
@@ -396,6 +531,10 @@ pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
             let falling = with_strip(|s| -> R<bool> {
                 let m = s.meters.get_mut(i).ok_or_else(|| format!("no meter #{i}"))?;
                 let already = m.spec.pending_labels.is_some();
+                // A sampler that's new says everything again, and the same bars needn't be built again.
+                if !already && m.spec.labels == labels {
+                    return Ok(true);
+                }
                 m.spec.pending_labels = Some(labels.clone());
                 if already {
                     return Ok(true);
@@ -438,7 +577,7 @@ pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
             })
             .ok_or("no meters")??;
             if relayout {
-                refit(true);
+                refit_one(i);
             }
             Ok(String::new())
         }
@@ -482,6 +621,9 @@ fn with_strip<T>(f: impl FnOnce(&mut Strip) -> T) -> Option<T> {
 }
 
 fn clear(ctx: &Ctx) -> R<String> {
+    crate::screen::stop();
+    unwatch_scale();
+    with_strip(|s| s.meters.iter().filter_map(|m| m.cell.as_ref()).for_each(retire_bars));
     STRIP.with_borrow_mut(|s| *s = None);
     stage::drop_stage(ctx)?;
     Ok("meters cleared".into())
@@ -495,7 +637,7 @@ fn strip(ctx: &Ctx) -> R<StackPanel> {
     let panel = StackPanel::new().map_err(w)?;
     panel.SetOrientation(Orientation::Horizontal).map_err(w)?;
     stage::stage(ctx)?.Children().map_err(w)?.Append(&ui(&panel)?).map_err(w)?;
-    STRIP.with_borrow_mut(|s| *s = Some(Strip { panel: panel.clone(), meters: Vec::new(), mic: None, height_mode: 0.875, bar_mode: 1.0, fit: None, pending_sep: false, panel_glides: false }));
+    STRIP.with_borrow_mut(|s| *s = Some(Strip { panel: panel.clone(), meters: Vec::new(), mic: None, mic_first: false, height_mode: 0.875, bar_mode: 1.0, fit: None, pending_sep: false, panel_glides: false, zone_h: 0.0 }));
     Ok(panel)
 }
 
@@ -519,6 +661,13 @@ fn text_block(s: &str, size: f64, weight: u16, color: Color) -> R<TextBlock> {
     t.SetFontWeight(FontWeight { Weight: weight }).map_err(w)?;
     t.SetForeground(&brush(color)?).map_err(w)?;
     Ok(t)
+}
+
+/// Natural height of a text block: its line's.
+fn measure_h(t: &TextBlock) -> R<f64> {
+    let e = ui(t)?;
+    e.Measure(Size { Width: f32::INFINITY, Height: f32::INFINITY }).map_err(w)?;
+    Ok(e.DesiredSize().map_err(w)?.Height as f64)
 }
 
 /// Natural width of a text block.
@@ -555,6 +704,7 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
         "pie" => Style::Pie,
         "cores" => Style::Cores,
         "engines" | "bars" | "devices" => Style::Engines,
+        "screen" => Style::Screen,
         other => return Err(format!("unknown style `{other}`")),
     };
     let colors = get("colors").split(',').chain([get("color")]).filter(|c| !c.is_empty()).map(parse_color).collect::<R<Vec<_>>>()?;
@@ -562,7 +712,7 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
     if style == Style::Engines && colors.len() == 1 {
         colors.push(colors[0]);
     }
-    if colors.is_empty() || (style == Style::Cores && colors.len() < 2) {
+    if style != Style::Screen && (colors.is_empty() || (style == Style::Cores && colors.len() < 2)) {
         return Err("missing color= / colors= (cores: colors=<user>,<kernel>)".into());
     }
     // A GPU engines meter labels each GPU by its maker instead of having a caption of its own.
@@ -573,6 +723,7 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
     // nocaption=1: the label only in the tooltip. Devices are labelled each by its own name instead.
     let caption = get("nocaption") != "1" && !devices;
     let caption_w = if caption { measure(&text_block(&label, CAPTION.0, CAPTION.1, TEXT)?)? } else { 0.0 };
+    let caption_h = if caption { measure_h(&text_block(&label, CAPTION.0, CAPTION.1, TEXT)?)? } else { 0.0 };
     let font = if get("font").is_empty() { "Cascadia Mono, Consolas".to_string() } else { get("font").to_string() };
     let value_w = measure(&value_block(wide, &font)?)?;
     let sep = with_strip(|s| std::mem::take(&mut s.pending_sep)).unwrap_or(false);
@@ -599,6 +750,8 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
         bar_tips: Vec::new(),
         pending_labels: None,
         caption,
+        sideways: get("sideways") == "1",
+        caption_h,
         snug: get("snug") == "1",
         short_vendors: get("vendorlabel") == "short",
         glow: match get("glow") {
@@ -614,6 +767,17 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
         gpu_states: Vec::new(),
         log_time: get("time") != "linear",
         span: get("span").parse().unwrap_or(300),
+        source: get("source").to_string(),
+        aspect: if get("wide16") == "1" { SCREEN_WIDE } else { SCREEN_ASPECT },
+        small: false,
+        slice_glow: get("sliceglow").parse().ok().map(|slice| SliceGlow {
+            slice,
+            extend: get("glowextend").parse().unwrap_or(2.5),
+            radius: get("glowradius").parse().unwrap_or(4.0),
+            strength: get("glowstrength").parse().unwrap_or(1.0),
+            color: parse_color(get("glowcolor")).ok(),
+            pulse_ms: get("glowpulse").parse().unwrap_or(0),
+        }),
         inside: match get("inside") {
             "always" => Inside::Always,
             "auto" => Inside::Auto,
@@ -642,6 +806,34 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
 
 // ---------------------------------------------------------------------------------------------
 // Fitting
+
+/// What meter `i` shows, if it's a screen.
+pub(crate) fn screen_source(i: usize) -> Option<String> {
+    with_strip(|s| s.meters.get(i).filter(|m| m.spec.style == Style::Screen).map(|m| m.spec.source.clone())).flatten()
+}
+
+/// Puts the screen called `source` away, or brings it back.
+pub(crate) fn screen_small(source: &str, small: bool) {
+    let changed = with_strip(|s| {
+        let mut changed = None;
+        for (i, m) in s.meters.iter_mut().enumerate().filter(|(_, m)| m.spec.style == Style::Screen && m.spec.source == source) {
+            if m.spec.small != small {
+                changed = Some(i);
+            }
+            m.spec.small = small;
+        }
+        changed
+    });
+    if let Some(Some(i)) = changed {
+        refit_one(i);
+    }
+}
+
+/// A screen's shape: 4:3, as the pictures it's made for were, or the 16:9 of a newer set.
+const SCREEN_ASPECT: f64 = 4.0 / 3.0;
+const SCREEN_WIDE: f64 = 16.0 / 9.0;
+/// A screen that's off and put away: a small button, this wide for its height.
+const SCREEN_PUT_AWAY: f64 = 0.42;
 
 /// How much of a chosen bar width shows in the gaps between bars.
 const GAP_FOLLOWS_WIDTH: f64 = 0.1;
@@ -696,7 +888,7 @@ fn pie_d(h: f64) -> f64 {
 
 /// Width of a cell's text at the fit's horizontal text scale.
 fn text_w(m: &Spec, fit: &Fit) -> f64 {
-    let caption = if inside(m, fit) { 0.0 } else { m.caption_w };
+    let caption = if inside(m, fit) || side_col(m, fit) > 0.0 { 0.0 } else { m.caption_w };
     let value = if m.value { m.value_w } else { 0.0 };
     caption.max(value) * fit.text
 }
@@ -709,13 +901,16 @@ fn cell_width(m: &Spec, fit: &Fit) -> f64 {
 
 fn raw_cell_width(m: &Spec, fit: &Fit) -> f64 {
     let t = text_w(m, fit);
-    match m.style {
+    side_col(m, fit)
+        + match m.style {
         Style::History => (HISTORY_W * fit.graph).max(t) + 2.0 * TEXT_PAD,
         Style::Bar => (GAUGE_W * fit.graph).max(t) + 2.0 * TEXT_PAD,
         Style::Pie if t == 0.0 => TEXT_PAD + pie_d(fit.h) + TEXT_PAD,
         Style::Pie => TEXT_PAD + pie_d(fit.h) + 5.0 + t + TEXT_PAD,
+        Style::Screen if m.small => (fit.bar_h * SCREEN_PUT_AWAY).round(),
+        Style::Screen => (fit.bar_h * m.aspect).round(),
         Style::Cores | Style::Engines => TEXT_PAD + t + 4.0 + gpu_labels_w(m, fit) + cores_width(&m.topo, m.barw, fit.graph) + TEXT_PAD,
-    }
+        }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -760,6 +955,10 @@ const HEAT_WHITEN: f32 = 0.25;
 
 /// The room the GPUs' labels take.
 fn gpu_labels_w(m: &Spec, fit: &Fit) -> f64 {
+    if m.sideways {
+        let stated = |j: usize| m.gpu_states.get(j).is_some_and(|s| !s.is_empty());
+        return (0..m.gpus.len()).map(|j| SIDEWAYS_VENDOR + if stated(j) { SIDEWAYS_STATE } else { 0.0 } + VENDOR_GAP).sum();
+    }
     m.gpus.iter().map(|(_, w, _)| w * fit.text + VENDOR_GAP).sum()
 }
 
@@ -872,7 +1071,7 @@ fn target(at: &Snapshot, s: &Strip) -> (f64, (f64, f64, bool)) {
 
 /// How high a cell for this meter is.
 fn cell_h(m: &Spec, fit: &Fit) -> f64 {
-    if matches!(m.style, Style::Cores | Style::Engines) { fit.bar_h } else { fit.h }
+    if matches!(m.style, Style::Cores | Style::Engines | Style::Screen) { fit.bar_h } else { fit.h }
 }
 
 /// A full-height bar's gap to the cell's top and bottom edges (DIPs): clear of the taskbar's top line and the screen.
@@ -886,14 +1085,45 @@ fn bar_extent(h: f64, margin: f64, px: f64) -> (f64, f64) {
     ((cell - 2.0 * gap) / px, (cell - gap) / px)
 }
 
+/// Refits the moment the display's scale changes. Without this it would wait for the next layout to come along, which can
+/// take a while; this is an event, so it costs nothing until then.
+fn watch_scale(root: &pms_xaml::XamlRoot) {
+    if SCALE_WATCH.with_borrow(Option::is_some) {
+        return;
+    }
+    let changed = windows::Foundation::TypedEventHandler::new(|root: windows_core::Ref<pms_xaml::XamlRoot>, _| {
+        if let Some(scale) = root.as_ref().and_then(|r| r.RasterizationScale().ok())
+            && scale.max(0.5) != PX.get()
+        {
+            on_ui(|| refit(true));
+        }
+        Ok(())
+    });
+    if let Ok(token) = root.Changed(&changed) {
+        SCALE_WATCH.with_borrow_mut(|w| *w = Some((root.clone(), token)));
+    }
+}
+
+fn unwatch_scale() {
+    if let Some((root, token)) = SCALE_WATCH.with_borrow_mut(Option::take) {
+        let _ = root.RemoveChanged(token);
+    }
+}
+
 /// Re-solve the fit for the current free space; rebuild the cells if it changed (or `force`).
 fn refit(force: bool) {
+    if HELD.get() {
+        return;
+    }
     let snap = lock(&SNAPSHOT).clone();
     STRIP.with(|cell| {
         let Ok(mut state) = cell.try_borrow_mut() else { return };
         let Some(s) = state.as_mut() else { return };
-        if let Ok(scale) = s.panel.XamlRoot().and_then(|r| r.RasterizationScale()) {
-            PX.set(scale.max(0.5));
+        if let Ok(root) = s.panel.XamlRoot() {
+            watch_scale(&root);
+            if let Ok(scale) = root.RasterizationScale() {
+                PX.set(scale.max(0.5));
+            }
         }
         let (avail, h) = target(&snap, s);
         let fit = s.solve(avail, h);
@@ -906,6 +1136,31 @@ fn refit(force: bool) {
         }
     });
     position(&snap);
+}
+
+/// Meter `i` alone has changed shape: only it is built again, unless that changes how the rest fit. A GPU's engines come and go
+/// all day, and this is on the taskbar's own thread.
+fn refit_one(i: usize) {
+    if HELD.get() {
+        return;
+    }
+    let snap = lock(&SNAPSHOT).clone();
+    let done = STRIP.with(|cell| {
+        let Ok(mut state) = cell.try_borrow_mut() else { return false };
+        let Some(s) = state.as_mut() else { return false };
+        let (avail, h) = target(&snap, s);
+        let fit = s.solve(avail, h);
+        s.fit == Some(fit)
+            && rebuild_one(s, i, fit).unwrap_or_else(|e| {
+                crate::log(format!("meter rebuild: {e}"));
+                false
+            })
+    });
+    if done {
+        position(&snap);
+    } else {
+        refit(true);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -944,11 +1199,26 @@ fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
     glow.SetOpacity(0.0).map_err(w)?;
     put(&root, &glow, 0.0, 0.0)?;
 
-    let caption = text_block(if m.caption { &m.label } else { "" }, CAPTION.0, CAPTION.1, TEXT_DIM)?;
+    // A caption on its side has a column of its own, and the rest is drawn beside it as it would be without one.
+    let col = side_col(m, fit);
+    let cell_root = root.clone();
+    let (root, width) = if col > 0.0 {
+        let side = text_block(&m.label, CAPTION.0, CAPTION.1, TEXT_DIM)?;
+        put_sideways(&root, &side, TEXT_PAD, h)?;
+        let body = Canvas::new().map_err(w)?;
+        body.SetWidth(width - col).map_err(w)?;
+        body.SetHeight(h).map_err(w)?;
+        put(&root, &body, col, 0.0)?;
+        (body, width - col)
+    } else {
+        (root.clone(), width)
+    };
+    let caption = text_block(if m.caption && col == 0.0 { &m.label } else { "" }, CAPTION.0, CAPTION.1, TEXT_DIM)?;
     let value = value_block("", &m.font)?;
     let pad_y = if h >= 44.0 { 2.0 } else { 0.0 };
     // Overlaid text squeezes only when it, not the graphic, is what makes the cell wide.
-    let natural = if m.value { m.caption_w.max(m.value_w) } else { m.caption_w };
+    let caption_w = if col > 0.0 { 0.0 } else { m.caption_w };
+    let natural = if m.value { caption_w.max(m.value_w) } else { caption_w };
     let squeeze_if_wider = |graphic: f64| if natural > graphic { fit.text } else { 1.0 };
 
     let (parts, text_x, text_scale, value_lift) = match m.style {
@@ -995,14 +1265,28 @@ fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
                 pie.Children().map_err(w)?.Append(&ui(&p)?).map_err(w)?;
                 wedges.push(p);
             }
+            let mut shines = None;
+            if let Some(g) = m.slice_glow.filter(|g| g.slice < wedges.len()) {
+                let color = g.color.or(m.colors.get(g.slice).copied()).unwrap_or(m.colors[0]);
+                match slice_glow(&pie, d, g, color) {
+                    Ok(shape) => shines = Some(Shine { slice: g.slice, shape, extend: g.extend, last: Cell::new(None), out: Cell::new(0.0) }),
+                    Err(e) => crate::log(format!("slice glow: {e}")),
+                }
+            }
             let glow = pie_rim(&pie, d, m.colors[0])?;
             put(&root, &pie, TEXT_PAD, ((h - d) / 2.0).round())?;
-            (Parts::Pie { wedges, d, glow, lit: Cell::new((-1.0, -1.0)) }, TEXT_PAD + d + 5.0, fit.text, 0.0)
+            (Parts::Pie { wedges, d, glow, lit: Cell::new((-1.0, -1.0)), shines }, TEXT_PAD + d + 5.0, fit.text, 0.0)
         }
         Style::Cores | Style::Engines => {
             let x0 = TEXT_PAD + text_w(m, fit) + 4.0;
             let (bars, states, nodes) = core_bars(&root, m, x0, h, fit, pad_y)?;
             (Parts::Cores { bars, states, nodes }, TEXT_PAD, fit.text, 0.0)
+        }
+        Style::Screen => {
+            let px = PX.get();
+            let picture = crate::screen::picture(&m.source, ((width * px).round() as u32, (h * px).round() as u32), (width, h))?;
+            put(&root, &picture, 0.0, 0.0)?;
+            (Parts::Screen, 0.0, 1.0, 0.0)
         }
     };
     if inside(m, fit) {
@@ -1020,12 +1304,12 @@ fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
     } else if m.value {
         put_text(&root, &caption, text_x, pad_y, text_scale, None)?;
         put_text(&root, &value, text_x, h - VALUE_H - pad_y - value_lift, text_scale, Some(m.value_w))?;
-    } else {
+    } else if col == 0.0 {
         // Caption alone: centered beside the graphic, or just above a gauge.
         let y = if m.style == Style::Bar { h - value_lift - pad_y - 15.0 } else { ((h - 13.0) / 2.0).round() };
         put_text(&root, &caption, text_x, y, text_scale, None)?;
     }
-    Ok(MeterCell { root, glow, value, parts, sep: None, gliding: Cell::new(false), shown_text: RefCell::new(String::new()) })
+    Ok(MeterCell { root: cell_root, glow, value, parts, sep: None, gliding: Cell::new(false), shown_text: RefCell::new(String::new()) })
 }
 
 /// The bars, each GPU's power-state text (where it has one) to update as it changes, and where each topology node
@@ -1052,6 +1336,21 @@ fn core_bars(canvas: &Canvas, m: &Spec, x0: f64, h: f64, fit: &Fit, pad_y: f64) 
         // A GPU's maker (a device's name), left of its bars.
         if let Some((ticker, natural, v)) = m.gpus.get(ni) {
             let label = text_block(ticker, VENDOR_FONT.0, VENDOR_FONT.1, v.map_or(TEXT_DIM, |v| Color { A: 0xE0, ..v.bar }))?;
+            // On their sides, a power state stands beside the maker.
+            if m.sideways {
+                put_sideways(canvas, &label, x, h)?;
+                x += SIDEWAYS_VENDOR;
+                match m.gpu_states.get(ni).filter(|s| !s.is_empty()) {
+                    Some(state) => {
+                        let t = text_block(state, GPU_STATE_FONT.0, GPU_STATE_FONT.1, TEXT_DIM)?;
+                        put_sideways(canvas, &t, x, h)?;
+                        states.push(Some(t));
+                        x += SIDEWAYS_STATE;
+                    }
+                    None => states.push(None),
+                }
+                x = snap(x + VENDOR_GAP);
+            } else {
             // With its power state known, the maker sits higher, the state small beneath it.
             match m.gpu_states.get(ni).filter(|s| !s.is_empty()) {
                 Some(state) => {
@@ -1066,6 +1365,7 @@ fn core_bars(canvas: &Canvas, m: &Spec, x0: f64, h: f64, fit: &Fit, pad_y: f64) 
                 }
             }
             x = snap(x + natural * fit.text + VENDOR_GAP);
+            }
         }
         for (li, l3) in node.split('/').enumerate() {
             x += if li > 0 { lg } else { 0.0 };
@@ -1250,9 +1550,21 @@ fn rebuild(s: &mut Strip, fit: Fit) -> R<()> {
     HIGHLIGHT.set(None);
     NEEDS_POSITION.set(true);
     let children = s.panel.Children().map_err(w)?;
-    children.Clear().map_err(w)?;
+    s.meters.iter().filter_map(|m| m.cell.as_ref()).for_each(retire_bars);
+    crate::stage::empty(&s.panel.cast().map_err(w)?);
     s.panel.SetSpacing(0.0).map_err(w)?;
     let shown = s.shown(&fit);
+    // The mic's label, and the separator between it and the meters: before them, if that's where it goes.
+    if s.mic_first
+        && let Some(mic) = s.mic.as_mut()
+    {
+        let c = build_mic(mic, &fit)?;
+        children.Append(&ui(&c)?).map_err(w)?;
+        mic.cell = Some(c);
+        if !shown.is_empty() {
+            children.Append(&ui(&sep_cell(&fit)?)?).map_err(w)?;
+        }
+    }
     for i in 0..s.meters.len() {
         let m = &mut s.meters[i];
         let mut cell = build_cell(&m.spec, &fit)?;
@@ -1269,7 +1581,9 @@ fn rebuild(s: &mut Strip, fit: Fit) -> R<()> {
             draw(m)?;
         }
     }
-    if let Some(mic) = s.mic.as_mut() {
+    if !s.mic_first
+        && let Some(mic) = s.mic.as_mut()
+    {
         if !shown.is_empty() {
             children.Append(&ui(&sep_cell(&fit)?)?).map_err(w)?;
         }
@@ -1279,6 +1593,36 @@ fn rebuild(s: &mut Strip, fit: Fit) -> R<()> {
     }
     cast_shadows();
     sync_seps(s)
+}
+
+/// Builds meter `i`'s cell again, in the same place: false if it has no place yet.
+fn rebuild_one(s: &mut Strip, i: usize, fit: Fit) -> R<bool> {
+    let children = s.panel.Children().map_err(w)?;
+    let on = if s.shown(&fit).contains(&i) { Visibility::Visible } else { Visibility::Collapsed };
+    let Some(m) = s.meters.get_mut(i) else { return Ok(false) };
+    let Some(old) = m.cell.as_ref() else { return Ok(false) };
+    let mut at = 0;
+    if !children.IndexOf(&ui(&old.root)?, &mut at).map_err(w)? {
+        return Ok(false);
+    }
+    let sep = old.sep.clone();
+    HIGHLIGHT.set(None);
+    NEEDS_POSITION.set(true);
+    retire_bars(old);
+    let mut cell = build_cell(&m.spec, &fit)?;
+    cell.sep = sep;
+    cell.root.SetVisibility(on).map_err(w)?;
+    if let Some(old) = &m.cell {
+        crate::stage::unbuild(&ui(&old.root)?);
+    }
+    children.SetAt(at, &ui(&cell.root)?).map_err(w)?;
+    m.cell = Some(cell);
+    if !m.text.is_empty() {
+        draw(m)?;
+    }
+    cast_shadows();
+    sync_seps(s)?;
+    Ok(true)
 }
 
 /// A separator shows only between two meters that are both on screen.
@@ -1303,14 +1647,15 @@ fn sync_seps(s: &Strip) -> R<()> {
 }
 
 /// A pie slice from fraction `a` to `b` of the way round, clockwise from 12 o'clock.
-fn wedge(a: f64, b: f64, d: f64) -> R<Geometry> {
-    let r = d / 2.0;
+/// A wedge standing `out` past a pie `d` across, around a center `c` from its element's corner. Its angle is what it was.
+fn wedge_out(a: f64, b: f64, d: f64, out: f64, c: f64) -> R<Geometry> {
+    let r = d / 2.0 + out;
     let point = |f: f64| {
         let t = f * std::f64::consts::TAU;
-        Point { X: (r + r * t.sin()) as f32, Y: (r - r * t.cos()) as f32 }
+        Point { X: (c + r * t.sin()) as f32, Y: (c - r * t.cos()) as f32 }
     };
     let fig = PathFigure::new().map_err(w)?;
-    fig.SetStartPoint(Point { X: r as f32, Y: r as f32 }).map_err(w)?;
+    fig.SetStartPoint(Point { X: c as f32, Y: c as f32 }).map_err(w)?;
     fig.SetIsClosed(true).map_err(w)?;
     let segs = fig.Segments().map_err(w)?;
     let line = LineSegment::new().map_err(w)?;
@@ -1341,6 +1686,7 @@ fn draw(m: &Meter) -> R<()> {
         *cell.shown_text.borrow_mut() = m.text.clone();
     }
     match &cell.parts {
+        Parts::Screen => {}
         Parts::History { bars, xs, buckets, h } => {
             let scale = m.pushed_max.or(m.spec.max).unwrap_or_else(|| m.history.iter().copied().fold(0.0, f64::max) * 1.1).max(1e-9);
             // Bar k from the right shows the peak of samples [buckets[k-1], buckets[k]) old, so a
@@ -1362,7 +1708,7 @@ fn draw(m: &Meter) -> R<()> {
             Canvas::SetLeft(&ui(peak)?, TEXT_PAD + (top * span - 1.5).max(0.0)).map_err(w)?;
             peak.SetVisibility(if top > f + 0.005 { Visibility::Visible } else { Visibility::Collapsed }).map_err(w)?;
         }
-        Parts::Pie { wedges, d, glow, lit } => {
+        Parts::Pie { wedges, d, glow, lit, shines } => {
             if let Some(g) = glow {
                 pie_glow(g, lit, m.values.first().copied().unwrap_or(0.0), m.spec.pressure)?;
             }
@@ -1372,8 +1718,17 @@ fn draw(m: &Meter) -> R<()> {
                 if to - from < 1e-4 {
                     p.SetVisibility(Visibility::Collapsed).map_err(w)?;
                 } else {
-                    p.SetData(&wedge(from, to, *d)?).map_err(w)?;
+                    let out = shines.as_ref().filter(|s| s.slice == j).map_or(0.0, |s| s.moved(to - from));
+                    p.SetData(&wedge_out(from, to, *d, out, *d / 2.0)?).map_err(w)?;
                     p.SetVisibility(Visibility::Visible).map_err(w)?;
+                }
+                if let Some(s) = shines.as_ref().filter(|s| s.slice == j) {
+                    if to - from < 1e-4 {
+                        s.shape.SetVisibility(Visibility::Collapsed).map_err(w)?;
+                    } else {
+                        s.shape.SetData(&wedge_out(from, to, *d, s.out.get(), *d / 2.0 + s.extend)?).map_err(w)?;
+                        s.shape.SetVisibility(Visibility::Visible).map_err(w)?;
+                    }
                 }
                 from = to;
             }
@@ -1462,6 +1817,7 @@ fn push(args: &[String]) -> R<String> {
                 }
                 m.values = vec![f];
             }
+            Style::Screen => {}
             Style::Pie | Style::Cores | Style::Engines => {
                 let clean: Vec<f64> = values.iter().map(|v| if v.is_finite() { *v } else { 0.0 }).collect();
                 // Bars are falling off: values come in the new order; map them onto the bars still shown.
@@ -1717,19 +2073,49 @@ pub fn mic_anchor() -> Option<MicAnchor> {
 // ---------------------------------------------------------------------------------------------
 // Placement
 
-/// Fade the strip out (a toast is using its spot) or back in.
-pub fn set_hidden(hidden: bool) {
-    crate::tooltip::set_enabled(!hidden);
+/// Where a toast stops, if it's to stop at something of ours: the left edge of the first screen, or of the mic's label
+/// (taskbar-window DIPs), and how many meters lie left of it. None if that isn't showing now.
+pub(crate) fn anchor(kind: &str) -> Option<(f32, usize)> {
+    STRIP.with(|cell| {
+        let state = cell.try_borrow().ok()?;
+        let s = state.as_ref()?;
+        let (root, before) = match kind {
+            "tv" => {
+                let i = s.meters.iter().position(|m| m.spec.style == Style::Screen && m.cell.is_some())?;
+                (s.meters[i].cell.as_ref()?.root.clone(), i)
+            }
+            "mic" => (s.mic.as_ref()?.cell.clone()?, if s.mic_first { 0 } else { s.meters.len() }),
+            _ => return None,
+        };
+        Some((crate::layout::bounds(&ui(&root).ok()?, 0.0, 0.0).ok()?.X, before))
+    })
+}
+
+fn fade(e: &impl Interface, hidden: bool) -> R<()> {
+    let v = visual(e)?;
+    let c = v.Compositor().map_err(w)?;
+    let fade = c.CreateScalarKeyFrameAnimation().map_err(w)?;
+    fade.InsertKeyFrame(1.0, if hidden { 0.0 } else { 1.0 }).map_err(w)?;
+    fade.SetDuration(ms(200)).map_err(w)?;
+    v.StartAnimation(&HSTRING::from("Opacity"), &fade).map_err(w)
+}
+
+/// Fade the strip out (a toast is using its spot) or back in: all of it, or (`before`) only the meters left of what the
+/// toast stops at, which stays in sight.
+pub fn set_hidden(hidden: bool, before: Option<usize>) {
+    if before.is_none() {
+        crate::tooltip::set_enabled(!hidden);
+    }
     STRIP.with(|cell| {
         let Ok(state) = cell.try_borrow() else { return };
         let Some(s) = state.as_ref() else { return };
-        let r = visual(&s.panel).and_then(|v| {
-            let c = v.Compositor().map_err(w)?;
-            let fade = c.CreateScalarKeyFrameAnimation().map_err(w)?;
-            fade.InsertKeyFrame(1.0, if hidden { 0.0 } else { 1.0 }).map_err(w)?;
-            fade.SetDuration(ms(200)).map_err(w)?;
-            v.StartAnimation(&HSTRING::from("Opacity"), &fade).map_err(w)
-        });
+        let r = match before {
+            None => fade(&s.panel, hidden),
+            Some(n) => s.meters.iter().take(n).filter_map(|m| m.cell.as_ref()).try_for_each(|c| {
+                fade(&c.root, hidden)?;
+                c.sep.as_ref().map_or(Ok(()), |sep| fade(sep, hidden))
+            }),
+        };
         if let Err(e) = r {
             crate::log(format!("fade meters: {e}"));
         }
@@ -1769,38 +2155,9 @@ fn position(snapshot: &Snapshot) {
             if !s.panel_glides {
                 glide_on_move(&panel)?;
             }
-            // Hover zones over every shown meter, the taskbar's full height and into the spacing either side, so the
-            // pointer needn't find the meter itself; bars too, for per-CPU tooltips. A GPU or device meter has a
-            // zone per GPU or device instead, from halfway to the one before it to halfway to the next.
-            let mut zones = Vec::new();
-            let reach = snap(fit.spacing) / 2.0 + 1.0;
-            let full_h = snapshot.height;
-            for i in s.shown(&fit) {
-                let m = &s.meters[i];
-                let Some(c) = m.cell.as_ref().filter(|_| m.spec.tooltip) else { continue };
-                let cell_w = c.root.Width().map_err(w)?;
-                let cell = bounds(&ui(&c.root)?, cell_w, c.root.Height().map_err(w)?)?;
-                let zone = |left: f64, right: f64| Rect { X: cell.X + left as f32, Y: 0.0, Width: (right - left) as f32, Height: full_h };
-                match &c.parts {
-                    Parts::Cores { bars, nodes, .. } if m.spec.style == Style::Engines && !nodes.is_empty() => {
-                        for (d, &(a, b)) in nodes.iter().enumerate() {
-                            let left = if d == 0 { -reach } else { (nodes[d - 1].1 + a) / 2.0 };
-                            let right = if d + 1 == nodes.len() { cell_w + reach } else { (b + nodes[d + 1].0) / 2.0 };
-                            let bar0 = bars.iter().position(|bar| bar.node == d).unwrap_or(0);
-                            let spans = bars.iter().filter(|bar| bar.node == d).map(|bar| (bar.span.0 - left, bar.span.1 - left)).collect();
-                            zones.push(crate::tooltip::ZoneSpec { meter: i, rect: zone(left, right), bars: spans, bar0, device: Some(d) });
-                        }
-                    }
-                    parts => {
-                        let spans = match parts {
-                            Parts::Cores { bars, .. } => bars.iter().map(|b| (b.span.0 + reach, b.span.1 + reach)).collect(),
-                            _ => Vec::new(),
-                        };
-                        zones.push(crate::tooltip::ZoneSpec { meter: i, rect: zone(-reach, cell_w + reach), bars: spans, bar0: 0, device: None });
-                    }
-                }
-            }
-            crate::tooltip::set_zones(zones);
+            s.zone_h = snapshot.height;
+            set_zones(s, &fit)?;
+            zones_after_layout();
             s.panel_glides = true;
             // Glide when neighbours come and go; attached once cells have a position, so they
             // don't slide in from the left edge when (re)built.
@@ -1819,6 +2176,71 @@ fn position(snapshot: &Snapshot) {
     crate::alert::follow();
 }
 
+
+/// Hover zones over every shown meter, the taskbar's full height and into the spacing either side, so the pointer needn't find the
+/// meter itself; bars too, for per-CPU tooltips. A GPU or device meter has a zone per GPU or device instead, from halfway to the one
+/// before it to halfway to the next. They're where the cells are on screen, which is only so once XAML has laid them out.
+fn set_zones(s: &Strip, fit: &Fit) -> R<()> {
+    let mut zones = Vec::new();
+    let reach = snap(fit.spacing) / 2.0 + 1.0;
+    for i in s.shown(fit) {
+        let m = &s.meters[i];
+        let Some(c) = m.cell.as_ref().filter(|_| m.spec.tooltip) else { continue };
+        let cell_w = c.root.Width().map_err(w)?;
+        let cell = bounds(&ui(&c.root)?, cell_w, c.root.Height().map_err(w)?)?;
+        let zone = |left: f64, right: f64| Rect { X: cell.X + left as f32, Y: 0.0, Width: (right - left) as f32, Height: s.zone_h };
+        match &c.parts {
+            Parts::Cores { bars, nodes, .. } if m.spec.style == Style::Engines && !nodes.is_empty() => {
+                for (d, &(a, b)) in nodes.iter().enumerate() {
+                    let left = if d == 0 { -reach } else { (nodes[d - 1].1 + a) / 2.0 };
+                    let right = if d + 1 == nodes.len() { cell_w + reach } else { (b + nodes[d + 1].0) / 2.0 };
+                    let bar0 = bars.iter().position(|bar| bar.node == d).unwrap_or(0);
+                    let spans = bars.iter().filter(|bar| bar.node == d).map(|bar| (bar.span.0 - left, bar.span.1 - left)).collect();
+                    zones.push(crate::tooltip::ZoneSpec { meter: i, rect: zone(left, right), bars: spans, bar0, device: Some(d) });
+                }
+            }
+            parts => {
+                let spans = match parts {
+                    Parts::Cores { bars, .. } => bars.iter().map(|b| (b.span.0 + reach, b.span.1 + reach)).collect(),
+                    _ => Vec::new(),
+                };
+                zones.push(crate::tooltip::ZoneSpec { meter: i, rect: zone(-reach, cell_w + reach), bars: spans, bar0: 0, device: None });
+            }
+        }
+    }
+    crate::tooltip::set_zones(zones);
+    Ok(())
+}
+
+/// Which time the strip's been placed: an older wait for its layout lets it be.
+static PLACED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Places the hover zones again once the strip's been laid out where it was just put. Placing it only says where it goes: until XAML's
+/// next layout the cells are still where they were, and zones from there would send the pointer to whatever used to be under it.
+fn zones_after_layout() {
+    use std::sync::atomic::Ordering;
+    let mine = PLACED.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        // Soon after the next layout, and again once anything gliding into place has got there.
+        for wait in [80, 300 + GLIDE_MS as u64] {
+            std::thread::sleep(Duration::from_millis(wait));
+            if PLACED.load(Ordering::Relaxed) != mine {
+                return;
+            }
+            on_ui(|| {
+                STRIP.with(|cell| {
+                    let Ok(state) = cell.try_borrow() else { return };
+                    let Some(s) = state.as_ref() else { return };
+                    if let Some(fit) = s.fit
+                        && let Err(e) = set_zones(s, &fit)
+                    {
+                        crate::log(format!("hover zones: {e}"));
+                    }
+                });
+            });
+        }
+    });
+}
 
 thread_local! {
     static FRAME_REQUEST: Cell<Option<i64>> = const { Cell::new(None) };
@@ -2060,7 +2482,7 @@ fn land_bars(i: usize) {
         Some(())
     });
     if landed.flatten().is_some() {
-        refit(true);
+        refit_one(i);
     }
 }
 
@@ -2085,11 +2507,17 @@ const PIE_GLOW_MS: i64 = 500;
 thread_local! {
     /// Text shadows still waiting for their text's alpha mask.
     static UNCAST: RefCell<Vec<(TextBlock, windows::UI::Composition::DropShadow)>> = const { RefCell::new(Vec::new()) };
+    static UNCAST_SLICES: RefCell<Vec<(Path, windows::UI::Composition::DropShadow)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Give the text shadows made since the last time their masks, now that their cells are in the tree: XAML hands
 /// out a mask for an element only once it's live.
 fn cast_shadows() {
+    for (p, shadow) in UNCAST_SLICES.with_borrow_mut(std::mem::take) {
+        if let Err(e) = p.GetAlphaMask().and_then(|mask| shadow.SetMask(&mask)) {
+            crate::log(format!("slice glow: {e}"));
+        }
+    }
     for (t, shadow) in UNCAST.with_borrow_mut(std::mem::take) {
         let r = (|| -> R<()> {
             let mask = t.GetAlphaMask().map_err(w)?;
@@ -2111,6 +2539,31 @@ fn cast_shadows() {
 /// (its alpha mask), with no offset, so it's a soft halo that keeps it legible over anything.
 /// `width` reserves room for text that will change (values); otherwise the text's own width.
 fn put_text(canvas: &Canvas, t: &TextBlock, x: f64, y: f64, scale: f64, width: Option<f64>) -> R<()> {
+    put_text_host(canvas, t, x, y, scale, width).map(drop)
+}
+
+/// `t` on its side, reading down, in a column from `x` as wide as its line is tall, centered in a cell `h` tall: squeezed along
+/// its length if that's longer than the cell is tall. Its shadow turns with it.
+fn put_sideways(canvas: &Canvas, t: &TextBlock, x: f64, h: f64) -> R<()> {
+    let e = ui(t)?;
+    e.Measure(Size { Width: f32::INFINITY, Height: f32::INFINITY }).map_err(w)?;
+    let size = e.DesiredSize().map_err(w)?;
+    let (long, thick) = (f64::from(size.Width).max(1.0), f64::from(size.Height));
+    let scale = ((h - 2.0) / long).min(1.0);
+    let top = ((h - long * scale) / 2.0).round();
+    let Some(host) = put_text_host(canvas, t, snap(x + thick), top, scale, None)? else { return Ok(()) };
+    for v in [visual(t)?, visual(&host)?] {
+        v.SetRotationAngleInDegrees(90.0).map_err(w)?;
+    }
+    Ok(())
+}
+
+/// `put_text`, and the element its shadow hangs from, if it put anything there.
+fn put_text_host(canvas: &Canvas, t: &TextBlock, x: f64, y: f64, scale: f64, width: Option<f64>) -> R<Option<Canvas>> {
+    // Nothing to say, as on a screen, and a value will always have something.
+    if width.is_none() && t.Text().is_ok_and(|s| s.is_empty()) {
+        return Ok(None);
+    }
     let host = Canvas::new().map_err(w)?;
     put(canvas, &host, x, y)?;
     put(canvas, t, x, y)?;
@@ -2123,7 +2576,7 @@ fn put_text(canvas: &Canvas, t: &TextBlock, x: f64, y: f64, scale: f64, width: O
     host.SetHeight(size.Y as f64).map_err(w)?;
     host.SetIsHitTestVisible(false).map_err(w)?;
     let r = (|| -> R<()> {
-        let c = visual(&host)?.Compositor().map_err(w)?;
+        let c = compositor(&host)?;
         let shadow = c.CreateDropShadow().map_err(w)?;
         shadow.SetBlurRadius(TEXT_SHADOW_BLUR).map_err(w)?;
         shadow.SetOffset(Vector3::default()).map_err(w)?;
@@ -2140,8 +2593,88 @@ fn put_text(canvas: &Canvas, t: &TextBlock, x: f64, y: f64, scale: f64, width: O
     if let Err(e) = r {
         crate::log(format!("text shadow: {e}"));
     }
+    // A new element's scale is 1 already.
+    if scale == 1.0 {
+        return Ok(Some(host));
+    }
     squeeze(t, scale)?;
-    visual(&host)?.SetScale(Vector3 { X: scale as f32, Y: 1.0, Z: 1.0 }).map_err(w)
+    visual(&host)?.SetScale(Vector3 { X: scale as f32, Y: 1.0, Z: 1.0 }).map_err(w)?;
+    Ok(Some(host))
+}
+
+/// How much of the pie a slice has to change by, from one reading to the next, to stand out all the way.
+const SLICE_MOVES: f64 = 0.004;
+/// What's left of how far it stands out at each reading once it stops moving.
+const SLICE_SETTLES: f64 = 0.7;
+
+/// The slice that glows: the shape its light comes from, how far it can stand out, its last share, and how far it stands out now.
+struct Shine {
+    slice: usize,
+    shape: Path,
+    extend: f64,
+    last: Cell<Option<f64>>,
+    out: Cell<f64>,
+}
+
+impl Shine {
+    /// Takes a reading of the slice's share, and says how far it stands out: not at all when it's still, and more the faster it
+    /// changes, easing back afterwards.
+    fn moved(&self, share: f64) -> f64 {
+        let change = self.last.replace(Some(share)).map_or(0.0, |last| (share - last).abs());
+        let out = standing_out(self.out.get(), change, self.extend);
+        self.out.set(out);
+        out
+    }
+}
+
+fn standing_out(now: f64, change: f64, extend: f64) -> f64 {
+    let wanted = extend * (change / SLICE_MOVES).min(1.0).sqrt();
+    let out = wanted.max(now * SLICE_SETTLES);
+    if out < 0.15 { 0.0 } else { out }
+}
+
+/// A slice's glow: light cast on the compositor, over the pie, so that it falls on the slices beside it. It comes from a shape of
+/// its own (its alpha mask follows it as it changes), which `draw` keeps exactly under the slice: a slice can be translucent, and a
+/// transparent shape would leave an empty mask. It costs nothing per frame, even pulsing. Returns the shape.
+fn slice_glow(pie: &Canvas, d: f64, g: SliceGlow, color: Color) -> R<Path> {
+    let shape = Path::new().map_err(w)?;
+    shape.SetFill(&brush(Color { A: 0xFF, ..color })?).map_err(w)?;
+    shape.SetIsHitTestVisible(false).map_err(w)?;
+    // The mask is the element's size: the pie and what stands out of it, so that the glow lies where the slice does.
+    let size = d + 2.0 * g.extend;
+    shape.SetWidth(size).map_err(w)?;
+    shape.SetHeight(size).map_err(w)?;
+    pie.Children().map_err(w)?.InsertAt(0, &ui(&shape)?).map_err(w)?;
+    Canvas::SetLeft(&ui(&shape)?, -g.extend).map_err(w)?;
+    Canvas::SetTop(&ui(&shape)?, -g.extend).map_err(w)?;
+    let host = Canvas::new().map_err(w)?;
+    host.SetWidth(size).map_err(w)?;
+    host.SetHeight(size).map_err(w)?;
+    host.SetIsHitTestVisible(false).map_err(w)?;
+    pie.Children().map_err(w)?.Append(&ui(&host)?).map_err(w)?;
+    Canvas::SetLeft(&ui(&host)?, -g.extend).map_err(w)?;
+    Canvas::SetTop(&ui(&host)?, -g.extend).map_err(w)?;
+    let c = compositor(&host)?;
+    let shadow = c.CreateDropShadow().map_err(w)?;
+    shadow.SetBlurRadius(g.radius).map_err(w)?;
+    shadow.SetOffset(Vector3::default()).map_err(w)?;
+    shadow.SetColor(Color { A: 0xFF, ..color }).map_err(w)?;
+    shadow.SetOpacity(g.strength.clamp(0.0, 1.0)).map_err(w)?;
+    if g.pulse_ms > 0 {
+        let pulse = c.CreateScalarKeyFrameAnimation().map_err(w)?;
+        pulse.InsertKeyFrame(0.0, g.strength).map_err(w)?;
+        pulse.InsertKeyFrame(0.5, g.strength * 0.35).map_err(w)?;
+        pulse.InsertKeyFrame(1.0, g.strength).map_err(w)?;
+        pulse.SetDuration(ms(g.pulse_ms)).map_err(w)?;
+        pulse.SetIterationBehavior(windows::UI::Composition::AnimationIterationBehavior::Forever).map_err(w)?;
+        shadow.StartAnimation(&HSTRING::from("Opacity"), &pulse).map_err(w)?;
+    }
+    UNCAST_SLICES.with_borrow_mut(|u| u.push((shape.clone(), shadow.clone())));
+    let sprite = c.CreateSpriteVisual().map_err(w)?;
+    sprite.SetSize(Vector2 { X: size as f32, Y: size as f32 }).map_err(w)?;
+    sprite.SetShadow(&shadow).map_err(w)?;
+    ElementCompositionPreview::SetElementChildVisual(&ui(&host)?, &sprite).map_err(w)?;
+    Ok(shape)
 }
 
 /// A pie's glow: a ring of its main color just outside its edge, fading out over the glow's reach - a radial gradient
@@ -2171,7 +2704,7 @@ fn pie_rim(pie: &Canvas, d: f64, color: Color) -> R<Option<Glow>> {
         Canvas::SetLeft(&e, -reach).map_err(w)?;
         Canvas::SetTop(&e, -reach).map_err(w)?;
         pie.Children().map_err(w)?.InsertAt(0, &e).map_err(w)?;
-        let c = visual(&host)?.Compositor().map_err(w)?;
+        let c = compositor(&host)?;
         let half = (size / 2.0) as f32;
         let edge = (d / 2.0) as f32 / half;
         let brush = c.CreateRadialGradientBrush().map_err(w)?;
@@ -2235,7 +2768,20 @@ fn pie_glow(glow: &Glow, lit: &Cell<(f32, f32)>, f: f64, pressure: f64) -> R<()>
 mod tests {
     use super::*;
 
-    /// Windows' display scales, and what a 48 DIP taskbar comes to: bars stay crisp and even at all of them.
+    #[test]
+    fn a_slice_stands_out_only_while_it_moves()  {
+        assert_eq!(standing_out(0.0, 0.0, 2.5), 0.0, "at rest it's the pie's own size");
+        assert!(standing_out(0.0, 0.0005, 2.5) < standing_out(0.0, 0.002, 2.5), "more with more change");
+        assert_eq!(standing_out(0.0, 1.0, 2.5), 2.5, "and no further than its limit");
+        let eased = standing_out(2.5, 0.0, 2.5);
+        assert!(eased > 0.0 && eased < 2.5, "it eases back");
+        let mut out = 2.5;
+        for _ in 0..30 {
+            out = standing_out(out, 0.0, 2.5);
+        }
+        assert_eq!(out, 0.0, "all the way");
+    }
+
     #[test]
     fn bars_land_on_whole_pixels_at_every_scale() {
         for px in [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5] {

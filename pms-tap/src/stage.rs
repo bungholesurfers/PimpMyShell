@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 
-use pms_xaml::{Canvas, Panel, UIElement};
+use pms_xaml::{Border, Canvas, ElementCompositionPreview, Panel, Popup, UIElement};
 use windows_core::Interface;
 
 use crate::Ctx;
@@ -62,8 +62,45 @@ pub fn insert(ctx: &Ctx, slot: Slot, e: &UIElement) -> R<()> {
     Ok(())
 }
 
+/// Takes `e` apart, from the inside out, for when it's about to go. XAML's diagnostics, which is how we got in here, hold on to
+/// every element they've been told about until they're told it's gone, and taking a parent out only tells them about the parent:
+/// everything under it would stay in Explorer's memory for good, pictures and all. Measured, a picture in a Canvas: 23 KB without
+/// this, 1 with it. The composition visuals hung on an element go too: one that diagnostics keeps would otherwise keep them, and
+/// all they draw with, textures and all. UI thread only.
+pub(crate) fn unbuild(e: &UIElement) {
+    let _ = ElementCompositionPreview::SetElementChildVisual(e, None::<&windows::UI::Composition::Visual>);
+    if let Ok(panel) = e.cast::<Panel>() {
+        empty(&panel);
+    } else if let Ok(border) = e.cast::<Border>()
+        && let Ok(child) = border.Child()
+    {
+        unbuild(&child);
+        let _ = border.SetChild(None);
+    }
+}
+
+/// Takes everything out of `panel`, the same way.
+pub(crate) fn empty(panel: &Panel) {
+    let Ok(children) = panel.Children() else { return };
+    for i in 0..children.Size().unwrap_or(0) {
+        if let Ok(child) = children.GetAt(i) {
+            unbuild(&child);
+        }
+    }
+    let _ = children.Clear();
+}
+
+/// The same for what's in `popup`.
+pub(crate) fn unbuild_popup(popup: &Popup) {
+    if let Ok(child) = popup.Child() {
+        unbuild(&child);
+        let _ = popup.SetChild(None);
+    }
+}
+
 pub fn remove(ctx: &Ctx, e: &UIElement) -> R<()> {
     PLACED.with_borrow_mut(|p| p.retain(|(_, o)| o != e));
+    unbuild(e);
     let (panel, _) = background(ctx)?;
     if let Some(i) = index_of(&panel, e)? {
         panel.Children().map_err(w)?.RemoveAt(i).map_err(w)?;

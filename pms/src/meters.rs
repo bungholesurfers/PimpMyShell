@@ -452,6 +452,20 @@ pub struct Sampler {
     devices_checked: Option<Instant>,
 }
 
+/// Whether a `Sampler` for `a` would do for `b`: all it goes by is the same. Then it needn't be made again, which takes a moment
+/// and forgets what it had seen, like which disks have been idle.
+pub fn same_sampler(a: &Config, b: &Config) -> bool {
+    let sets = |c: &Config| c.twatch.as_ref().map_or(0, |t| t.more_sets);
+    a.meters == b.meters
+        && a.counters == b.counters
+        && a.interval_ms == b.interval_ms
+        && a.value_font == b.value_font
+        && a.software_gpus == b.software_gpus
+        && a.meter_height == b.meter_height
+        && a.bar_height == b.bar_height
+        && sets(a) == sets(b)
+}
+
 impl Sampler {
     pub fn new(config: &Config) -> Result<Sampler, String> {
         for (key, value) in [("meter_height", &config.meter_height), ("bar_height", &config.bar_height)] {
@@ -462,6 +476,8 @@ impl Sampler {
         let mut builtins = builtins();
         let expanded = per_gpu(config, &mut builtins);
         let config = expanded.as_ref().unwrap_or(config);
+        let with_sets = crate::twatch::with_more_sets(config);
+        let config = with_sets.as_ref().unwrap_or(config);
         let known: Vec<String> = config.counters.keys().cloned().chain(builtins.keys().cloned()).collect();
         let parse = |label: &str, src: &str| -> Result<Expr, String> {
             let e = expr::parse(src).map_err(|e| format!("meter `{label}`: {e}"))?;
@@ -487,11 +503,14 @@ impl Sampler {
             if let Some(v) = spec.vendor_label.as_deref().filter(|v| !["ticker", "short"].contains(v)) {
                 return Err(format!("meter `{}`: vendor_label = \"{v}\": use \"ticker\" or \"short\"", spec.label));
             }
+            if let Some(v) = spec.set.as_deref().filter(|v| !["tv", "twatch", crate::twatch::CELL_SET].contains(v)) {
+                return Err(format!("meter `{}`: set = \"{v}\": use \"tv\" or \"twatch\"", spec.label));
+            }
             if let Some(v) = spec.label_inside.as_deref().filter(|v| !["always", "never", "auto"].contains(v)) {
                 return Err(format!("meter `{}`: label_inside = \"{v}\": use \"always\", \"never\" or \"auto\"", spec.label));
             }
             let exprs = match (&spec.expr, spec.style) {
-                (_, Style::Cores | Style::Engines | Style::Disks | Style::Nics) => Vec::new(),
+                (_, Style::Cores | Style::Engines | Style::Disks | Style::Nics | Style::Screen) => Vec::new(),
                 (Some(e), _) => e.list().iter().map(|s| parse(&spec.label, s)).collect::<Result<_, _>>()?,
                 (None, _) => return Err(format!("meter `{}` needs an `expr`", spec.label)),
             };
@@ -664,16 +683,17 @@ impl Sampler {
         format!("{} meter(s) [{}]", self.meters.len(), intervals.join(", "))
     }
 
-    /// TAP commands that (re)create the strip: height, then each meter, with a separator wherever
-    /// the group changes.
-    pub fn define(&mut self, height: &str, bars: &str) -> Vec<String> {
+    /// TAP commands that (re)create the strip: height, where the microphone label goes (`mic`: "tray", after the meters, or
+    /// "start"), then each meter, with a separator wherever the group changes.
+    pub fn define(&mut self, height: &str, bars: &str, mic: &str) -> Vec<String> {
         let q = crate::quote;
         // A fresh strip knows nothing: presence has to be decided (and said) again.
         for m in &mut self.meters {
             (m.shown, m.absent_since) = (None, None);
             m.states_sent.clear();
         }
-        let mut out = vec!["meters clear".to_string(), format!("meters height {height} {bars}")];
+        // Held, so that the strip is built once, at the end, and not once for each meter added.
+        let mut out = vec!["meters clear".to_string(), "meters hold".to_string(), format!("meters height {height} {bars}"), format!("meters micat {mic}")];
         let mut group: Option<&str> = None;
         for (i, m) in self.meters.iter_mut().enumerate() {
             let this = m.spec.group.as_deref();
@@ -686,6 +706,15 @@ impl Sampler {
             let mut fields = vec![format!("label={}", m.spec.label), format!("wide={}", widest(&m.spec))];
             match m.spec.style {
                 Style::Engines => {}
+                Style::Screen => {
+                    fields.push("style=screen".into());
+                    fields.push(format!("source={}", m.spec.label));
+                    if matches!(m.spec.set.as_deref(), Some("twatch" | crate::twatch::CELL_SET)) {
+                        fields.push("wide16=1".into());
+                    }
+                    fields.push("novalue=1".into());
+                    fields.push("nocaption=1".into());
+                }
                 Style::Disks | Style::Nics => {
                     let defaults = if m.spec.style == Style::Disks { DISK_COLORS } else { NIC_COLORS };
                     let colors: Vec<String> = (0..2).map(|j| m.spec.colors.get(j).cloned().unwrap_or_else(|| defaults[j].into())).collect();
@@ -721,6 +750,17 @@ impl Sampler {
                         (0..n).map(|j| colors.get(j).cloned().unwrap_or_else(|| PALETTE[(i + j) % PALETTE.len()].into())).collect();
                     fields.push("style=pie".into());
                     fields.push(format!("colors={}", colors.join(",")));
+                    let glowing = m.spec.slice_glow.as_deref().and_then(|name| m.spec.names.iter().position(|n| n.eq_ignore_ascii_case(name)));
+                    if let Some(slice) = glowing {
+                        fields.push(format!("sliceglow={slice}"));
+                        fields.push(format!("glowextend={}", m.spec.slice_glow_extend.unwrap_or(2.5)));
+                        fields.push(format!("glowradius={}", m.spec.slice_glow_radius.unwrap_or(4.0)));
+                        fields.push(format!("glowstrength={}", m.spec.slice_glow_strength.unwrap_or(1.0)));
+                        fields.push(format!("glowpulse={}", m.spec.slice_glow_pulse_ms.unwrap_or(0)));
+                        if let Some(color) = &m.spec.slice_glow_color {
+                            fields.push(format!("glowcolor={color}"));
+                        }
+                    }
                 }
                 Style::Cores => {
                     fields.push("style=cores".into());
@@ -740,6 +780,9 @@ impl Sampler {
             }
             if m.spec.caption == Some(false) {
                 fields.push("nocaption=1".into());
+            }
+            if m.spec.label_sideways() {
+                fields.push("sideways=1".into());
             }
             if m.spec.snug == Some(true) {
                 fields.push("snug=1".into());
@@ -779,6 +822,7 @@ impl Sampler {
                 out.push(format!("meters bars {i} {}", names.join(" ")));
             }
         }
+        out.push("meters release".into());
         out
     }
 
@@ -804,9 +848,25 @@ impl Sampler {
             if crate::trace() {
                 crate::log(format!("trace: group {}ms collected in {:.1}ms", g.interval.as_millis(), t0.elapsed().as_secs_f64() * 1000.0));
             }
-            if let Err(e) = collected {
-                crate::log(e);
-                continue;
+            // Said once for each new way it fails, not on every tick of every group while it does.
+            static FAILING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+            match collected {
+                Err(e) => {
+                    if let Ok(mut last) = FAILING.lock()
+                        && last.as_deref() != Some(e.as_str())
+                    {
+                        crate::log(format!("meters: couldn't read the counters: {e}"));
+                        *last = Some(e);
+                    }
+                    continue;
+                }
+                Ok(()) => {
+                    if let Ok(mut last) = FAILING.lock()
+                        && last.take().is_some()
+                    {
+                        crate::log("meters: reading the counters again");
+                    }
+                }
             }
             // A failing counter leaves its name unset (meters using it show "–") unless it
             // has a default. Say so once, not every tick.
@@ -824,7 +884,7 @@ impl Sampler {
                         if let Some(d) = c.default {
                             env.insert(c.name.clone(), d);
                         } else if self.warned.insert(c.name.clone()) {
-                            crate::log(format!("{e} (warning once; meters using `{}` show –)", c.name));
+                            crate::log(format!("counter `{}` doesn't read, so its meters show – ({e})", c.name));
                         }
                     }
                 }
@@ -954,6 +1014,11 @@ impl Sampler {
                     m.tip = tip;
                 }
                 (String::new(), values.iter().map(|v| if scale > 0.0 && v.is_finite() { v / scale } else { 0.0 }).collect())
+            }
+            // No readings, but it's there: what it shows is up to what draws it.
+            Style::Screen => {
+                absent = crate::twatch::hidden(&m.spec.label);
+                (String::new(), Vec::new())
             }
             Style::Disks | Style::Nics => {
                 let is_disk = m.spec.style == Style::Disks;
@@ -1286,7 +1351,7 @@ fn gpu_names(software_gpus: bool) -> HashMap<String, String> {
 }
 
 /// Every instance of a counter as (name, value), valid data only.
-fn instances(handle: PDH_HCOUNTER) -> Result<Vec<(String, f64)>, u32> {
+pub(crate) fn instances(handle: PDH_HCOUNTER) -> Result<Vec<(String, f64)>, u32> {
     let fmt = PDH_FMT(PDH_FMT_DOUBLE.0 | PDH_FMT_NOCAP100);
     let (mut size, mut count) = (0u32, 0u32);
     let status = unsafe { PdhGetFormattedCounterArrayW(handle, fmt, &mut size, &mut count, None) };
@@ -1493,7 +1558,7 @@ pub fn run(path: &str) -> Result<(), String> {
 
         // The TAP may have been re-injected (meters gone) or be absent; keep trying.
         if !defined {
-            match sampler.define(&config.meter_height, &config.bar_height).iter().try_for_each(|l| crate::send(l).map(drop)) {
+            match sampler.define(&config.meter_height, &config.bar_height, config.mic_position()).iter().try_for_each(|l| crate::send(l).map(drop)) {
                 Ok(()) => defined = true,
                 Err(e) => {
                     eprintln!("waiting for TAP: {e}");

@@ -1,0 +1,65 @@
+# What PGO training (cargo xtask pgo) runs PimpMyShell with: the defaults, plus everything they leave off or rarely show, so
+# that the profile covers what people use. Nothing here goes on the network: no update checks, and no Twatch TV.
+config_version = 2
+
+update_check = false
+console_autostart = true
+tv_intro = true
+shuffle_seconds = 5
+shuffle_jitter = true
+
+[backdrop]
+tint  = "#7F060606"
+grain = 0.02
+gaps  = "#18FFFFFF"
+
+[hotmic]
+position = "tray"
+
+[toasts]
+duration_ms = 4000
+
+[start_glow]
+color = "#4CC2FF"
+
+[app_glow]
+hover = 0.4
+
+# Shown always, rather than only once commit is high.
+[[meter]]
+label = "COMMIT"
+show_above = 0
+
+# The styles nothing shipped uses.
+[[meter]]
+label = "LOAD"
+group = "pgo"
+style = "bar"
+expr  = "commit"
+max   = 100
+unit  = "%"
+color = "#4FC3F7"
+
+[[meter]]
+label = "IO"
+group = "pgo"
+style = "bars"
+expr  = ["disk_write", "disk_read", "net_tx", "net_rx"]
+names = ["disk write", "disk read", "sent", "received"]
+colors = ["#FFD54F", "#FFA726", "#F06292", "#4DB6AC"]
+unit  = "bytes/s"
+max   = 104857600
+
+[[meter]]
+label = "FREE"
+group = "pgo"
+expr  = "mem_avail"
+max   = "ram_total"
+unit  = "bytes"
+time_axis = "linear"
+history_seconds = 60
+
+# A second set, which the training sets shuffling while the first stays on the console.
+[[meter]]
+label = "TV 2"
+style = "screen"

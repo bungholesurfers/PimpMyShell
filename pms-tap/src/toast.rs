@@ -224,6 +224,11 @@ struct Toast {
     faded: Vec<UIElement>,
     /// The clock's button (with the bell), which the cards stop short of, when the clock shows.
     clock: Option<UIElement>,
+    /// The taskbar's too full for a card where it usually goes: it covers the whole tray, clock and all, rather than the
+    /// buttons of anyone's windows.
+    whole_tray: bool,
+    /// Meters that make way, when the cards stop at something on the strip (`meters::anchor`): those left of it.
+    faded_meters: Option<usize>,
     shown: bool,
     /// The cards on screen, oldest first: the last one is in front.
     deck: Vec<Card>,
@@ -255,6 +260,11 @@ struct Drag {
     samples: Vec<(Instant, f32)>,
     /// How far the card is off its place now.
     tx: f32,
+}
+
+thread_local! {
+    /// What the cards stop short of: `toast position`.
+    static POSITION: RefCell<String> = RefCell::new("clock".to_string());
 }
 
 thread_local! {
@@ -318,6 +328,12 @@ pub fn command(ctx: &Ctx, args: &[String]) -> R<String> {
         f.iter().find(|(k, _)| *k == "ms").map(|(_, v)| v.parse().map_err(|e| format!("bad ms: {e}"))).transpose()
     };
     match args.first().map(String::as_str) {
+        // position clock|tray|tv|mic: what the cards stop short of, from the next toast on.
+        Some("position") => {
+            let at = args.get(1).map_or("clock", String::as_str).to_string();
+            POSITION.with_borrow_mut(|p| *p = at);
+            Ok(String::new())
+        }
         // show [id=<n>] ms=<n> [app=title= body= attribution= icon= logo= circle=1 image= b=<label>.. progress=]
         Some("show") => {
             let mut c = Content::default();
@@ -422,6 +438,8 @@ fn build_host(ctx: &Ctx) -> R<Toast> {
         tray,
         faded: Vec::new(),
         clock: None,
+        whole_tray: false,
+        faded_meters: None,
         shown: false,
         deck: Vec::new(),
         left: Cell::new(0.0),
@@ -465,7 +483,7 @@ fn fill_later(brush: CompositionSurfaceBrush, path: String, width: u32, height: 
         crate::meters::on_ui(move || {
             let loaded = scaled
                 .or_else(|e| {
-                    crate::log(format!("toast picture, unscaled: {e}"));
+                    crate::log(format!("toast picture: couldn't scale it, so loading it full size: {e}"));
                     std::fs::read(&path).map_err(|e| format!("{path}: {e}"))
                 })
                 .and_then(|bytes| surface(&bytes));
@@ -559,10 +577,12 @@ fn on_hover(e: &UIElement, f: impl Fn(bool) + Clone + Send + 'static) -> R<()> {
 
 /// Background swaps on hover, for the card and its buttons.
 fn hoverable(b: &Border, normal: Color, hover: Color) -> R<()> {
-    let target = b.clone();
+    // Weak, here and wherever a handler on an element needs that element or one inside it: each would otherwise hold the other
+    // for good, and the card with them.
+    let target = b.downgrade().map_err(w)?;
     on_hover(&ui(b)?, move |entered| {
-        if let Ok(br) = brush(if entered { hover } else { normal }) {
-            let _ = target.SetBackground(&br);
+        if let (Some(b), Ok(br)) = (target.upgrade(), brush(if entered { hover } else { normal })) {
+            let _ = b.SetBackground(&br);
         }
     })
 }
@@ -827,9 +847,11 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
     let close_el = ui(&close)?;
     on_tap(&close_el, id, "close")?;
     close_el.SetOpacity(0.0).map_err(w)?;
-    let target = close_el.clone();
+    let target = close_el.downgrade().map_err(w)?;
     on_hover(&card_el, move |entered| {
-        let _ = target.SetOpacity(if entered { 1.0 } else { 0.0 });
+        if let Some(close) = target.upgrade() {
+            let _ = close.SetOpacity(if entered { 1.0 } else { 0.0 });
+        }
     })?;
     put(&grid, &close_el, 4)?;
     want += 24.0 + 10.0;
@@ -941,8 +963,19 @@ fn show(ctx: &Ctx, id: u32, c: Content) -> R<String> {
         let t = s.as_mut().ok_or("toast vanished")?;
         if !t.shown {
             // Whether the clock shows is decided as each toast comes (it can be switched on and off meanwhile).
-            (t.faded, t.clock) = tray_parts(ctx, &t.tray);
-            t.host.Children().map_err(w)?.Clear().map_err(w)?;
+            let position = POSITION.with_borrow(Clone::clone);
+            t.faded_meters = crate::meters::anchor(&position).map(|a| a.1);
+            (t.faded, t.clock) = if position == "clock" { tray_parts(ctx, &t.tray) } else { (Vec::new(), None) };
+            // Short of room for a card where it usually ends, it takes the tray and the clock too, never a window's button.
+            let snapshot = lock(&SNAPSHOT).clone();
+            t.whole_tray = false;
+            let (right, free_start) = edges(t, &position, &snapshot)?;
+            if right - free_start - 2.0 * EDGE_MARGIN < MIN_W {
+                t.whole_tray = true;
+                (t.faded, t.clock) = (vec![t.tray.clone()], None);
+                crate::log("toast: the taskbar's full, so the card covers the tray and the clock");
+            }
+            crate::stage::empty(&t.host.cast().map_err(w)?);
             t.deck.clear();
             t.held_drop = None;
         }
@@ -971,7 +1004,7 @@ fn show(ctx: &Ctx, id: u32, c: Content) -> R<String> {
             for e in &t.faded {
                 glide(e, 0.0, SLIDE, OUT_MS)?;
             }
-            crate::meters::set_hidden(true);
+            crate::meters::set_hidden(true, t.faded_meters);
         } else {
             // On top of the deck: the new card rises in as the one before steps back.
             snap_to(&slot, 0.0, SLIDE / 2.0)?;
@@ -1185,6 +1218,7 @@ fn detach(slot: &Grid) {
     let Ok(children) = parent.Children() else { return };
     let mut i = 0;
     if children.IndexOf(&el, &mut i).unwrap_or(false) {
+        crate::stage::unbuild(&el);
         let _ = children.RemoveAt(i);
     }
 }
@@ -1263,7 +1297,7 @@ fn draggable(card: &UIElement, host: &Grid, id: u32) -> R<()> {
         Ok(())
     }))
     .map_err(w)?;
-    let (h, el) = (host.clone(), card.clone());
+    let (h, el) = (host.clone(), card.downgrade().map_err(w)?);
     card.PointerMoved(&PointerEventHandler::new(move |_, a| {
         let Some(x) = at(&h, a.as_ref()) else {
             // Let go somewhere we didn't hear of.
@@ -1289,7 +1323,9 @@ fn draggable(card: &UIElement, host: &Grid, id: u32) -> R<()> {
         let Some((tx, start)) = step else { return Ok(()) };
         if let Some(pointer) = &start {
             DRAGGED.set(true);
-            let _ = el.CapturePointer(pointer);
+            if let Some(card) = el.upgrade() {
+                let _ = card.CapturePointer(pointer);
+            }
         }
         follow(id, tx, start.is_some());
         if let Some(a) = a.as_ref() {
@@ -1298,11 +1334,13 @@ fn draggable(card: &UIElement, host: &Grid, id: u32) -> R<()> {
         Ok(())
     }))
     .map_err(w)?;
-    let el = card.clone();
+    let el = card.downgrade().map_err(w)?;
     let up = PointerEventHandler::new(move |_, _| {
         let Some(d) = DRAG.with_borrow_mut(|d| d.take_if(|d| d.id == id)) else { return Ok(()) };
         if d.moving {
-            let _ = el.ReleasePointerCapture(&d.pointer);
+            if let Some(card) = el.upgrade() {
+                let _ = card.ReleasePointerCapture(&d.pointer);
+            }
             release(d.id, d.tx, speed(&d.samples), true);
         }
         Ok(())
@@ -1405,7 +1443,8 @@ pub(crate) fn hide() -> R<()> {
         Ok(())
     })?;
     crate::ripple::stop();
-    crate::meters::set_hidden(false);
+    let before = TOAST.with_borrow(|s| s.as_ref().and_then(|t| t.faded_meters));
+    crate::meters::set_hidden(false, before);
     Ok(())
 }
 
@@ -1414,7 +1453,7 @@ pub(crate) fn off() -> R<String> {
     DRAG.set(None);
     let Some(t) = TOAST.with_borrow_mut(Option::take) else { return Ok("toast off".into()) };
     lock(&EVENTS).clear();
-    crate::meters::set_hidden(false);
+    crate::meters::set_hidden(false, t.faded_meters);
     // Best effort per element: one that can't be stopped (a visual that never had a Translation to animate
     // says "property not found") must not leave the rest faded, or our host in the tree.
     for e in t.faded.iter().chain([&t.tray]) {
@@ -1423,7 +1462,7 @@ pub(crate) fn off() -> R<String> {
             let _ = v.StopAnimation(&HSTRING::from("Translation.Y"));
         }
         if let Err(e) = snap_to(e, 1.0, 0.0) {
-            crate::log(format!("toast off: restoring a tray element: {e}"));
+            crate::log(format!("toast off: couldn't put a tray element back: {e}"));
         }
     }
     let host = ui(&t.host)?;
@@ -1431,9 +1470,28 @@ pub(crate) fn off() -> R<String> {
     let children = parent.Children().map_err(w)?;
     let mut i = 0;
     if children.IndexOf(&host, &mut i).map_err(w)? {
+        crate::stage::unbuild(&host);
         children.RemoveAt(i).map_err(w)?;
     }
     Ok("toast off; tray restored".into())
+}
+
+/// The narrowest a card gets when there's no more room than that.
+const LEAST_W: f32 = 96.0;
+
+/// Where the cards end on the right, and where the free space they can grow into starts, in taskbar-window DIPs: up to the
+/// clock when it shows, else over the whole tray; or as far as something of ours; or, the taskbar being full, over all the tray.
+fn edges(t: &Toast, position: &str, snapshot: &Snapshot) -> R<(f32, f32)> {
+    let tray: FrameworkElement = t.tray.cast().map_err(w)?;
+    let tr = bounds(&t.tray, tray.ActualWidth().map_err(w)?, tray.ActualHeight().map_err(w)?)?;
+    let right = match (&t.clock, position) {
+        _ if t.whole_tray => tr.X + tr.Width,
+        (Some(c), _) => bounds(c, 0.0, 0.0)?.X + EDGE_MARGIN / 2.0,
+        (None, "clock") => tr.X + tr.Width,
+        (None, kind) => crate::meters::anchor(kind).map_or(tr.X, |a| a.0),
+    };
+    let free_start = snapshot.free.iter().rev().find(|(_, end)| *end <= tr.X + 1.0).map_or(tr.X, |&(s, _)| s);
+    Ok((right, free_start))
 }
 
 /// Cover the tray, growing left into the free space as far as the cards want (the widest of them, and room for
@@ -1443,17 +1501,13 @@ pub fn place(snapshot: &Snapshot) {
         let Ok(state) = cell.try_borrow() else { return };
         let Some(t) = state.as_ref() else { return };
         let r = (|| -> R<()> {
-            let tray: FrameworkElement = t.tray.cast().map_err(w)?;
-            let tr = bounds(&t.tray, tray.ActualWidth().map_err(w)?, tray.ActualHeight().map_err(w)?)?;
-            // Up to the clock when it shows, else over the whole tray.
-            let right = match &t.clock {
-                Some(c) => bounds(c, 0.0, 0.0)?.X + EDGE_MARGIN / 2.0,
-                None => tr.X + tr.Width,
-            };
+            let position = POSITION.with_borrow(Clone::clone);
+            let (right, free_start) = edges(t, &position, snapshot)?;
             let (_, peek) = t.peeking();
             let want = t.deck.iter().map(|c| c.want).fold(MIN_W, f32::max) + peek;
-            let free_start = snapshot.free.iter().rev().find(|(_, end)| *end <= tr.X + 1.0).map_or(tr.X, |&(s, _)| s);
-            let left = (right - EDGE_MARGIN - want).max(free_start + EDGE_MARGIN).min(right - MIN_W - peek);
+            // As far left as the cards want, but no further than the free space: past it are the buttons of people's windows,
+            // which draw over anything of ours. Short of room, the cards are narrower, never on top of those.
+            let left = (right - EDGE_MARGIN - want).max(free_start + EDGE_MARGIN).min(right - EDGE_MARGIN - LEAST_W);
             let host = ui(&t.host)?;
             let origin = bounds(&host.cast::<FrameworkElement>().map_err(w)?.Parent().map_err(w)?.cast().map_err(w)?, 0.0, 0.0)?;
             let width = right - left - EDGE_MARGIN;

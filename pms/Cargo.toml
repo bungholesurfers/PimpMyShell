@@ -15,6 +15,7 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Notifications",
     "Win32_System_Ole",
     "Foundation",
+    "Networking_Connectivity",
     "Foundation_Collections",
     "UI_Notifications",
     "UI_Notifications_Management",
@@ -39,9 +40,11 @@ windows = { version = "0.62.2", features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
     "Win32_System_Power",
+    "Win32_System_ProcessStatus",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_System_JobObjects",
     "Win32_System_WindowsProgramming",
     "Win32_System_Variant",
     "Win32_UI_Controls",
@@ -51,16 +54,26 @@ windows = { version = "0.62.2", features = [
     "Storage_Streams",
 ] }
 png = "0.18.1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+jpeg-decoder = { version = "0.3", default-features = false }
+pms-screen = { path = "../pms-screen" }
+# The shareware episode comes in a Debian package (wads.rs).
+lzma-rs = "0.3"
+# Freedoom, and Streamlink, come zipped.
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 # The updater (update.rs), as Nagare has it: HTTPS through rustls with Mozilla's roots bundled, the manifest's
 # Ed25519 signature, the installer's SHA-256. Pinned.
-ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls", "socks-proxy"] }
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize"] }
-sha2 = "=0.11.0"
+sha2 = "=0.11.1"
 getrandom = "=0.4.3"
 toml = "1.1.8"
 
 [build-dependencies]
 pms-res = { path = "../pms-res" }
+
+[lints.rust]
+# Set by `cargo xtask pgo-instrument`: an instrumented build, whose console is let go of rather than ended, to write its profile.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(pms_pgo)"] }

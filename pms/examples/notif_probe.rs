@@ -73,7 +73,7 @@ fn main() {
             let db = db();
             for id in &args[1..] {
                 let mut q = db.prepare("select * from Notification where Id = ?1").unwrap();
-                let names: Vec<String> = q.column_names().iter().map(|s| s.to_string()).collect();
+                let names: Vec<String> = q.column_names().map(str::to_string).collect();
                 let _ = q.query_row([id], |r| {
                     for (i, name) in names.iter().enumerate() {
                         if name != "Payload" {

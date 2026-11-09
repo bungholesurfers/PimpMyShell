@@ -132,7 +132,7 @@ impl Customizer {
 /// Flat and dark, like the settings.
 fn style(ctx: &egui::Context) {
     ctx.set_visuals(egui::Visuals::dark());
-    ctx.style_mut(|s| {
+    ctx.global_style_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         let v = &mut s.visuals;
         v.panel_fill = Color32::from_rgb(0x1B, 0x1C, 0x20);
@@ -185,7 +185,9 @@ fn color_row(ui: &mut egui::Ui, name: &str, value: &mut String) {
 }
 
 impl eframe::App for Customizer {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // The panels go on the window's own ui; what else wants the context (windows, styles) has it.
+        let ctx = &ui.ctx().clone();
         // Previews catch up 80 ms after the last change, so turning a knob stays smooth.
         let stale = self.shown.as_ref() != Some(&self.design);
         if stale
@@ -196,12 +198,12 @@ impl eframe::App for Customizer {
             self.message = (e, true);
             self.shown = Some(self.design.clone());
         }
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        egui::Panel::bottom("status").show(ui, |ui| {
             let (text, error) = &self.message;
             ui.label(RichText::new(text).color(if *error { Color32::from_rgb(0xFF, 0x8A, 0x80) } else { Color32::from_gray(150) }));
         });
         let before = self.design.clone();
-        egui::SidePanel::left("knobs").resizable(false).exact_width(330.0).show(ctx, |ui| {
+        egui::Panel::left("knobs").resizable(false).exact_size(330.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(6.0);
                 ui.label(RichText::new("PimpMyShell art").size(20.0).strong().color(Color32::WHITE));
@@ -270,7 +272,7 @@ impl eframe::App for Customizer {
         if self.design != before {
             self.changed = Instant::now();
         }
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let Some(p) = &self.previews else {
                 ui.label("Rendering…");
                 return;

@@ -1,0 +1,21 @@
+[package]
+name = "room"
+version = "0.1.0"
+edition = "2021"
+description = "The Doom engine, from sunsided/room (see NOTICE.md)"
+license = "GPL-2.0-only"
+publish = false
+
+[lib]
+name = "room"
+path = "src/lib.rs"
+
+[features]
+rangecheck = []
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+rodio = "0.23"
+rustysynth = "1"
+libc = "0.2"

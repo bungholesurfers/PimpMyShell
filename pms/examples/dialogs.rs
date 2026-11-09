@@ -13,7 +13,7 @@ use pms::notices;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        Some("update") => println!("update_check = {}", pms::update_question(false)),
+        Some("update") => println!("update_check = {:?}", pms::update_question(false)),
         Some("access") => println!("{:?}", notices::choose(&notices::notification_access())),
         Some("config") => {
             let path = pms::config::default_path();

@@ -1,6 +1,6 @@
 # PimpMyShell (P.M.S.)
 
-![Upgrayedd, with his UPGRAYEDD license plate: "two D's, for a double dose of this pimping"](upgrayedd.png)
+![Upgrayedd, with his UPGRAYEDD license plate: "two D's, for a double dose of this pimping"](upgrayedd.jpg)
 
 **Exclusively for Windows 11.**
 
@@ -50,7 +50,10 @@ it needs the real thing to be there.
   - Bars can glow by how busy they are, or by how hot they've got. Hover any meter, or any GPU, disk or interface
     in one, for a tooltip that says what it is and what it's doing.
 - **Hot mic.** While an app has the microphone open, the whole taskbar warns you. Then it settles into a label naming
-  the apps, with sonar rings and the mic's loudness rising in the background.
+  the apps, with sonar rings and the mic's loudness rising in the background: beside the tray, or first, before your
+  meters and TVs, if you'd rather.
+- **Your order.** Your meters, together, and each TV and Twatch TV go along the taskbar in the order you give them on
+  Settings > Widgets, with the mic's label at whichever end you like.
 - **Toasts in the taskbar.** Notifications show inside the taskbar instead of popping up. Their buttons work. The
   card glows in the app icon's color, rings ripple across the taskbar, and the clock stays in sight. New ones stack
   on top of the ones still showing, and you can flick a card off to the right to dismiss it. They stay as long as
@@ -65,6 +68,93 @@ it needs the real thing to be there.
 - **A watchdog** that backs off if explorer ever crashes with PimpMyShell in it.
 - **Signed updates**, checked every day or two if you agree (or whenever you ask), installed only when you say so.
 - **Easy on the battery.** Unplugged, the hot-mic animation drops to 30 fps by default. `max_fps` caps it always.
+
+## A TV in your taskbar
+
+The last thing on the strip is a `screen`: a little TV, on by default, in the spirit of WindowMaker's dockapps. Point at it for
+its remote: channel up and down, shuffle, and power. Shuffling TVs change channel every 30 seconds, or however often you set on any
+remote or in Settings, which is for all of them. With jitter on, each is late by its own random amount, up to a quarter of that;
+with it off, they all change together. Add as many sets as you like in Settings > TV, and move them along the taskbar on
+Settings > Widgets.
+
+On starting, each set flips up through its channels, from Captain Midnight's 1295 round to channel 6, and stays there. Settings > TV
+changes where it starts and stops, or turns that off.
+
+| Channel | |
+|---|---|
+| 2 | The test card |
+| 3 | The crab, bouncing around and changing color, as a DVD player's logo does when it's left alone |
+| 4 | Static |
+| 6 | Space Pimpin', or POOM to its friends: a game console plugged into your TVs |
+| 1295 | [Captain Midnight](https://en.wikipedia.org/wiki/Captain_Midnight_broadcast_signal_intrusion), who took over HBO's satellite feed in April 1986 over the price of scrambling |
+
+Give the console a game on Settings > POOM and it's on channel 6. The demos
+play in the taskbar. Click the picture to stop shuffling, then again to open a window and play. The console keeps running when
+you change the channel, as a console does, and has a power button of its own. With nobody watching, it rests. Settings > POOM
+fetches [Freedoom](https://freedoom.github.io/) or the Doom shareware episode, on request, or you can add your own IWAD. No
+game data comes with PimpMyShell. Sound is off, and no audio device is opened.
+
+On battery a TV you leave alone sleeps, holding its last picture and sending nothing, and wakes for 30 seconds when you touch it.
+A sleeping TV costs what no TV does. On mains it runs at 60 frames a second, 30 while the machine stays busy, for a few percent of
+one CPU thread in Explorer.
+
+Turned off, any set stays for seven seconds, then shrinks to a small button: click it to turn the set back on.
+
+### Twatch TV
+
+A Twatch TV is a 16:9 flat-screen set that keeps an eye on your favorite Twitch channels, in the order you put them, and plays the
+best one that's live as live video in the taskbar. It's off until you turn it on in Settings > Twatch TV, and there's no sign-in,
+API key or client ID. Pointing at the set brings up its remote: what's on and how well it's playing, power, sound (off to begin
+with), channel up and down, and your favorites, live ones lit. Clicking the picture opens the channel.
+
+- Your favorites live beside your settings, in `pms-twatch-watchlist.txt`: one channel per line, best first, as names, @names or
+  twitch.tv links, with `#` for comments. A line that can't be a channel is skipped and pointed out, and the rest carry on.
+- Finding out who's live is one small request for a channel's preview picture on Twitch's CDN. Every favorite gets one about
+  every 10 minutes, plus a random wait of up to 5 minutes picked afresh each time, whatever its place in the list. They go in no
+  order, one at random of those due, spread out so that no two come together, and nobody's looked at again before their wait is
+  up. At the start, those never looked at go a few seconds apart, so the sets know who's live within moments. Settings can change
+  both, and it's all twice as long on battery.
+- Each set follows your favorites, stays on its channel until that ends, or only ever shows one channel, with no signal until it's
+  live. Its remote has a key for each, and says what'll happen, in so many words: "Switches if crab goes live", or "Only ever shows
+  crab: no signal until they're live". Settings says what sets do by default. Picking a channel from the remote stays on it until
+  it ends; on a set kept to one channel, it changes which. The remote also sets the highest quality, for every set.
+- With more favorites live than sets, a purple plus beside them says so, and adds a set for good. Or Settings can have sets come and
+  go by themselves, up to two more, and an A beside them says that's on and leads to the setting.
+- A notification says when a favorite goes live, unless you turn that off.
+- Pictures can stand in for video, only when RAM or VRAM is low (the usual), until you click a set, always, or never. Pictures need
+  no Streamlink, and show on battery whatever you've chosen.
+- Live video needs [Streamlink](https://streamlink.github.io/), which Settings downloads on request from the project's
+  [Windows builds](https://github.com/streamlink/windows-builds): the newest stable release, taken only if GitHub says its own
+  runners uploaded it, and only if it hashes to the digest GitHub keeps for it. That proves it's the file the project published,
+  not that it's safe, so nothing newer is ever installed unasked. Streamlink reads Twitch's website, which changes without
+  warning, so if it can't open a channel that's live, PimpMyShell asks GitHub whether there's a newer release, at most every six
+  hours, and tells you: getting it is your call, in Settings. Prefer no extra program? Turn on pictures, and the set shows a still
+  every minute instead.
+- Off the mains, a set shows a new picture every minute instead of video, and goes back to video when you plug in.
+- It plays up to 480p by default, and up to 1080p60 if you ask. While your PC stays busy, or the stream keeps stalling, it steps down, a very small light
+  shows on the set, and the remote says why. The network can lower it too, by itself.
+- With more sets allowed, up to two more appear as more favorites go live and their streams start, and go away afterwards.
+- When a stream has a problem, the set shows No Signal and keeps trying.
+- Each set starts with a second of its logo.
+- When Windows turns the display off, muted sets stop streaming and keep their last picture, and pick up again a few seconds after
+  it's back. A set with its sound on keeps playing, as sound only. The console carries on as it was.
+- When memory runs low (90% of RAM in use or committed) or video memory does (69% of a card's own), the players are evicted, and
+  each set says so, under a very sad little TV. With RAM low the console goes too, unless it's been played since it last started:
+  closing that could lose a game, so it stays until it's restarted, and a notification says so. It doesn't use the GPU, so VRAM is
+  nothing to it. Everything comes back by itself once things have been fine for a minute.
+
+Windows can't take a DLL back out of a running process, so each new build Explorer meets stays in it until Explorer restarts. Once
+it has at least 10 of them and 300 MB of memory, a notification says so, and Settings can turn that off. Explorer never restarts
+by itself. Asked to, from that notification, from Settings or with `pms restart-explorer`, it won't with a folder window, file copy
+or Explorer dialog open in the taskbar's process. It asks Explorer to leave, the way Exit Explorer does, and your taskbar is back
+in a few seconds.
+
+The player is `pms-twatch.exe`, its own process, using Windows' own media stack. The video never touches a window: frames are
+scaled down on the GPU and handed over in shared memory, like the console's.
+
+The console is `pms-poom.exe`, its own process, so a crash can't touch your taskbar. It's the engine from
+[room](https://github.com/sunsided/room), and it's under the GPL version 2, unlike the rest of PimpMyShell: its source is in
+[`pms-poom`](pms-poom), and it shares nothing with the MIT parts but frames in shared memory (`pms-screen`).
 
 ## Using it
 
@@ -131,24 +221,44 @@ What it touches, all under your own user (no admin, no services, no drivers):
 - **`HKCU\Control Panel\NotifyIconSettings`**: on the first start of each copy (each exe path), the tray icon is
   promoted out of the overflow, once (`tray-pinned.txt` remembers). Hide it again and it stays hidden.
 - **`%APPDATA%\PimpMyShell`**: `pms.toml`, `pms.toml.bak` (the settings window's copy of it from before its first save),
-  `pms.toml.full.bak` (the whole file, from before it held only your changes), and `logs` (`daemon.log` and `tap.log`, each
-  rotated at 1 MB with two older generations kept, `daemon.1.log` and `daemon.2.log`; about 3 MB each at most; where VS
-  Code keeps its own, `%APPDATA%\Code\logs`).
-- **`%LOCALAPPDATA%\PimpMyShell`**: this PC's own files: `banners.txt`, `tree.txt` (a
+  `pms.toml.full.bak` (the whole file, from before it held only your changes), `pms.toml.last-good` (the last settings that
+  loaded), `pms-twatch-watchlist.txt` (your Twatch TV favorites), `pms-network.toml` (a proxy, and what goes through it),
+  `tv.txt` and `twatch.txt` (each TV's channel, power and sound, as you left them: they go with the sets named in `pms.toml`).
+  Your favorites and network settings are kept out of `pms.toml` so that you can share it for help without them. A setting in
+  `pms.toml` that can't be used (misspelled, one an older version knew, or a value that isn't one of the choices, is out of
+  range, isn't a color or is the wrong kind) goes back to its default, or is left out, and the rest loads. A notification says
+  so, and Settings marks each in red, with its page.
+- **`%LOCALAPPDATA%\PimpMyShell`**: this PC's own files: `logs` (`daemon.log` and `tap.log`, each rotated at 1 MB with two
+  older generations kept, `daemon.1.log` and `daemon.2.log`; about 3 MB each at most. They're here, not in the roaming
+  profile, as they're about this PC and written all the time: where the roaming folder is redirected to a network share,
+  each line from inside Explorer would be a network write), `banners.txt`, `tree.txt` (a
   dump of the taskbar's visual tree), `update-checked.txt` (when updates were last checked), `taskbar-told.txt` (whose
   replaced taskbar we've explained, so that it's only once), `welcomed.txt` (the welcome has been offered), `pms-128.png`,
-  `tray-pinned.txt`, and `pms_tap-<stamp>.dll` copies (see below).
+  `tray-pinned.txt`, `seashell-carried-over.txt` (SeaShell's settings have been brought over once, and never come back),
+  `vidya` (games, each in a folder of its own: `vidya\poom` is the console's, with its games in `wads` and its settings and
+  saved games), `streamlink`, and `tap\pms_tap-<stamp>.dll` (see below).
 - **`%TEMP%\pms-update`**: a downloaded update, until it's installed.
 
 It reads, but never writes, the notification database (`wpndatabase.db`), to get a toast's full content.
 
-The only network traffic is the update check, and none happens until you answer. A minute into the first run,
-PimpMyShell asks whether it may check by itself: *OK*, or closing the question, lets it check a while after each start
-and then every day or two; *No, don't check* turns that off (`update_check` in the config, or the settings' *software
-update*, changes it later; on is the default). You can also check from the tray or the settings. A check starts by
-reading `https://raw.githubusercontent.com/bungholesurfers/PimpMyShell/main/update/stable.txt` (on the latest channel,
-`https://github.com/bungholesurfers/PimpMyShell/releases/latest`), and goes on to the release only when that names a
-newer version. It sends nothing but the requests themselves.
+Settings > Network lists everything PimpMyShell uses the network for, with what goes where: update checks; downloads you ask
+for (games, and Streamlink); and, with a Twatch TV, who's live, Streamlink finding streams, and the video itself. It sends
+nothing but the requests themselves: no account, no analytics. Update checks wait for your answer: a minute into the first run,
+PimpMyShell asks whether it may check by itself. *Check automatically* lets it check a while after each start and then every day
+or two, *Don't check* turns that off, and closing the question answers nothing, so it asks again at the next start
+(`update_check` in the config, or the settings' *software update*, changes it later). You can also check from the tray or the
+settings. A check starts by reading `https://raw.githubusercontent.com/bungholesurfers/PimpMyShell/main/update/stable.txt` (on
+the latest channel, `https://github.com/bungholesurfers/PimpMyShell/releases/latest`), and goes on to the release only when that
+names a newer version.
+
+Any of it can go through a SOCKS5 proxy (`socks5h://` looks names up there too), each use switched on or off, Streamlink and the
+video included: Streamlink is told to use it, and the video is fetched by PimpMyShell itself, through the proxy, instead of by
+Windows. Finding a stream and playing it always go the same way, as Twitch's address for a stream names the IP address that asked.
+For Tor, each use can go with a random user name and password of its own, for stream isolation. What's switched on never goes
+without the proxy: if it can't be reached, that fails, and if `pms-network.toml` won't load, nothing goes online until it's fixed,
+and a notification says so. Nothing is airtight, least of all software PimpMyShell gets for you from elsewhere, like Streamlink:
+if it matters, Windows Firewall or another filter on the Windows Filtering Platform can keep `pmsd.exe`, `pms-gui.exe`,
+`pms-twatch.exe` and `streamlink.exe` to your proxy.
 
 **Turning it off:** tray > *Pause* for a stock taskbar right now, tray > *Exit* to stop. `pms daemon stop` does the
 same from a console.
@@ -157,7 +267,7 @@ same from a console.
 removes the Run value and its Task Manager startup mark, the notification registration, `%TEMP%\pms-update`, and the
 logs, `tree.txt`, `update-checked.txt` and `taskbar-told.txt` (each by its exact name). It keeps `pms.toml` (your config, in
 `%APPDATA%\PimpMyShell`), and `banners.txt` in `%LOCALAPPDATA%\PimpMyShell`, along with small leftovers (`pms-128.png`,
-`tray-pinned.txt`, the `pms_tap-*.dll` copies). Delete those folders by hand if you want them gone. A TAP copy stays loaded, inert, in the running explorer until explorer restarts or you sign out.
+`tray-pinned.txt`, the `tap` folder). Delete those folders by hand if you want them gone. A TAP stays loaded, inert, in the running explorer until explorer restarts or you sign out: it's a hard link to the installed DLL, not a copy, so it takes no room and no writing, and it lets an update replace that DLL while Explorer still has it open.
 
 ## How it diddles Explorer
 
@@ -200,7 +310,7 @@ from it by CLSID, and hands it an `IXamlDiagnostics` site. That DLL is a TAP ("T
 1. Finds explorer's pid from `Shell_TrayWnd`, but only once it has its
    `Windows.UI.Composition.DesktopWindowContentBridge` child, i.e. the XAML island exists.
 2. Asks any TAP already there to `detach`.
-3. Copies `pms_tap.dll` to `%LOCALAPPDATA%\PimpMyShell\pms_tap-<timestamp>.dll`. Explorer keeps every copy it loaded
+3. Copies `pms_tap.dll` to `%LOCALAPPDATA%\PimpMyShell\tap\pms_tap-<timestamp>.dll`. Explorer keeps every copy it loaded
    locked until it exits, so each injection gets a fresh copy. Old copies get swept up when they're no longer loaded.
 4. Calls `InitializeXamlDiagnosticsEx` with that copy and the TAP's CLSID, trying endpoint names
    `VisualDiagConnection1..100` until one isn't taken.
@@ -501,17 +611,24 @@ install` in the checkout fetches it. The pin matters because a PGO profile only 
 Everything runs through `cargo xtask` (an alias in `.cargo/config.toml`):
 
 ```
-cargo xtask build        release build of pmsd.exe, pms.exe, pms-gui.exe and pms_tap.dll into target\release
+cargo xtask build        release build of all that ships (pmsd, pms, pms-gui, the TAP, pms-poom, pms-twatch) into target\release
 cargo xtask check        clippy with warnings as errors, then every test
 cargo xtask installer    build, then pack target\installer\pms-setup-VERSION.exe with Inno Setup 6
                          (--no-build packs what's built, --pgo packs the PGO build, --install installs it silently)
 cargo xtask art          render the icons and the installer's pictures from art\ (the results are checked in)
-cargo xtask pgo [SECS]   profile-guided build: instrument, train on this very taskbar (default 60 s), merge, build
+cargo xtask pgo [SECS]   profile-guided build: instrument, train on this very taskbar (default 180 s), merge, build
 cargo xtask help         the full list, including the separate pgo-* steps
 ```
 
 Everyday builds skip LTO entirely, so a change rebuilds in seconds. Only release builds take fat LTO (the PGO build, or the release
 workflow's when there's no profile).
+
+PGO training runs on your own taskbar with `pgo/train.toml`, which turns on what the defaults leave off: every meter style, two
+TVs, the backdrop and glows. Then it does what people do, on a timetable: the TVs surf, the microphone is held, notifications
+arrive (from `toast_lab`), the mic's label moves, Freedoom is fetched and played in POOM's window, and the remotes change channels.
+After that it just runs, for the rest of the time. Leave the PC alone meanwhile: a game window opens, and notifications pop up.
+The training's files, its game among them, stay in `target\pgo-train`, so your config, TVs and games are left alone. POOM's
+profile is kept with its source, in `pms-poom\pgo`.
 
 The installer needs **Inno Setup 6**: `winget install --id JRSoftware.InnoSetup --scope user`. VERSION is the
 workspace's version, in the root `Cargo.toml` (`[workspace.package]`), which every crate takes.
@@ -530,6 +647,18 @@ Two TAPs racing for one pipe is no fun.
 The crab is [**Red Crab** by Scout](https://openclipart.org/detail/192996/red-crab), Openclipart 192996, public domain
 (CC0 1.0). See `art\openclipart-192996\SOURCE.txt`. The logo adds a dollar to it, rendered by `pms-art`.
 
+POOM's engine is [room](https://github.com/sunsided/room) by Markus Mayer and contributors, a Rust port descended from
+[doomgeneric](https://github.com/ozkl/doomgeneric) by ozkl, [Chocolate Doom](https://www.chocolate-doom.org/) by Simon Howard,
+and the Doom source code id Software released under the GPL.
+
 ## License
+
+PimpMyShell is under the MIT License, except POOM (`pms-poom`), which is under the GPL version 2 (`pms-poom/COPYING`,
+installed as `pms-poom-COPYING.txt`), with what it descends from and how it's changed in `pms-poom/engine/NOTICE.md`.
+
+DOOM is a registered trademark of id Software LLC, a ZeniMax Media company. Twitch is a trademark of Twitch Interactive, Inc.
+PimpMyShell isn't affiliated with or endorsed by either, or by Bethesda or Microsoft. No game data comes with PimpMyShell:
+Freedoom and the Doom shareware episode are fetched from their own publishers when you ask, under their own licenses.
+
 
 MIT: see [LICENSE](LICENSE). The crab art is CC0 (public domain), see above.

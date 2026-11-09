@@ -5,12 +5,23 @@ pub mod config;
 mod layers;
 pub mod daemon;
 mod devices;
+pub mod explorer;
 mod expr;
 mod hotmic;
 pub mod meters;
+pub mod net;
 mod nvml;
 pub mod signing;
 pub mod system;
+mod load;
+pub mod parts;
+mod pimpcast;
+pub mod pressure;
+pub mod problem;
+pub mod streamlink;
+pub mod tv;
+pub mod twatch;
+pub mod wads;
 pub mod notices;
 mod toasts;
 mod tray;
@@ -19,6 +30,7 @@ pub mod version;
 pub mod watchdog;
 
 use std::fs::File;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -105,7 +117,52 @@ pub fn taskbar_pid() -> Option<u32> {
     (pid != 0).then_some(pid)
 }
 
-/// Detach any live TAP and inject a fresh copy of `pms_tap.dll` (next to this exe).
+/// Whether `path` is the name of a TAP we've put somewhere for Explorer to load.
+fn is_tap_copy(path: &str) -> bool {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path).to_ascii_lowercase();
+    name.starts_with("pms_tap-") && name.ends_with(".dll")
+}
+
+fn file_info(path: &Path) -> Option<windows::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::GetFileInformationByHandle;
+    let file = File::open(path).ok()?;
+    let mut info = Default::default();
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+    Some(info)
+}
+
+/// What a file is, whatever it's called: two hard links to it say the same.
+fn file_id(path: &Path) -> Option<(u32, u32, u32)> {
+    file_info(path).map(|info| (info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+}
+
+/// Deletes the TAPs in `dir` that nothing has loaded. Deleting one that is loaded could work, with another name for it left, and
+/// that name would then be the last, which an update couldn't replace: so `loaded` says which to leave.
+fn sweep_taps(dir: &Path, loaded: &[(u32, u32, u32)]) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if is_tap_copy(&path.to_string_lossy()) && file_id(&path).is_some_and(|id| !loaded.contains(&id)) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Puts the TAP at `from` where Explorer can load it as `to`, a name of its own, so that the file `from` names can be replaced
+/// meanwhile. A hard link does that with nothing written but the name. It's a copy if Explorer has that very file loaded, inert
+/// from an earlier time: Windows would hand back that one, not start it afresh. And if the file has other names already, which
+/// makes it something else's to look after, like a build's output, that would then find it locked. And on another drive.
+fn place_tap(from: &Path, to: &Path, loaded: Option<&[(u32, u32, u32)]>) -> Result<(), String> {
+    let fresh = loaded.is_some_and(|ids| file_id(from).is_some_and(|id| !ids.contains(&id)));
+    let only_name = file_info(from).is_some_and(|info| info.nNumberOfLinks == 1);
+    if fresh && only_name && std::fs::hard_link(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(from, to).map(drop).map_err(|e| format!("copy {}: {e}", from.display()))
+}
+
+/// Detach any live TAP and inject a fresh `pms_tap.dll` (next to this exe).
 pub fn inject() -> Result<String, String> {
     let mut out = Vec::new();
     if let Ok(mut old) = connect(Duration::ZERO) {
@@ -116,20 +173,19 @@ pub fn inject() -> Result<String, String> {
     }
     let pid = taskbar_pid().ok_or("no taskbar yet (Shell_TrayWnd without its XAML island)")?;
 
-    // Explorer keeps each loaded copy locked until it exits, so inject a fresh copy each time,
-    // and sweep up the copies that are no longer loaded anywhere.
-    let dir = data_dir();
+    // Explorer holds on to each TAP it loads until it exits: each gets a name of its own, and the names nothing has loaded any
+    // more are swept up, here and where they used to go.
+    let dir = data_dir().join("tap");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("pms_tap-") && name.ends_with(".dll") {
-            let _ = std::fs::remove_file(entry.path());
-        }
+    let loaded: Option<Vec<_>> = system::loaded_taps(pid).map(|taps| taps.iter().filter_map(|t| file_id(t)).collect());
+    if let Some(loaded) = &loaded {
+        sweep_taps(&dir, loaded);
+        sweep_taps(&data_dir(), loaded);
     }
     let src = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("pms_tap.dll");
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let dll = dir.join(format!("pms_tap-{stamp}.dll"));
-    std::fs::copy(&src, &dll).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    place_tap(&src, &dll, loaded.as_deref())?;
 
     let init: InitializeXamlDiagnosticsExFn = unsafe {
         let xaml = LoadLibraryW(w!("Windows.UI.Xaml.dll")).map_err(|e| e.to_string())?;
@@ -156,6 +212,64 @@ pub fn inject() -> Result<String, String> {
     let mut conn = connect(Duration::from_secs(10)).map_err(|e| format!("new TAP never opened its pipe: {e}"))?;
     out.push(request(&mut conn, "ping")?);
     Ok(out.join("\n"))
+}
+
+#[cfg(test)]
+mod tap_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn folder(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pms-tap-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_tap_is_known_by_its_name() {
+        assert!(is_tap_copy(r"C:\Users\x\AppData\Local\PimpMyShell\tap\pms_tap-1794.dll"));
+        assert!(is_tap_copy(r"C:\A\PMS_TAP-1.DLL"));
+        assert!(!is_tap_copy(r"C:\Program Files\PimpMyShell\pms_tap.dll"), "the installed one is never one to sweep");
+        assert!(!is_tap_copy(r"C:\pms_tap-1.dll\other.dll"));
+    }
+
+    #[test]
+    fn a_new_tap_is_a_link_and_one_explorer_has_already_is_a_copy() {
+        let dir = folder("place");
+        let from = dir.join("pms_tap.dll");
+        std::fs::write(&from, "tap").unwrap();
+        let id = file_id(&from).unwrap();
+
+        let (linked, copied, unsure) = (dir.join("pms_tap-1.dll"), dir.join("pms_tap-2.dll"), dir.join("pms_tap-3.dll"));
+        place_tap(&from, &linked, Some(&[])).unwrap();
+        assert_eq!(file_id(&linked), Some(id), "nothing written but a name");
+        place_tap(&from, &copied, Some(&[id])).unwrap();
+        assert_ne!(file_id(&copied), Some(id), "Windows would hand back the one it has");
+        place_tap(&from, &unsure, None).unwrap();
+        assert_ne!(file_id(&unsure), Some(id), "when we can't tell, the safe one");
+        assert_eq!(std::fs::read(&copied).unwrap(), b"tap");
+
+        let (built, also, placed) = (dir.join("built.dll"), dir.join("built-too.dll"), dir.join("pms_tap-4.dll"));
+        std::fs::write(&built, "tap").unwrap();
+        std::fs::hard_link(&built, &also).unwrap();
+        place_tap(&built, &placed, Some(&[])).unwrap();
+        assert_ne!(file_id(&placed), file_id(&built), "a build's output has two names, and a build mustn't find it locked");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_sweep_leaves_what_is_loaded_and_everything_else_of_ours() {
+        let dir = folder("sweep");
+        let (kept, gone, other) = (dir.join("pms_tap-1.dll"), dir.join("pms_tap-2.dll"), dir.join("pms_tap.dll"));
+        for file in [&kept, &gone, &other] {
+            std::fs::write(file, "x").unwrap();
+        }
+        sweep_taps(&dir, &[file_id(&kept).unwrap()]);
+        assert!(kept.exists() && other.exists());
+        assert!(!gone.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 /// `PMS_TRACE=1`: log timing details (sampling, pushes) for diagnosis.

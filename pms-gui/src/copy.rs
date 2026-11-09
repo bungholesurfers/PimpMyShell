@@ -14,18 +14,39 @@ pub fn setting(id: &str) -> (&str, &str) {
         "bar_height" => ("Bar height", "How much of the taskbar's height meters made of bars use"),
         "interval_ms" => ("Update interval", "How often meters refresh, unless a meter has its own interval"),
         "software_gpus" => ("Include software graphics adapters", "Count Microsoft Basic Render Driver, which runs on the CPU, in GPU meters"),
-        "max_fps" => ("Limit animation frame rate", "Cap ongoing animations, such as the microphone alert. When it's off, they run at your display's refresh rate"),
+        "max_fps" => ("Limit animation frame rate", "Cap ongoing animations, such as Hot Mic's and the notification rings. When it's off, they run at your display's refresh rate"),
         "battery_fps" => ("Frame rate on battery", "A lower cap while your PC runs on battery. 0 means no cap"),
         "value_font" => ("Meter font", "A fixed-width font keeps digits from shifting. Leave it empty to use Cascadia Mono, or Consolas"),
         "update_check" => (
             "Check for updates automatically",
-            "We check GitHub shortly after PimpMyShell starts, then every day or two. New versions download in the background, and you choose when to install them",
+            "We check GitHub a while after PimpMyShell starts (1 to 30 minutes), then every day or two. New versions download in the background, and you choose when to install them",
         ),
         "update_channel" => ("Update channel", "Stable gets a version once it has proven itself. Latest gets every release as soon as it's published"),
+
+        "notify_explorer" => ("Tell me when Explorer could use a restart", "Windows can't unload what we've added to Explorer, so updates add up. When it's holding a lot, you get a notification. Explorer only restarts if you ask"),
+
+        // TV and Twatch TV
+        "shuffle_seconds" => ("Time between shuffles", "How long a shuffling TV stays on a channel. This is for all your TVs, and their remotes can change it too"),
+        "shuffle_jitter" => ("Jitter", "Each shuffling TV changes channel a little late, by up to a quarter of the time above. When this is off, they all change together"),
+        "console_autostart" => ("Start POOM when a TV tunes in", "Any TV landing on channel 6, even by shuffling, switches the console on. When this is off, channel 6 shows no signal until you switch it on"),
+        "tv_intro" => ("Channel surf when a TV starts up", "When PimpMyShell starts, or you add a TV, it flips up through its channels before it settles. When this is off, it comes on at the channel it was left on"),
+        "tv_intro_from" => ("Surf from", "The channel the run starts on"),
+        "tv_intro_to" => ("Surf to", "Where the run ends, and the TV stays. On 6 with a game, POOM starts"),
+        "twatch.media_controls" => ("Show in Windows' media controls", "Where Windows shows what's playing: the volume flyout, the lock screen, and your keyboard's media keys. It's never by default, so a TwaTV doesn't take over your media keys"),
+        "twatch.pictures" => ("Pictures instead of video", "A still of the channel every minute, for hardly any CPU or network. It doesn't need Streamlink. On battery you get these anyway"),
+        "twatch.volume" => ("Volume", "How loud every TwaTV is, when its sound is on. Any set's remote can change it too"),
+        "twatch.metered_pictures" => ("Pictures on a metered connection", "Video takes about 1 to 1.5 Mbps a set at 480p. While Windows says your connection is metered, like a phone hotspot, sets show a picture a minute instead"),
+        "twatch.notify_live" => ("Tell me when a favorite goes live", "A notification, whichever TwaTV it ends up on. Select it to go to the channel"),
+        "twatch.top_quality" => ("Highest quality", "It goes lower by itself while your PC is busy or the network can't keep up, and a small light on the set says so. The remote says why"),
+        "twatch.more_sets" => ("Add TwaTVs by themselves", "While more favorites are live than you have TwaTVs, more appear, and they go away again when those streams end. Off, a purple plus by your TwaTVs offers one instead"),
+        "twatch.higher_favorite" => ("When a higher favorite goes live", "What every set does, unless its remote is set to This stream or This channel. Whatever it does, its remote tells you"),
+        "twatch.check_seconds" => ("How often to check each favorite", "Every favorite is looked at about this often, whatever its place in the list: in a random order, spread out, never two at once. Each look is one small request for a picture, with no account. On battery, it's twice as long"),
+        "twatch.check_extra_seconds" => ("Plus a random wait of", "Added to each favorite's wait, a new amount every time, so that looks don't come like clockwork"),
 
         // Meters
         "meter.label" => ("Name", "Shown next to the meter and in its tooltip"),
         "meter.group" => ("Group", "Meters in different groups are separated by a divider"),
+        "meter.sideways" => ("Name on its side", "Turned to read downwards, it takes up less room across. On by default for disk and network meters"),
         "meter.snug" => ("Attach to the previous meter", "No divider or space between this meter and the one before it"),
         "meter.caption" => ("Show name on the taskbar", "The name always appears in the tooltip"),
         "meter.style" => ("Style", "How the meter is drawn"),
@@ -61,6 +82,12 @@ pub fn setting(id: &str) -> (&str, &str) {
             "A pie for each graphics adapter with at least 1 GB of dedicated memory, in its manufacturer's color. We fill in the expression, full scale, and color",
         ),
         "meter.label_inside" => ("Name inside the pie", "Put the name inside the pie: never, only when space is short, or always"),
+        "meter.slice_glow" => ("Glowing slice", "The name of a slice that glows, as it's written under Names. Leave it empty for none"),
+        "meter.slice_glow_extend" => ("Slice stands out", "How far the slice can stick out past the pie while its amount is changing. At rest it doesn't"),
+        "meter.slice_glow_radius" => ("Glow radius", "How far the glow reaches"),
+        "meter.slice_glow_strength" => ("Glow strength", "How bright the glow is"),
+        "meter.slice_glow_color" => ("Glow color", "Empty uses the slice's own color"),
+        "meter.slice_glow_pulse_ms" => ("Glow pulse", "How long a slow pulse takes. 0 holds it steady"),
         "meter.pressure" => ("Pressure point", "How full the first slice gets before the glow around the pie grows stronger"),
         "meter.time_axis" => ("Time scale", "Logarithmic gives recent values the most room. Linear spaces every value evenly"),
         "meter.history_seconds" => ("History length", "How far back the graph goes"),
@@ -95,13 +122,14 @@ pub fn setting(id: &str) -> (&str, &str) {
         "app_glow.hover_radius" => ("Size on hover", "How far the glow reaches, in pixels"),
         "app_glow.press_radius" => ("Size when pressed", "How far the glow reaches, in pixels"),
 
-        // Microphone alert
+        // Hot Mic
         "hotmic.color" => ("Alert color", "The color of the alert"),
         "hotmic.period_ms" => ("Pulse length", "One pulse of the alert. 0 keeps it steady"),
         "hotmic.low" => ("Lowest opacity", "How faint the pulse gets"),
         "hotmic.high" => ("Highest opacity", "How strong the pulse gets"),
-        "hotmic.broad_ms" => ("Full taskbar alert", "How long the whole taskbar alerts before the alert settles next to the system tray"),
+        "hotmic.broad_ms" => ("Full taskbar alert", "How long the whole taskbar alerts before the alert settles around its label"),
         "hotmic.ignore" => ("Excluded apps", "Apps that never trigger the alert. Enter part of an app's name or path"),
+        "hotmic.position" => ("Where its label goes", "The label naming the apps: first, before your meters and TVs, or last, beside the tray. The Widgets page has it in its place too"),
 
         // Notifications
         "toasts.duration_ms" => (
@@ -109,6 +137,7 @@ pub fn setting(id: &str) -> (&str, &str) {
             "How long a notification stays in front, or at most 4 seconds if more are waiting. Those that ask for longer get at least 25 seconds. Alarms, calls, and reminders stay until you respond",
         ),
         "toasts.confirm_clicks" => ("Ask before opening", "When you select a notification, show what it's about to open and let you say no. A window has room for every detail"),
+        "toasts.position" => ("Where they appear", "Where cards stop. Left of the clock, they cover the tray. Left of your first TV, or of the Hot Mic label, that and everything to its right stays in sight; when it isn't showing, cards stop at the tray. On a full taskbar they cover the whole tray"),
         "toasts.style" => ("Card style", "Standard matches Windows. Pimped turns cards gold, with a sheen that sweeps across them"),
         "toasts.ignore" => ("Excluded apps", "Apps that keep their standard pop-ups. Enter part of an app's name or ID"),
 
@@ -128,6 +157,35 @@ pub const CLASSIC_NO_RUNTIME: &str = "You're seeing the classic settings window 
 pub const CLASSIC_FAILED: &str = "You're seeing the classic settings window because the new window couldn't start on this PC. Every setting works the same here.";
 pub const RUNTIME_DOWNLOAD: (&str, &str) = ("Get the Windows App Runtime", "https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads");
 
+/// The first run's page on each of the extras.
+pub const WELCOME_TV: (&str, &str) = ("Your taskbar got cable", "There's a little TV down there now. Go on, point at it.");
+pub const WELCOME_TV_POINTS: [(&str, &str, &str); 3] = [
+    ("\u{E8B2}", "The remote's in the tooltip", "Channels, shuffle, power, and another TV if one isn't enough. They can all watch something different"),
+    ("\u{E7F4}", "Six channels of nonsense", "A test card, a crab that never hits the corner, static, the PimpCast, a console, and a very angry man from 1986"),
+    ("\u{E7E8}", "Off means out of your way", "Switch one off and a few seconds later it's just a small button. Click it to bring the set back"),
+];
+pub const WELCOME_TV_ON: (&str, &str) = ("Keep a TV on my taskbar", "You can add more, or take them all away, in Settings, under TV. Its games are under POOM");
+/// What's new, for somebody who had PimpMyShell before it had these.
+pub const WHATS_NEW: (&str, &str) = ("Your taskbar got toys", "Since you last looked: a TV with six channels, a console on channel 6, and Twitch on a little flat-screen. Three quick stops, and each is yours to keep or skip.");
+pub const WELCOME_POOM: (&str, &str) = ("Pimps on Mars.", "Try it on Channel 6. Play games like Doom, Freedoom, etc. Click on the TV to pop a window on your desktop. Alt+Tab when the boss walks by (Alt+F4 works too. Game state isn't nuked.)");
+pub const WELCOME_TWATCH: (&str, &str) = ("Twatch TV", "Twitch, on a little flat-screen, live. Name your favorite channels and the best one that's on just plays. No account, no sign-in, nothing to click.");
+pub const WELCOME_TWATCH_POINTS: [(&str, &str, &str); 3] = [
+    ("\u{E734}", "Best first", "Your favorites go in order. When a better one goes live, it takes over. Switch on more sets, and up to three come out by themselves when a few are on"),
+    ("\u{E945}", "Easy on your PC", "480p by default, and lower by itself when your PC or the network is struggling"),
+    ("\u{E83F}", "Easy on your battery", "Off the charger it shows a new picture every minute instead, and video comes back when you plug in"),
+];
+pub const WELCOME_TWATCH_ON: (&str, &str) = ("Put a Twatch TV on my taskbar", "Then add your channels and get Streamlink in Settings, under Twatch TV");
+/// The same, when there are no channels yet: Settings opens there at the end.
+pub const WELCOME_TWATCH_NEXT: &str = "When you're done here, Settings opens on Twatch TV, to add your channels and get Streamlink for video";
+/// And while it's switched off.
+pub const WELCOME_TWATCH_OFF: &str = "Switch it on, and Settings opens on Twatch TV when you're done, to add your channels and get Streamlink for video";
+
+/// Lines of the settings file that aren't settings, which are left out so that the rest loads.
+pub const IGNORED_LINES: &str = "Everything else loaded. A setting that couldn't be used is back to its default, a line that isn't a setting is left out, and each is marked in red where it belongs. Saving a change here leaves them out of the file. To keep one, fix it in the file and save it.";
+
+/// Why the favorites and the network settings have files of their own.
+pub const PRIVATE_FILES: &str = "Your favorites and network settings are kept out of the settings file, so you can share that file for help without them.";
+
 /// What's in the logs, and what isn't (logfile.rs, and the daemon's lines on toasts).
 pub const LOG_PRIVACY: &str = "Logs can include app and file names and error details. We leave out your Windows user name and what your notifications say, but check a log before you share it.";
 
@@ -139,7 +197,9 @@ pub const THEMES: &[(&str, &str)] = &[("auto", "Use my Windows mode"), ("dark", 
 pub const HEIGHTS: &[(&str, &str)] = &[("compact", "Compact (75%)"), ("tall", "Tall (88%)"), ("full", "Full")];
 pub const CHANNELS: &[(&str, &str)] = &[("stable", "Stable"), ("latest", "Latest")];
 pub const TOAST_STYLES: &[(&str, &str)] = &[("standard", "Standard"), ("pimped", "Pimped")];
+pub const TOAST_POSITIONS: &[(&str, &str)] = &[("clock", "Left of the clock"), ("tray", "Left of the system tray"), ("tv", "Left of your first TV"), ("mic", "Left of the Hot Mic label")];
 pub const CONFIRMS: &[(&str, &str)] = &[("card", "In the notification"), ("window", "In a window"), ("off", "Don't ask")];
+pub const MIC_POSITIONS: &[(&str, &str)] = &[("tray", "Last, beside the tray"), ("start", "First, before your meters and TVs")];
 pub const STYLES: &[(&str, &str)] = &[
     ("history", "History graph"),
     ("bar", "Bar"),
@@ -160,17 +220,76 @@ pub const AGGS: &[(&str, &str)] = &[("sum", "Sum"), ("max", "Maximum"), ("min", 
 
 /// Pages: title, and what's on them.
 pub const GENERAL: (&str, &str) = ("General", "");
-pub const METERS: (&str, &str) = ("Meters", "Meters appear on the taskbar in this order, from left to right. When space runs short, the last ones hide first.");
+pub const METERS: (&str, &str) = ("Meters", "Your meters, in their order on the taskbar, left to right. Select one to change it, and move it with the arrows. Where they go among your TVs is on the Widgets page.");
+/// The page of what's along the taskbar, and its notes.
+pub const WIDGETS: (&str, &str) = ("Widgets", "What's along the taskbar beside the system tray, in its order: your meters, together; each TV and Twatch TV; and the Hot Mic label, at one end or the other. When space runs short they squeeze up, then the ones nearest the tray hide first (never the Hot Mic label).");
+pub const WIDGET_MIC_FIRST: &str = "Its label, while an app uses your mic: first, before your meters and TVs";
+pub const WIDGET_MIC_LAST: &str = "Its label, while an app uses your mic: last, beside the tray";
+pub const WIDGETS_NONE: &str = "Nothing's on the taskbar yet: add meters, a TV or a Twatch TV on their pages.";
+pub const WIDGETS_NO_MIC: &str = "Hot Mic is off. Switched on, under Hot Mic, its label goes at one end of these.";
+/// A program of PimpMyShell's (`file`) isn't where the rest are.
+pub fn part_missing(file: &str) -> String {
+    let dir = pms::parts::path(file).and_then(|p| p.parent().map(|d| d.display().to_string())).unwrap_or_default();
+    format!(
+        "It should be with the rest of PimpMyShell, in {dir}, but it isn't, so {}. An antivirus program or a cleanup tool may have taken it away. Installing PimpMyShell again puts it back, and keeps your settings.",
+        pms::parts::without(file)
+    )
+}
+/// Under the list of what's in the taskbar.
+pub const ORDER_NOTE: &str = "Twatch TVs that come and go by themselves follow the last one, and so do their buttons. Notification cards slide in over the tray's end: where they stop is under Notification Toast.";
 pub const COUNTERS: (&str, &str) = (
     "Performance counters",
     "The Windows performance counters your meters read, by their English paths. Use their names in meter expressions, along with ram_total, vram_total, swap_total, swap_used, and cpu_count. To find paths, run typeperf -q.",
 );
 pub const LOOK: (&str, &str) = ("Taskbar look", "Replace the taskbar's standard acrylic with your own background, with a look for dark mode and one for light mode.");
-pub const HOTMIC: (&str, &str) = (
-    "Microphone alert",
-    "Know when an app is using your microphone. The whole taskbar alerts first, then the alert settles next to the system tray and names the apps. An app that stops stays listed for 10 seconds.",
+pub const TV: (&str, &str) = ("TV", "A little TV in your taskbar. Point at it for its remote: channels, shuffle, power, and another TV if one isn't enough. Channel 6 is Space Pimpin', your console: its games are under POOM.");
+pub const TV_HELP: &str = "On the TV: click the picture to stop shuffling. On channel 6, click again to play. On battery, a TV you leave alone sleeps.";
+pub const POOM: (&str, &str) = ("POOM", "Space Pimpin', or POOM to its friends: a console on channel 6 of your TVs. Give it a game, and any TV tuned to 6 plays it.");
+pub const POOM_HELP: &str = "On a TV on channel 6, click the picture to play: a window opens on your desktop. Esc opens the game's menu. Alt+Tab, or clicking away, lets go of the mouse. Closing the window pauses the game. Changing the channel doesn't turn the console off: it has its own power button on the TV's remote. Asking for channel 6 with no game brings you here.";
+/// Where the order of what's in the taskbar is changed, for the pages of what's in it.
+pub const ORDER_HINT: &str = "To move it along the taskbar, use the arrows on the Widgets page.";
+pub const TWATCH: (&str, &str) = ("Twatch TV", "A flat-screen set that plays your favorite Twitch channels while they're live, as live video in your taskbar. Point at it for its remote, and click the picture to open the channel. On battery it shows pictures instead, and goes back to video when you plug in. Live video needs Streamlink, just below.");
+pub const TWATCH_FAVORITES: &str = "Your favorite channels, best first. Nothing else about you or your account is used: there's no sign-in.";
+pub const TWATCH_AS_TEXT: &str = "One channel per line, best first. Names, @names and twitch.tv links all work. Nothing changes until you save.";
+pub const TWATCH_HIGHER: [(&str, &str); 2] = [("switch", "Switch to it"), ("stay", "Stay on what's playing")];
+pub const TWATCH_CHECKS: [(&str, &str); 6] = [("60", "Every minute"), ("120", "Every 2 minutes"), ("300", "Every 5 minutes"), ("600", "Every 10 minutes"), ("900", "Every 15 minutes"), ("1800", "Every 30 minutes")];
+pub const TWATCH_CHECK_EXTRAS: [(&str, &str); 5] = [("0", "None"), ("60", "Up to a minute"), ("120", "Up to 2 minutes"), ("300", "Up to 5 minutes"), ("600", "Up to 10 minutes")];
+pub const TWATCH_QUALITIES: [(&str, &str); 5] = [("1080p60", "1080p, 60 frames a second"), ("720p60", "720p, 60 frames a second"), ("720p", "720p, 30 frames a second"), ("480p", "480p, 30 frames a second"), ("360p", "360p")];
+pub const TWATCH_MORE_SETS: [(&str, &str); 3] = [("0", "Off"), ("1", "Up to one more"), ("2", "Up to two more")];
+/// The TV's channels, as the settings name them.
+pub const TV_CHANNELS: [(&str, &str); 6] = [("1295", "1295: Captain Midnight"), ("2", "2: Test card"), ("3", "3: The crab"), ("4", "4: Static"), ("5", "5: PimpCast"), ("6", "6: POOM")];
+pub const TWATCH_MEDIA_CONTROLS: [(&str, &str); 3] = [("never", "Never"), ("unmuted", "While its sound is on"), ("playing", "Whenever it's playing video")];
+/// Above the Twatch TV page while there are favorites, video is wanted, and Streamlink isn't here.
+pub const TWATCH_NO_STREAMLINK: (&str, &str) = ("Live video needs Streamlink", "You have favorites, but without Streamlink your TwaTVs can't play them. Download it below, or choose Always under Pictures instead of video, further down, for a still every minute.");
+pub const TWATCH_PICTURES: [(&str, &str); 4] = [("never", "Never"), ("initial", "Until you click a TwaTV"), ("low_memory", "When RAM or VRAM is low"), ("always", "Always")];
+pub const RESET_ALL: (&str, &str) = ("Reset settings", "Everything back to how it came. Your Twatch TV favorites, network settings, games and answer about updates stay");
+pub const RESET_ALL_ASK: &str = "Every setting goes back to how it came, Twatch TV's included. Your Twatch TV favorites, your network settings, your games and your answer about updates stay. What your settings are now is kept beside them, as pms.toml.before-reset.";
+pub const TWATCH_NETWORK: &str = "What Twatch TV asks of the internet, and how to send it through a proxy, is under Network.";
+pub const TWATCH_NOTICE: &str = "Twitch is a trademark of Twitch Interactive, Inc. PimpMyShell isn't affiliated with Twitch. Streamlink is a separate program under the BSD 2-Clause License, built by GitHub's runners from its own source.";
+pub const TV_NOTICE: &str = "DOOM is a registered trademark of id Software LLC, a ZeniMax Media company. PimpMyShell isn't affiliated with or endorsed by id Software, ZeniMax, Bethesda or Microsoft. Space Pimpin' (POOM) runs a Doom engine, pms-poom.exe, under the GNU GPL version 2, with no warranty; its source is in PimpMyShell's repository on GitHub. The rest of PimpMyShell is under the MIT License, and each game keeps its own license.";
+pub const NETWORK: (&str, &str) = ("Network", "Everything PimpMyShell uses the internet for, and a proxy to send any of it through. There's no account, no analytics and no ads: nothing about you or your PC is sent anywhere.");
+pub const PROXY: (&str, &str) = (
+    "SOCKS5 proxy",
+    "socks5h:// looks names up through the proxy too; socks5:// looks them up on this PC. Add user:password@ before the host if it needs them. Leave it empty for none",
 );
-pub const TOASTS: (&str, &str) = ("Notifications", "Show notifications in the taskbar instead of as pop-ups. Their buttons still work, and they stay in notification center.");
+pub const PROXY_ISOLATE: (&str, &str) = (
+    "A random user name and password for each",
+    "For Tor's stream isolation: each of the uses below goes with a user name and password of its own, made up the first time it's needed and kept until PimpMyShell exits, so Tor puts them on circuits of their own. They take the place of any in the address",
+);
+/// What a proxy here can't promise, and what can.
+pub const PROXY_LIMITS: &str = "We test all of this as we build it, but nothing is airtight, least of all the software PimpMyShell gets from elsewhere for you, like Streamlink: it does its own networking, and changes with its own releases.\n\nIf it matters that nothing gets out except through your proxy, have Windows make sure. Windows Firewall, or another filter built on the Windows Filtering Platform, can keep these from going anywhere but your proxy:\n\npmsd.exe, pms-gui.exe, pms-twatch.exe and streamlink.exe";
+/// The network settings' file won't load.
+pub const NETWORK_UNREAD: &str = "PimpMyShell can't tell whether you wanted a proxy, so nothing goes online until pms-network.toml is fixed: no checking who's live, no Twatch TV video, no update checks and no downloads. Fix the file and save it, or apply a proxy here to replace it. To go without a proxy, delete the file.";
+
+/// A proxy is set, and nothing goes through it.
+pub const PROXY_UNUSED: (&str, &str) = ("Nothing goes through your proxy", "Everything still goes straight to where it's going. Switch on what should use the proxy below, or select Turn on all.");
+pub const PROXY_STRICT: &str = "What's switched on here never goes without the proxy: if the proxy can't be reached, it fails until it can. What's switched off goes straight to where it's going.";
+pub const NETWORK_ELSE: &str = "That's all of it. Windows does what it does by itself, and the notifications PimpMyShell shows come from your apps, not from the internet. Streamlink and Twatch TV's player, pms-twatch.exe, are the only other programs PimpMyShell starts that use the network, and both are covered above.";
+pub const HOTMIC: (&str, &str) = (
+    "Hot Mic",
+    "Know when an app is using your microphone. The whole taskbar alerts first, then the alert settles around a label naming the apps, beside the system tray, or before your meters and TVs. An app that stops stays listed for 10 seconds.",
+);
+pub const TOASTS: (&str, &str) = ("Notification Toast", "Show notifications in the taskbar instead of as pop-ups. Their buttons still work, and they stay in notification center.");
 
 #[cfg(test)]
 mod tests {

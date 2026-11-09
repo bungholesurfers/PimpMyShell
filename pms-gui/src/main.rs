@@ -21,7 +21,7 @@ use eframe::egui::{self, Color32, RichText};
 use pms::config::{self, Agg, AppGlow, Backdrop, Config, Exprs, Hotmic, Look, Max, MeterSpec, ShowWhen, StartGlow, Style, Toasts};
 use pms::update::Status;
 
-use model::{Model, Section, Update, toml_meter};
+use model::{Model, Section, Update, Widget, toml_meter};
 
 
 const AMBER: Color32 = Color32::from_rgb(0xFF, 0xC1, 0x5A);
@@ -44,15 +44,20 @@ fn main() -> eframe::Result {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let flag = |f: &str| args.iter().any(|a| a == f);
     let path = config::given(args.iter().find(|a| !a.to_string_lossy().starts_with("--")).cloned());
-    if flag("--welcome") {
-        std::process::exit(if winui::available() { winui::welcome(path) } else { 255 });
+    // `--page=tv`: to that page, in the window that's open if there is one.
+    let page = args.iter().find_map(|a| a.to_string_lossy().strip_prefix("--page=").map(str::to_string));
+    if page.as_deref().is_some_and(model::go_to_page) {
+        return Ok(());
+    }
+    if flag("--welcome") || flag("--whats-new") {
+        std::process::exit(if winui::available() { winui::welcome(path, flag("--whats-new")) } else { 255 });
     }
     // `--no-winui` acts as if the Windows App Runtime weren't here.
     let runtime = !flag("--no-winui") && winui::available();
     let mut fallback = None;
     if !flag("--egui") {
         if flag("--winui") || runtime {
-            match winui::run(path.clone()) {
+            match winui::run(path.clone(), page.as_deref()) {
                 Ok(()) => return Ok(()),
                 // It can't start (only once a process: Application::Start), so the egui one does.
                 Err(e) => {
@@ -64,13 +69,30 @@ fn main() -> eframe::Result {
             fallback = Some(copy::CLASSIC_NO_RUNTIME);
         }
     }
-    egui_main(path, runtime, fallback)
+    egui_main(path, runtime, fallback, page.as_deref().and_then(page_tagged).unwrap_or(Page::General))
 }
 
-fn egui_main(path: PathBuf, runtime: bool, fallback: Option<&'static str>) -> eframe::Result {
+fn page_tagged(tag: &str) -> Option<Page> {
+    match tag {
+        "general" => Some(Page::General),
+        "widgets" => Some(Page::Widgets),
+        "meters" => Some(Page::Meters),
+        "counters" => Some(Page::Counters),
+        "look" => Some(Page::Backdrop),
+        "tv" => Some(Page::Tv),
+        "poom" => Some(Page::Poom),
+        "twatch" => Some(Page::Twatch),
+        "hotmic" => Some(Page::Hotmic),
+        "toasts" => Some(Page::Toasts),
+        "network" => Some(Page::Network),
+        _ => None,
+    }
+}
+
+fn egui_main(path: PathBuf, runtime: bool, fallback: Option<&'static str>, page: Page) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: {
-            let v = egui::ViewportBuilder::default().with_title("PimpMyShell").with_inner_size([960.0, 700.0]).with_min_inner_size([760.0, 460.0]);
+            let v = egui::ViewportBuilder::default().with_title(model::WINDOW_TITLE).with_inner_size([960.0, 700.0]).with_min_inner_size([760.0, 460.0]);
             // The logo in the title bar and Alt+Tab (pms-art renders it).
             match eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon/pms-64.png")) {
                 Ok(icon) => v.with_icon(icon),
@@ -85,7 +107,7 @@ fn egui_main(path: PathBuf, runtime: bool, fallback: Option<&'static str>) -> ef
         Box::new(move |cc| {
             fonts(&cc.egui_ctx);
             style(&cc.egui_ctx);
-            Ok(Box::new(Gui::open(path, runtime, fallback)))
+            Ok(Box::new(Gui::open(path, runtime, fallback, page)))
         }),
     )
 }
@@ -111,7 +133,7 @@ fn fonts(ctx: &egui::Context) {
 /// Flat and dark, square widgets, a quiet stripe: in the manner of Nagare's panel.
 fn style(ctx: &egui::Context) {
     ctx.set_visuals(egui::Visuals::dark());
-    ctx.style_mut(|s| {
+    ctx.global_style_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(8.0, 3.0);
         s.spacing.interact_size.y = 22.0;
@@ -143,20 +165,30 @@ fn style(ctx: &egui::Context) {
 #[derive(PartialEq, Clone, Copy)]
 enum Page {
     General,
+    Widgets,
     Meters,
     Counters,
     Backdrop,
+    Tv,
+    Poom,
+    Twatch,
     Hotmic,
     Toasts,
+    Network,
 }
 
-const PAGES: [(Page, &str, &str); 6] = [
+const PAGES: [(Page, &str, &str); 11] = [
     (Page::General, "General", "Status, startup, and updates"),
+    (Page::Widgets, "Widgets", "What's along the taskbar, in its order"),
     (Page::Meters, "Meters", "The meters next to the system tray"),
     (Page::Counters, "Performance counters", "What your meters read"),
     (Page::Backdrop, "Taskbar look", "Background and glows"),
-    (Page::Hotmic, "Microphone alert", "Know when an app uses your microphone"),
-    (Page::Toasts, "Notifications", "Notifications in the taskbar"),
+    (Page::Tv, "TV", "The little screen in your taskbar"),
+    (Page::Poom, "POOM", "The console on channel 6, and its games"),
+    (Page::Twatch, "Twatch TV", "Your favorite channels, live"),
+    (Page::Hotmic, "Hot Mic", "Know when an app uses your microphone"),
+    (Page::Toasts, "Notification Toast", "Notifications in the taskbar"),
+    (Page::Network, "Network", "What goes online, and a proxy"),
 ];
 
 /// The egui window: the model (model.rs, which the WinUI 3 window shares), and which page and meter it shows.
@@ -179,13 +211,15 @@ struct Gui {
     winui: bool,
     /// The section whose reset is waiting to be confirmed.
     confirm: Option<Section>,
+    /// Resetting every setting is waiting to be confirmed.
+    confirm_all: bool,
     /// Why this window is showing instead of the WinUI 3 one, unless it was asked for.
     fallback: Option<&'static str>,
 }
 
 impl Gui {
-    fn open(path: PathBuf, runtime: bool, fallback: Option<&'static str>) -> Gui {
-        Gui { m: Model::open(path), page: Page::General, meter: 0, winui: runtime, confirm: None, fallback }
+    fn open(path: PathBuf, runtime: bool, fallback: Option<&'static str>, page: Page) -> Gui {
+        Gui { m: Model::open(path), page, meter: 0, winui: runtime, confirm: None, confirm_all: false, fallback }
     }
 }
 
@@ -203,29 +237,37 @@ impl std::ops::DerefMut for Gui {
 }
 
 impl eframe::App for Gui {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // The panels go on the window's own ui; what else wants the context (windows, styles) has it.
+        let ctx = &ui.ctx().clone();
         if self.polled.elapsed() > Duration::from_secs(2) {
             self.poll_daemon();
+            if let Some(page) = model::page_asked().as_deref().and_then(page_tagged) {
+                self.page = page;
+            }
         }
         let status_bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 6)).fill(Color32::from_rgb(0x15, 0x16, 0x19));
-        egui::TopBottomPanel::bottom("status").frame(status_bar).show(ctx, |ui| {
+        egui::Panel::bottom("status").frame(status_bar).show(ui, |ui| {
             let (text, error) = &self.message;
             ui.label(RichText::new(text).color(if *error { ERROR } else { DIM }));
         });
         let sidebar = egui::Frame::new().fill(Color32::from_rgb(0x16, 0x17, 0x1A)).inner_margin(12);
-        egui::SidePanel::left("pages").resizable(false).exact_width(180.0).frame(sidebar).show(ctx, |ui| {
+        egui::Panel::left("pages").resizable(false).exact_size(180.0).frame(sidebar).show(ui, |ui| {
             ui.add_space(4.0);
             ui.label(RichText::new("PimpMyShell").size(22.0).strong().color(Color32::WHITE));
             ui.label(RichText::new(format!("Version {}", pms::version::CURRENT)).small().color(DIM));
             ui.add_space(14.0);
+            let issues = self.m.issues();
             for (page, name, hint) in PAGES {
                 let selected = self.page == page;
+                // A page with a setting that couldn't be used says so in red.
+                let marked = issues.iter().any(|(_, on, _)| page_tagged(on) == Some(page));
                 let r = if page == Page::General {
                     // The first stop, larger, with the one thing to know at a glance: whether the daemon runs.
                     let (state, color) = if self.daemon_running { ("● Running", OK) } else { ("● Not running", AMBER) };
                     let mut job = egui::text::LayoutJob::default();
                     let (style, align) = (ui.style().clone(), egui::Align::LEFT);
-                    RichText::new(name).size(17.0).strong().color(Color32::WHITE).append_to(&mut job, &style, egui::FontSelection::Default, align);
+                    RichText::new(name).size(17.0).strong().color(if marked { Color32::LIGHT_RED } else { Color32::WHITE }).append_to(&mut job, &style, egui::FontSelection::Default, align);
                     RichText::new(format!("\n{state}")).size(12.5).color(color).append_to(&mut job, &style, egui::FontSelection::Default, align);
                     let fill = if selected { Color32::from_rgb(0x2C, 0x30, 0x38) } else { Color32::from_rgb(0x21, 0x23, 0x28) };
                     let button = egui::Button::new(job).fill(fill).corner_radius(6.0).min_size(egui::vec2(156.0, 54.0));
@@ -236,7 +278,7 @@ impl eframe::App for Gui {
                     r
                 } else {
                     // Left-aligned, the width of the pane (a justified layout).
-                    let text = RichText::new(name).size(15.0).color(if selected { Color32::WHITE } else { Color32::from_gray(185) });
+                    let text = RichText::new(name).size(15.0).color(if marked { Color32::LIGHT_RED } else if selected { Color32::WHITE } else { Color32::from_gray(185) });
                     ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
                         ui.add(egui::Button::new(text).selected(selected).fill(if selected { Color32::from_rgb(0x2C, 0x6B, 0xA3) } else { Color32::TRANSPARENT }).min_size(egui::vec2(156.0, 30.0)))
                     })
@@ -260,7 +302,49 @@ impl eframe::App for Gui {
             });
         });
         let body = egui::Frame::new().fill(Color32::from_rgb(0x1B, 0x1C, 0x20)).inner_margin(egui::Margin::symmetric(18, 10));
-        egui::CentralPanel::default().frame(body).show(ctx, |ui| {
+        if self.problem.is_none() && !self.config.issues.is_empty() {
+            let issues = self.m.issues();
+            let unusable = self.config.issues.iter().any(|e| !pms::config::issue_is_unknown(e));
+            egui::Panel::top("ignored").show(ui, |ui| {
+                ui.add_space(6.0);
+                let (said, color) = if unusable { ("Some settings in your settings file couldn't be used.", Color32::LIGHT_RED) } else { ("Some lines in your settings file aren't settings.", Color32::from_rgb(0xE0, 0xB0, 0x40)) };
+                ui.colored_label(color, format!("{said} {}", copy::IGNORED_LINES));
+                for (_, on, words) in issues {
+                    ui.horizontal(|ui| {
+                        if let Some(page) = page_tagged(on)
+                            && ui.button("Go to it").clicked()
+                        {
+                            self.page = page;
+                        }
+                        ui.label(RichText::new(words).monospace());
+                    });
+                }
+                if ui.button("Open settings file").clicked() {
+                    self.open_config();
+                }
+                ui.add_space(4.0);
+            });
+        }
+        if let Some(p) = self.problem.clone() {
+            egui::Panel::top("problem").show(ui, |ui| {
+                ui.add_space(6.0);
+                ui.colored_label(egui::Color32::LIGHT_RED, "There's a problem in your settings file. You're seeing the defaults, and nothing is saved until it's fixed.");
+                ui.label(RichText::new(p.words()).monospace());
+                ui.horizontal(|ui| {
+                    if ui.button("Open settings file").clicked() {
+                        self.open_config();
+                    }
+                    if ui.button("Show in File Explorer").clicked() {
+                        self.show_config();
+                    }
+                    if ui.add_enabled(self.has_last_good(), egui::Button::new("Restore last working settings")).clicked() {
+                        self.restore_last_good();
+                    }
+                });
+                ui.add_space(6.0);
+            });
+        }
+        egui::CentralPanel::default().frame(body).show(ui, |ui| {
             if let Some(why) = self.fallback {
                 let note = egui::Frame::new().fill(Color32::from_rgb(0x2B, 0x28, 0x1C)).stroke(egui::Stroke::new(1.0f32, AMBER)).corner_radius(6).inner_margin(10);
                 note.show(ui, |ui| {
@@ -274,6 +358,7 @@ impl eframe::App for Gui {
             }
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.page {
                 Page::General => self.general(ui),
+                Page::Widgets => self.widgets(ui),
                 Page::Meters => self.meters(ui),
                 Page::Counters => self.counter_rows(ui),
                 Page::Backdrop => {
@@ -284,6 +369,14 @@ impl eframe::App for Gui {
                     reset_line(ui, &mut ask, Section::StartGlow);
                     app_glow(ui, &mut self.config.app_glow);
                     reset_line(ui, &mut ask, Section::AppGlow);
+                    self.confirm = ask.or(self.confirm);
+                }
+                Page::Tv => tv(ui, &mut self.m),
+                Page::Poom => poom(ui, &mut self.m),
+                Page::Twatch => {
+                    twatch(ui, &mut self.m);
+                    let mut ask = None;
+                    reset_line(ui, &mut ask, Section::Twatch);
                     self.confirm = ask.or(self.confirm);
                 }
                 Page::Hotmic => {
@@ -298,6 +391,7 @@ impl eframe::App for Gui {
                     reset_line(ui, &mut ask, Section::Toasts);
                     self.confirm = ask.or(self.confirm);
                 }
+                Page::Network => network(ui, &mut self.m),
             });
         });
         // Asking before a section goes back to its defaults.
@@ -313,6 +407,22 @@ impl eframe::App for Gui {
                     }
                     if ui.button("Cancel").clicked() {
                         self.confirm = None;
+                    }
+                });
+            });
+        }
+        if self.confirm_all {
+            egui::Window::new("Reset every setting?").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.set_max_width(340.0);
+                ui.label(copy::RESET_ALL_ASK);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Reset").clicked() {
+                        self.m.reset_all();
+                        self.confirm_all = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_all = false;
                     }
                 });
             });
@@ -533,6 +643,68 @@ impl Gui {
             ui.label("");
             ui.end_row();
 
+            ui.label("Settings file");
+            ui.horizontal(|ui| {
+                // The button first: a long path gives way to it, not the other way around.
+                ui.set_max_width(520.0);
+                if ui.small_button("Show in File Explorer").clicked() {
+                    self.show_config();
+                }
+                ui.add(egui::Label::new(RichText::new(self.path.display().to_string()).monospace().small()).truncate());
+            });
+            ui.label("");
+            ui.end_row();
+
+            ui.label("Twatch TV watchlist");
+            ui.horizontal(|ui| {
+                ui.set_max_width(520.0);
+                if ui.small_button("Show in File Explorer").clicked() {
+                    self.show_watchlist();
+                }
+                ui.add(egui::Label::new(RichText::new(pms::config::watchlist_path(&self.path).display().to_string()).monospace().small()).truncate());
+            });
+            ui.label("");
+            ui.end_row();
+
+            ui.label("Network settings");
+            ui.horizontal(|ui| {
+                ui.set_max_width(520.0);
+                if ui.small_button("Show in File Explorer").clicked() {
+                    self.show_network();
+                }
+                ui.add(egui::Label::new(RichText::new(pms::config::network_path(&self.path).display().to_string()).monospace().small()).truncate());
+            });
+            ui.label(copy::PRIVATE_FILES);
+            ui.end_row();
+
+            ui.label("Explorer");
+            ui.horizontal(|ui| {
+                if ui.small_button("Restart now").on_hover_text("Gives back what Explorer's holding. It won't, with a folder window or file copy open").clicked() {
+                    self.restart_explorer();
+                }
+                ui.checkbox(&mut self.config.notify_explorer, copy::setting("notify_explorer").0).on_hover_text(copy::setting("notify_explorer").1);
+            });
+            ui.label("");
+            ui.end_row();
+
+            ui.label(copy::RESET_ALL.0);
+            if ui.small_button("Reset...").on_hover_text(copy::RESET_ALL.1).clicked() {
+                self.confirm_all = true;
+            }
+            ui.label("");
+            ui.end_row();
+
+            ui.label("Logs");
+            ui.horizontal(|ui| {
+                ui.set_max_width(520.0);
+                if ui.small_button("Show in File Explorer").clicked() {
+                    self.show_logs();
+                }
+                ui.add(egui::Label::new(RichText::new(pms_tap::logfile::dir().display().to_string()).monospace().small()).truncate());
+            });
+            ui.label("");
+            ui.end_row();
+
             ui.label("Last log entry");
             ui.scope(|ui| {
                 ui.set_max_width(520.0);
@@ -554,18 +726,6 @@ impl Gui {
             if ui.checkbox(&mut on, "").changed() {
                 self.set_autostart(on);
             }
-            ui.label("");
-            ui.end_row();
-
-            ui.label("Settings file");
-            ui.horizontal(|ui| {
-                // The button first: a long path gives way to it, not the other way around.
-                ui.set_max_width(520.0);
-                if ui.small_button("Show in File Explorer").clicked() {
-                    self.show_config();
-                }
-                ui.add(egui::Label::new(RichText::new(self.path.display().to_string()).monospace().small()).truncate());
-            });
             ui.label("");
             ui.end_row();
         });
@@ -648,7 +808,7 @@ impl Gui {
                 }
             }
         });
-        ui.label(RichText::new(format!("Checks start at {}", pms::update::first_url(latest))).small().color(DIM));
+        ui.label(RichText::new(pms::update::addresses()).small().color(DIM));
         match state {
             Update::Idle if !installed => {
                 ui.label(RichText::new("This is a portable copy. It can check for updates, but you'll need to install them yourself.").color(DIM));
@@ -715,17 +875,22 @@ impl Gui {
         // What's shipped that you've removed, a click from coming back.
         let missing: Vec<String> = self.m.missing_meters().iter().map(|m| m.label.clone()).collect();
         let mut restore = None;
+        // The meters, not the TVs (they're widgets of their own), and which is selected. What's asked of the list is done after it.
+        let plain = self.m.plain_meters();
+        if !plain.contains(&self.meter) {
+            self.meter = plain.first().copied().unwrap_or(0);
+        }
+        let (mut action, mut add): (Option<(&str, usize)>, bool) = (None, false);
         let meters = &mut self.m.config.meters;
         let baseline = &self.m.baseline;
-        self.meter = self.meter.min(meters.len().saturating_sub(1));
         ui.horizontal_top(|ui| {
-            // The list: a swatch, the label, its style.
+            // The list, in the taskbar's order: a swatch, the label, its style.
             ui.vertical(|ui| {
                 ui.set_width(230.0);
-                let mut action = None;
                 let mut group: Option<&str> = None;
-                for (i, m) in meters.iter().enumerate() {
-                    if i > 0 && m.group.as_deref() != group {
+                for (n, &i) in plain.iter().enumerate() {
+                    let m = &meters[i];
+                    if n > 0 && m.group.as_deref() != group {
                         ui.add_space(4.0);
                     }
                     group = m.group.as_deref();
@@ -746,10 +911,10 @@ impl Gui {
                                     if ui.small_button("✕").on_hover_text("Remove").clicked() {
                                         action = Some(("remove", i));
                                     }
-                                    if ui.small_button("↓").on_hover_text("Move down").clicked() {
+                                    if ui.add_enabled(n + 1 < plain.len(), egui::Button::new("↓").small()).on_hover_text("Move down").clicked() {
                                         action = Some(("down", i));
                                     }
-                                    if ui.small_button("↑").on_hover_text("Move up").clicked() {
+                                    if ui.add_enabled(n > 0, egui::Button::new("↑").small()).on_hover_text("Move up").clicked() {
                                         action = Some(("up", i));
                                     }
                                 });
@@ -761,24 +926,9 @@ impl Gui {
                         self.meter = i;
                     }
                 }
-                match action {
-                    Some(("remove", i)) => {
-                        meters.remove(i);
-                    }
-                    Some(("up", i)) if i > 0 => {
-                        meters.swap(i, i - 1);
-                        self.meter = i - 1;
-                    }
-                    Some(("down", i)) if i + 1 < meters.len() => {
-                        meters.swap(i, i + 1);
-                        self.meter = i + 1;
-                    }
-                    _ => {}
-                }
                 ui.add_space(6.0);
                 if ui.button("+ Add meter").clicked() {
-                    meters.push(toml_meter(model::NEW_METER));
-                    self.meter = meters.len() - 1;
+                    add = true;
                 }
                 if !missing.is_empty() {
                     ui.add_space(10.0);
@@ -793,7 +943,7 @@ impl Gui {
                 }
             });
             ui.add_space(10.0);
-            ui.vertical(|ui| match meters.get_mut(self.meter) {
+            ui.vertical(|ui| match meters.get_mut(self.meter).filter(|m| !model::is_screen(m)) {
                 Some(m) => {
                     let base = baseline.meters.iter().find(|b| b.label.eq_ignore_ascii_case(&m.label)).cloned();
                     meter_editor(ui, m, base.as_ref(), interval)
@@ -803,9 +953,67 @@ impl Gui {
                 }
             });
         });
+        match action {
+            Some(("remove", i)) => {
+                self.m.config.meters.remove(i);
+            }
+            Some((way, i)) => self.meter = self.m.move_meter(i, way == "up"),
+            None => {}
+        }
+        if add {
+            let at = self.m.new_meter_at();
+            self.m.config.meters.insert(at, toml_meter(model::NEW_METER));
+            self.meter = at;
+        }
         if let Some(at) = restore.and_then(|label: String| self.m.restore_meter(&label)) {
             self.meter = at;
         }
+    }
+
+    /// What's along the taskbar, in its order: the meters, together; each TV and Twatch TV; and the Hot Mic's label at an end.
+    fn widgets(&mut self, ui: &mut egui::Ui) {
+        heading(ui, copy::WIDGETS.0, copy::WIDGETS.1);
+        let widgets = self.m.widgets();
+        if widgets.is_empty() {
+            ui.label(copy::WIDGETS_NONE);
+        }
+        let mut moved = None;
+        for (at, w) in widgets.iter().enumerate() {
+            let meters = &self.m.config.meters;
+            let (title, what) = match *w {
+                Widget::Meters => ("Meters".to_string(), self.m.plain_meters().iter().map(|&i| meters[i].label.as_str()).collect::<Vec<_>>().join(", ")),
+                Widget::Screen(i) if model::is_twatch(&meters[i]) => (meters[i].label.clone(), "Twatch TV".to_string()),
+                Widget::Screen(i) => (meters[i].label.clone(), "TV".to_string()),
+                Widget::Mic => ("Hot Mic".to_string(), if at == 0 { copy::WIDGET_MIC_FIRST } else { copy::WIDGET_MIC_LAST }.to_string()),
+            };
+            let (left, right) = (self.m.can_move_widget(at, true), self.m.can_move_widget(at, false));
+            egui::Frame::new().fill(Color32::from_rgb(0x23, 0x24, 0x29)).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+                ui.set_width(520.0);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(title).strong().color(Color32::WHITE));
+                        ui.label(RichText::new(what).small().color(DIM));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add_enabled(right, egui::Button::new("↓")).on_hover_text("Further right").clicked() {
+                            moved = Some((at, false));
+                        }
+                        if ui.add_enabled(left, egui::Button::new("↑")).on_hover_text("Further left").clicked() {
+                            moved = Some((at, true));
+                        }
+                    });
+                });
+            });
+            ui.add_space(2.0);
+        }
+        if let Some((at, left)) = moved {
+            self.m.move_widget(at, left);
+        }
+        ui.add_space(6.0);
+        if self.m.config.hotmic.is_none() {
+            ui.small(copy::WIDGETS_NO_MIC);
+        }
+        ui.small(copy::ORDER_NOTE);
     }
 
     fn counter_rows(&mut self, ui: &mut egui::Ui) {
@@ -866,6 +1074,9 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, base: Option<&MeterSpec>, 
             ui.checkbox(v, "");
         });
         opt_row_base(ui, "meter.caption", base.and_then(|b| b.caption.clone()), &mut m.caption, true, |ui, v| {
+            ui.checkbox(v, "");
+        });
+        opt_row_base(ui, "meter.sideways", base.and_then(|b| b.sideways.clone()), &mut m.sideways, matches!(style, Style::Disks | Style::Nics), |ui, v| {
             ui.checkbox(v, "");
         });
         row(ui, "meter.style", &mut m.style, base.map_or(Style::History, |b| b.style), |ui, v| {
@@ -987,6 +1198,24 @@ fn meter_editor(ui: &mut egui::Ui, m: &mut MeterSpec, base: Option<&MeterSpec>, 
             opt_row_base(ui, "meter.label_inside", base.and_then(|b| b.label_inside.clone()), &mut m.label_inside, "never".into(), |ui, v| {
                 choice(ui, "inside", v, copy::INSIDE)
             });
+            opt_row_base(ui, "meter.slice_glow", base.and_then(|b| b.slice_glow.clone()), &mut m.slice_glow, String::new(), |ui, v| {
+                ui.text_edit_singleline(v);
+            });
+            opt_row_base(ui, "meter.slice_glow_extend", base.and_then(|b| b.slice_glow_extend), &mut m.slice_glow_extend, 2.5, |ui, v| {
+                ui.add(egui::Slider::new(v, 0.0..=8.0));
+            });
+            opt_row_base(ui, "meter.slice_glow_radius", base.and_then(|b| b.slice_glow_radius), &mut m.slice_glow_radius, 4.0, |ui, v| {
+                ui.add(egui::Slider::new(v, 1.0..=24.0));
+            });
+            opt_row_base(ui, "meter.slice_glow_strength", base.and_then(|b| b.slice_glow_strength), &mut m.slice_glow_strength, 1.0, |ui, v| {
+                ui.add(egui::Slider::new(v, 0.1..=1.0));
+            });
+            opt_row_base(ui, "meter.slice_glow_color", base.and_then(|b| b.slice_glow_color.clone()), &mut m.slice_glow_color, String::new(), |ui, v| {
+                ui.text_edit_singleline(v);
+            });
+            opt_row_base(ui, "meter.slice_glow_pulse_ms", base.and_then(|b| b.slice_glow_pulse_ms), &mut m.slice_glow_pulse_ms, 0, |ui, v| {
+                ui.add(egui::Slider::new(v, 0..=10_000));
+            });
             opt_row_base(ui, "meter.pressure", base.and_then(|b| b.pressure.clone()), &mut m.pressure, 0.8, |ui, v| {
                 ui.add(egui::Slider::new(v, 0.5..=0.99));
             });
@@ -1052,6 +1281,354 @@ fn backdrop(ui: &mut egui::Ui, c: &mut Config) {
     }
 }
 
+fn twatch(ui: &mut egui::Ui, m: &mut model::Model) {
+    ui.label(copy::TWATCH.1);
+    missing_part(ui, pms::parts::TWATCH);
+    ui.add_space(8.0);
+    // Streamlink first: without it, there's no live video.
+    let stuck = m.config.twatch.as_ref().is_some_and(|t| !t.favorites.is_empty() && t.pictures != "always");
+    ui.strong("Streamlink");
+    let job = m.streamlink_job.lock().unwrap().clone();
+    let busy = matches!(job, model::WadJob::Getting(..));
+    if stuck && !busy && pms::streamlink::exe().is_none() {
+        ui.colored_label(egui::Color32::from_rgb(0xE0, 0xA0, 0x30), format!("{}. {}", copy::TWATCH_NO_STREAMLINK.0, copy::TWATCH_NO_STREAMLINK.1));
+    }
+    ui.label(format!("Live video needs it, to turn a channel into a stream. About 85 MB: the newest stable build, from {}", pms::streamlink::URL));
+    if let Some(version) = pms::streamlink::version() {
+        ui.label(format!("Streamlink {version} is installed. {}", m.streamlink_note.lock().unwrap()));
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!busy, egui::Button::new("Remove")).clicked() {
+                m.remove_streamlink();
+            }
+            if ui.add_enabled(!busy, egui::Button::new("Get the newest")).clicked() {
+                m.get_streamlink();
+            }
+        });
+    } else if ui.add_enabled(!busy, egui::Button::new("Download")).clicked() {
+        m.get_streamlink();
+    }
+    match job {
+        model::WadJob::Getting(done, total) => {
+            ui.label(format!("Downloading... {} of {} MB", done >> 20, total >> 20));
+        }
+        model::WadJob::Failed(e) => {
+            ui.label(format!("That didn't work: {e}"));
+        }
+        model::WadJob::Idle => {}
+    }
+    ui.add_space(8.0);
+    let mut on = m.twatch_on();
+    if ui.checkbox(&mut on, "Twatch TV on your taskbar").changed() {
+        m.set_twatch_on(on);
+    }
+    ui.add_space(8.0);
+    ui.strong("Favorites");
+    ui.label(copy::TWATCH_FAVORITES);
+    if m.favorites_text.is_some() {
+        ui.label(copy::TWATCH_AS_TEXT);
+        if let Some(text) = &mut m.favorites_text {
+            ui.add(egui::TextEdit::multiline(text).desired_rows(8));
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Save").clicked() {
+                m.save_favorites_text();
+            }
+            if ui.button("Cancel").clicked() {
+                m.cancel_favorites_text();
+            }
+        });
+    }
+    let as_text = m.favorites_text.is_some();
+    let t = m.twatch();
+    let mut swap = None;
+    let count = if as_text { 0 } else { t.favorites.len() };
+    for i in 0..count {
+        ui.horizontal(|ui| {
+            if ui.add_enabled(i > 0, egui::Button::new("Up")).clicked() {
+                swap = Some((i, i - 1));
+            }
+            if ui.add_enabled(i + 1 < count, egui::Button::new("Down")).clicked() {
+                swap = Some((i, i + 1));
+            }
+            ui.label(format!("{}.", i + 1));
+            ui.label(t.favorites[i].as_str());
+        });
+    }
+    if let Some((a, b)) = swap {
+        t.favorites.swap(a, b);
+    }
+    if !as_text {
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut m.new_favorite).hint_text("A channel's name, or a link to it"));
+            if ui.button("Add").clicked() {
+                m.add_favorite();
+            }
+            if ui.button("Edit as text").clicked() {
+                m.favorites_as_text();
+            }
+        });
+    }
+    if !m.favorites_note.is_empty() {
+        ui.label(m.favorites_note.as_str());
+    }
+    let t = m.twatch();
+    ui.add_space(8.0);
+    ui.strong("How it plays");
+    ui.horizontal(|ui| {
+        ui.label(copy::setting("twatch.volume").0).on_hover_text(copy::setting("twatch.volume").1);
+        ui.add(egui::DragValue::new(&mut t.volume).range(0..=100).suffix("%"));
+    });
+    ui.checkbox(&mut t.metered_pictures, copy::setting("twatch.metered_pictures").0).on_hover_text(copy::setting("twatch.metered_pictures").1);
+    ui.horizontal(|ui| {
+        ui.label(copy::setting("twatch.higher_favorite").0);
+        egui::ComboBox::from_id_salt("twatch-higher").selected_text(copy::TWATCH_HIGHER.iter().find(|(v, _)| *v == t.higher_favorite).map_or("", |(_, l)| *l)).show_ui(ui, |ui| {
+            for (value, label) in copy::TWATCH_HIGHER {
+                ui.selectable_value(&mut t.higher_favorite, value.to_string(), label);
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(copy::setting("twatch.check_seconds").0);
+        egui::ComboBox::from_id_salt("twatch-check").selected_text(copy::TWATCH_CHECKS.iter().find(|(v, _)| v.parse() == Ok(t.check_seconds)).map_or("", |(_, l)| *l)).show_ui(ui, |ui| {
+            for (value, label) in copy::TWATCH_CHECKS {
+                ui.selectable_value(&mut t.check_seconds, value.parse().unwrap_or(pms::twatch::live::USUAL_CHECK), label);
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(copy::setting("twatch.check_extra_seconds").0).on_hover_text(copy::setting("twatch.check_extra_seconds").1);
+        egui::ComboBox::from_id_salt("twatch-check-extra").selected_text(copy::TWATCH_CHECK_EXTRAS.iter().find(|(v, _)| v.parse() == Ok(t.check_extra_seconds)).map_or("", |(_, l)| *l)).show_ui(ui, |ui| {
+            for (value, label) in copy::TWATCH_CHECK_EXTRAS {
+                ui.selectable_value(&mut t.check_extra_seconds, value.parse().unwrap_or(pms::twatch::live::USUAL_CHECK_EXTRA), label);
+            }
+        });
+    });
+    ui.checkbox(&mut t.notify_live, copy::setting("twatch.notify_live").0);
+    ui.horizontal(|ui| {
+        ui.label(copy::setting("twatch.pictures").0);
+        egui::ComboBox::from_id_salt("twatch-pictures").selected_text(copy::TWATCH_PICTURES.iter().find(|(v, _)| *v == t.pictures).map_or("", |(_, l)| *l)).show_ui(ui, |ui| {
+            for (value, label) in copy::TWATCH_PICTURES {
+                ui.selectable_value(&mut t.pictures, value.to_string(), label);
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Highest quality");
+        egui::ComboBox::from_id_salt("twatch-quality").selected_text(t.top_quality.clone()).show_ui(ui, |ui| {
+            for (value, label) in copy::TWATCH_QUALITIES {
+                ui.selectable_value(&mut t.top_quality, value.to_string(), label);
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(copy::setting("twatch.media_controls").0).on_hover_text(copy::setting("twatch.media_controls").1);
+        egui::ComboBox::from_id_salt("twatch-media").selected_text(copy::TWATCH_MEDIA_CONTROLS.iter().find(|(v, _)| *v == t.media_controls).map_or("", |(_, l)| *l)).show_ui(ui, |ui| {
+            for (value, label) in copy::TWATCH_MEDIA_CONTROLS {
+                ui.selectable_value(&mut t.media_controls, value.to_string(), label);
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(copy::setting("twatch.more_sets").0);
+        ui.add(egui::Slider::new(&mut t.more_sets, 0..=pms::twatch::MOST_MORE_SETS));
+    });
+    ui.add_space(8.0);
+    ui.small(copy::TWATCH_NETWORK);
+    ui.small(copy::ORDER_HINT);
+    ui.small(copy::TWATCH_NOTICE);
+}
+
+/// The proxy, and every way PimpMyShell uses the network, each with its switch.
+fn network(ui: &mut egui::Ui, m: &mut model::Model) {
+    use pms::net::Use;
+    ui.label(copy::NETWORK.1);
+    ui.add_space(8.0);
+    if let Some(e) = pms::config::network_trouble(&m.path) {
+        ui.colored_label(egui::Color32::LIGHT_RED, format!("Your network settings didn't load. {}", copy::NETWORK_UNREAD));
+        ui.label(RichText::new(pms::problem::Problem::of(&pms::config::network_path(&m.path), &e).words()).monospace());
+        if ui.button("Show in File Explorer").clicked() {
+            m.show_network();
+        }
+        ui.add_space(8.0);
+    }
+    ui.strong(copy::PROXY.0);
+    ui.label(copy::PROXY.1);
+    let applied = m.config.network.as_ref().map(|n| n.proxy.clone()).filter(|p| p != pms::config::NETWORK_UNREAD).unwrap_or_default();
+    let typed = m.proxy_text.trim().to_string();
+    let wrong = (!typed.is_empty()).then(|| pms::net::check(&typed).err()).flatten();
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut m.proxy_text).hint_text("socks5h://127.0.0.1:9050").desired_width(260.0));
+        if ui.add_enabled(typed != applied && wrong.is_none(), egui::Button::new(if typed.is_empty() { "Remove" } else { "Apply" })).clicked() {
+            m.apply_proxy();
+        }
+        if ui.add_enabled(!applied.is_empty() && typed == applied, egui::Button::new("Test")).clicked() {
+            m.test_proxy();
+        }
+    });
+    if let Some(wrong) = wrong {
+        ui.colored_label(egui::Color32::from_rgb(0xE0, 0x60, 0x60), wrong);
+    }
+    if !applied.is_empty() && !m.uses_proxy() {
+        ui.colored_label(egui::Color32::from_rgb(0xE0, 0xB0, 0x40), format!("{}. {}", copy::PROXY_UNUSED.0, copy::PROXY_UNUSED.1));
+    }
+    ui.small(copy::PROXY_LIMITS);
+    let said = m.proxy_note.lock().unwrap().clone();
+    if !said.is_empty() {
+        ui.label(said);
+    }
+    ui.checkbox(&mut m.network().isolate, copy::PROXY_ISOLATE.0).on_hover_text(copy::PROXY_ISOLATE.1);
+    ui.add_space(8.0);
+    let all_on = { let n = m.network(); n.live_checks && n.streams && n.updates && n.downloads };
+    ui.horizontal(|ui| {
+        ui.strong("What PimpMyShell uses the network for");
+        if ui.button(if all_on { "Turn off all" } else { "Turn on all" }).clicked() {
+            m.all_through_proxy(!all_on);
+        }
+    });
+    let notes = m.use_notes.lock().unwrap().clone();
+    let mut last_who = "";
+    for (at, (what, title, who, words)) in pms::net::USES.iter().enumerate() {
+        if *who != last_who {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(*who).italics());
+            last_who = who;
+        }
+        ui.horizontal(|ui| {
+            let n = m.network();
+            let on = match what {
+                Use::Live => &mut n.live_checks,
+                Use::Streams | Use::Video => &mut n.streams,
+                Use::Updates => &mut n.updates,
+                Use::Downloads => &mut n.downloads,
+            };
+            ui.checkbox(on, format!("{title}: use proxy")).on_hover_text(*words);
+            if ui.add_enabled(notes[at] != "Trying...", egui::Button::new("Test")).clicked() {
+                m.try_use(at);
+            }
+        });
+        ui.small(*words);
+        if !notes[at].is_empty() {
+            ui.label(notes[at].as_str());
+        }
+    }
+    ui.add_space(8.0);
+    ui.small(copy::PROXY_STRICT);
+    ui.small(copy::NETWORK_ELSE);
+}
+
+fn tv(ui: &mut egui::Ui, m: &mut model::Model) {
+    ui.label(copy::TV.1);
+    ui.add_space(8.0);
+    let sets = m.tvs().len();
+    ui.horizontal(|ui| {
+        ui.strong(format!("TVs on your taskbar: {sets}"));
+        if ui.button("Add a TV").clicked() {
+            m.add_tv();
+        }
+        if ui.add_enabled(sets > 0, egui::Button::new("Remove one")).clicked() {
+            m.remove_tv();
+        }
+    });
+    if sets == 1 && pms::tv::console_running() {
+        ui.label("Removing your last TV quits POOM, and anything you haven't saved is lost.");
+    }
+    ui.checkbox(&mut m.config.tv_intro, copy::setting("tv_intro").0).on_hover_text(copy::setting("tv_intro").1);
+    if m.config.tv_intro {
+        let named = |c: u32| copy::TV_CHANNELS.iter().find(|(v, _)| v.parse() == Ok(c)).map_or(String::new(), |(_, l)| (*l).to_string());
+        for (id, salt, channel) in [("tv_intro_from", "surf-from", &mut m.config.tv_intro_from), ("tv_intro_to", "surf-to", &mut m.config.tv_intro_to)] {
+            ui.horizontal(|ui| {
+                ui.label(copy::setting(id).0).on_hover_text(copy::setting(id).1);
+                egui::ComboBox::from_id_salt(salt).selected_text(named(*channel)).show_ui(ui, |ui| {
+                    for (value, label) in copy::TV_CHANNELS {
+                        ui.selectable_value(channel, value.parse().unwrap_or(0), label);
+                    }
+                });
+            });
+        }
+    }
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(copy::setting("shuffle_seconds").0).on_hover_text(copy::setting("shuffle_seconds").1);
+        ui.add(egui::DragValue::new(&mut m.config.shuffle_seconds).range(5..=3600).suffix(" s"));
+    });
+    ui.checkbox(&mut m.config.shuffle_jitter, copy::setting("shuffle_jitter").0).on_hover_text(copy::setting("shuffle_jitter").1);
+    ui.add_space(8.0);
+    ui.small(copy::TV_HELP);
+    ui.small(copy::ORDER_HINT);
+}
+
+/// The console on channel 6: which game is in it, more to get, and whether a TV tuning in switches it on.
+/// A program of PimpMyShell's that isn't beside this one (pms::parts), said at the top of the page of what needs it.
+fn missing_part(ui: &mut egui::Ui, file: &'static str) {
+    if !pms::parts::here(file) {
+        ui.add_space(6.0);
+        ui.label(RichText::new(format!("{file} is missing")).strong().color(Color32::LIGHT_RED));
+        ui.label(copy::part_missing(file));
+    }
+}
+
+fn poom(ui: &mut egui::Ui, m: &mut model::Model) {
+    use pms::wads::Wad;
+    ui.label(copy::POOM.1);
+    missing_part(ui, pms::parts::POOM);
+    ui.add_space(8.0);
+    let wads = pms::wads::list();
+    let playing = pms::wads::chosen().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    ui.strong("Which game plays");
+    if wads.is_empty() {
+        ui.label("No games yet. Get one below, and it goes on channel 6.");
+    }
+    for file in &wads {
+        ui.horizontal(|ui| {
+            let is_on = playing.as_deref() == Some(file.as_str());
+            if ui.radio(is_on, pms::wads::title(file)).clicked() {
+                m.choose_wad(file);
+            }
+            if ui.small_button("Remove").clicked() {
+                m.remove_wad(file);
+            }
+        });
+    }
+    ui.add_space(8.0);
+    ui.strong("Get more games");
+    let job = m.wad_job.lock().unwrap().clone();
+    let busy = matches!(job, model::WadJob::Getting(..));
+    for (file, wad, title, help, label) in [
+        ("freedoom1.wad", Wad::Freedoom, "Freedoom", format!("Free, with its own art and levels, under a BSD license. 24 MB.\nFrom {}", pms::wads::url(Wad::Freedoom)), "Download"),
+        ("doom1.wad", Wad::Shareware, "Doom (shareware episode)", format!("The first episode, unmodified. 1.4 MB. You'll see id Software's license first, and nothing is downloaded unless you agree.\nFrom {}", pms::wads::url(Wad::Shareware)), "Download"),
+    ] {
+        if wads.iter().any(|w| w.eq_ignore_ascii_case(file)) {
+            continue;
+        }
+        ui.label(format!("{title}: {help}"));
+        if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+            m.get_wad(wad);
+        }
+        ui.add_space(6.0);
+    }
+    ui.label("A game of your own: put an IWAD, like doom2.wad, in this folder, and it appears above.");
+    if ui.button("Open folder").clicked() {
+        m.show_wads();
+    }
+    match job {
+        model::WadJob::Getting(0, 0) => {
+            ui.label("Waiting for you...");
+        }
+        model::WadJob::Getting(done, total) => {
+            ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32));
+        }
+        model::WadJob::Failed(e) => {
+            ui.label(format!("That didn't work: {e}"));
+        }
+        model::WadJob::Idle => {}
+    }
+    ui.add_space(8.0);
+    ui.checkbox(&mut m.config.console_autostart, copy::setting("console_autostart").0).on_hover_text(copy::setting("console_autostart").1);
+    ui.add_space(8.0);
+    ui.small(copy::POOM_HELP);
+    ui.small(copy::TV_NOTICE);
+}
+
 fn hotmic(ui: &mut egui::Ui, h: &mut Option<Hotmic>) {
     heading(ui, copy::HOTMIC.0, copy::HOTMIC.1);
     switch(ui, "Alert me when an app uses my microphone", h, Hotmic::default);
@@ -1067,6 +1644,7 @@ fn hotmic(ui: &mut egui::Ui, h: &mut Option<Hotmic>) {
             knob(ui, v, 1.0);
         });
         row(ui, "hotmic.broad_ms", &mut h.broad_ms, d.broad_ms, |ui, v| number(ui, v, 0..=60_000, " ms"));
+        row(ui, "hotmic.position", &mut h.position, d.position.clone(), |ui, v| choice(ui, "mic-position", v, copy::MIC_POSITIONS));
         row(ui, "hotmic.ignore", &mut h.ignore, Vec::new(), |ui, v| string_list(ui, "ignore", v, "For example, obs64.exe"));
     });
 }
@@ -1089,6 +1667,7 @@ fn toasts(ui: &mut egui::Ui, t: &mut Option<Toasts>) {
     section(ui, "Taskbar notifications", |ui| {
         row(ui, "toasts.duration_ms", &mut t.duration_ms, d.duration_ms, |ui, v| number(ui, v, 1000..=60_000, " ms"));
         row(ui, "toasts.confirm_clicks", &mut t.confirm_clicks, d.confirm_clicks.clone(), |ui, v| choice(ui, "toast-confirm", v, copy::CONFIRMS));
+        row(ui, "toasts.position", &mut t.position, d.position.clone(), |ui, v| choice(ui, "toast-position", v, copy::TOAST_POSITIONS));
         row(ui, "toasts.style", &mut t.style, d.style.clone(), |ui, v| choice(ui, "toast-style", v, copy::TOAST_STYLES));
         row(ui, "toasts.ignore", &mut t.ignore, Vec::new(), |ui, v| string_list(ui, "toast-ignore", v, "For example, Teams"));
     });

@@ -80,7 +80,7 @@ pub(crate) fn grid_above(ctx: &Ctx, from: InstanceHandle) -> R<pms_xaml::Panel> 
         let Ok(e) = element(ctx, *h) else { continue };
         if e.cast::<pms_xaml::Grid>().is_ok() {
             if i > 0 {
-                crate::log(format!("the taskbar isn't laid out as usual: going up to a Grid past {}", names(i)));
+                crate::log(format!("the taskbar's layout is unusual: using the first Grid above {}", names(i)));
             }
             return e.cast().map_err(|e| e.to_string());
         }

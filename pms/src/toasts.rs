@@ -221,7 +221,7 @@ impl Listener {
     /// Take it out of the notification center, as Windows does after an activation.
     pub fn remove(&self, id: u32) {
         if let Err(err) = self.inner.RemoveNotification(id) {
-            crate::log(format!("removing notification {id}: {err}"));
+            crate::log(format!("couldn't remove notification {id}: {err}"));
         }
     }
 
@@ -259,7 +259,7 @@ impl Listener {
         };
         if let Err(err) = payload(id).and_then(|(xml, data)| t.read_payload(&xml, &data)) {
             // Text-only fallback straight from the listener.
-            crate::log(format!("toast {id} payload: {err}; showing its text only"));
+            crate::log(format!("couldn't read toast {id}'s layout ({err}): showing its text only"));
             let texts: Vec<String> = n
                 .Notification()
                 .and_then(|t| t.Visual())
@@ -489,7 +489,7 @@ fn identity(aumid: &str, display: Option<windows::ApplicationModel::AppDisplayIn
     let icon = aumid_value(aumid, "IconUri")
         .map(PathBuf::from)
         .filter(|p| p.is_file())
-        .or_else(|| save_logo(display.as_ref(), aumid).inspect_err(|err| crate::log(format!("icon for {name}: {err}"))).ok());
+        .or_else(|| save_logo(display.as_ref(), aumid).inspect_err(|err| crate::log(format!("couldn't get {name}'s icon: {err}"))).ok());
     (name, icon)
 }
 
@@ -813,7 +813,7 @@ impl Banners {
 
     fn save(&self) {
         if let Err(err) = std::fs::write(state_file(), self.text()) {
-            crate::log(format!("writing {}: {err}", state_file().display()));
+            crate::log(format!("couldn't save {}: {err}", state_file().display()));
         }
     }
 
@@ -856,7 +856,7 @@ impl Banners {
         for (aumid, _) in &new {
             let err = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, &subkey(aumid), w!("ShowBanner"), REG_DWORD.0, Some(zero.as_ptr() as _), 4) };
             if err != ERROR_SUCCESS {
-                crate::log(format!("suppressing banners for {aumid}: {}", err.to_hresult().message()));
+                crate::log(format!("couldn't turn off banners for {aumid}: {}", err.to_hresult().message()));
             }
         }
     }
@@ -881,7 +881,7 @@ impl Banners {
         self.suppress_all(notifiers.iter().map(String::as_str).filter(|a| is_app_id(a) && !keep(a)));
         let added = self.managed.len() - before;
         if added > 0 {
-            crate::log(format!("notification banners of {added} more app(s) go to the taskbar, ahead of their first toast"));
+            crate::log(format!("{added} more app(s) send toasts to the taskbar from their first one"));
         }
     }
 
@@ -904,7 +904,7 @@ impl Banners {
                 }
             };
             if err != ERROR_SUCCESS && err != windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
-                crate::log(format!("restoring banners for {aumid}: {}", err.to_hresult().message()));
+                crate::log(format!("couldn't turn banners back on for {aumid}: {}", err.to_hresult().message()));
             }
         }
         let _ = std::fs::remove_file(state_file());
@@ -931,7 +931,7 @@ fn remove_if_empty(aumid: &str) {
         // RegDeleteKey removes this one key and refuses a key with subkeys.
         let err = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, &subkey(aumid)) };
         if err != ERROR_SUCCESS {
-            crate::log(format!("removing the empty settings key of {aumid}: {}", err.to_hresult().message()));
+            crate::log(format!("couldn't remove {aumid}'s empty settings key: {}", err.to_hresult().message()));
         }
     }
 }
@@ -959,7 +959,7 @@ pub fn notifiers() -> Vec<String> {
         Ok(())
     };
     if let Err(err) = start() {
-        crate::log(format!("listing the Start menu's apps: {err}"));
+        crate::log(format!("couldn't list the Start menu's apps: {err}"));
     }
     for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
         let mut key = HKEY::default();

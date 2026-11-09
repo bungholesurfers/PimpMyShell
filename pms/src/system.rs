@@ -87,6 +87,12 @@ fn modules(pid: u32) -> Vec<String> {
     out
 }
 
+/// The TAPs loaded in process `pid`, which may be several, one of them working: None if that can't be found out.
+pub(crate) fn loaded_taps(pid: u32) -> Option<Vec<std::path::PathBuf>> {
+    let all = modules(pid);
+    (!all.is_empty()).then(|| all.iter().filter(|m| crate::is_tap_copy(m)).map(std::path::PathBuf::from).collect())
+}
+
 /// The names of the running processes.
 fn processes() -> Vec<String> {
     let mut out = Vec::new();
