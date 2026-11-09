@@ -214,6 +214,12 @@ pub fn inject() -> Result<String, String> {
     Ok(out.join("\n"))
 }
 
+/// `PMS_TRACE=1`: log timing details (sampling, pushes) for diagnosis.
+pub fn trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PMS_TRACE").is_some_and(|v| v != "0"))
+}
+
 #[cfg(test)]
 mod tap_tests {
     use super::*;
@@ -270,10 +276,4 @@ mod tap_tests {
         assert!(!gone.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
-}
-
-/// `PMS_TRACE=1`: log timing details (sampling, pushes) for diagnosis.
-pub fn trace() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("PMS_TRACE").is_some_and(|v| v != "0"))
 }

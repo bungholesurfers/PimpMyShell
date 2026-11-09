@@ -1835,7 +1835,7 @@ mod tests {
         let (back, game_on) = parse_state(&state_text(&sets, false));
         assert_eq!(back, sets);
         assert!(!game_on);
-        assert_eq!(parse_state("").1, true, "on, to begin with");
+        assert!(parse_state("").1, "on, to begin with");
         assert!(parse_state("rubbish\nmore\trubbish").0.is_empty());
     }
 }

@@ -147,7 +147,7 @@ fn shipped_built() -> Result {
 
 fn check() -> Result {
     step("clippy");
-    run(cargo().args(["clippy", "--release", "--workspace", "--", "-D", "warnings"]))?;
+    run(cargo().args(["clippy", "--release", "--workspace", "--all-targets", "--", "-D", "warnings"]))?;
     step("tests");
     run(cargo().args(["test", "--release", "--workspace"]))
 }

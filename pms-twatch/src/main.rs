@@ -389,7 +389,7 @@ mod tests {
         let (width, height, pitch) = (2usize, 1usize, 2 * FINE as usize * 4 + 8);
         let mut fine = vec![0u8; pitch * FINE as usize];
         for row in fine.chunks_exact_mut(pitch) {
-            for dot in row[..2 * FINE as usize * 4].chunks_exact_mut(4) {
+            for dot in row[..2 * FINE as usize * 4].as_chunks_mut::<4>().0 {
                 dot.copy_from_slice(&[10, 20, 30, 0]);
             }
         }

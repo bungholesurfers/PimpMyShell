@@ -1010,6 +1010,28 @@ impl Model {
     }
 }
 
+impl Model {
+    /// What's wrong with each setting that couldn't be used: the setting, the page it's on, and what to say, for the settings to
+    /// mark it in red.
+    pub fn issues(&self) -> Vec<(String, &'static str, String)> {
+        self.config
+            .issues
+            .iter()
+            .map(|e| {
+                let id = config::issue_setting(e);
+                let then = if config::issue_is_unknown(e) { "It's left out." } else { "It's back to its default for now." };
+                let words = format!("{}\n{then}", pms::problem::Problem::of(&self.path, e).words());
+                (id.clone(), config::settings_page(&id), words)
+            })
+            .collect()
+    }
+}
+
+/// The proxy as the settings show it: none, while the network settings' file won't load (the banner says why).
+fn shown_proxy(config: &Config) -> String {
+    config.network.as_ref().map(|n| n.proxy.clone()).filter(|p| p != pms::config::NETWORK_UNREAD).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1291,26 +1313,4 @@ mod tests {
         assert_eq!(m.config.interval_ms, 2000, "what you changed here stays, for when the file is fixed");
         std::fs::remove_file(&m.path).unwrap();
     }
-}
-
-impl Model {
-    /// What's wrong with each setting that couldn't be used: the setting, the page it's on, and what to say, for the settings to
-    /// mark it in red.
-    pub fn issues(&self) -> Vec<(String, &'static str, String)> {
-        self.config
-            .issues
-            .iter()
-            .map(|e| {
-                let id = config::issue_setting(e);
-                let then = if config::issue_is_unknown(e) { "It's left out." } else { "It's back to its default for now." };
-                let words = format!("{}\n{then}", pms::problem::Problem::of(&self.path, e).words());
-                (id.clone(), config::settings_page(&id), words)
-            })
-            .collect()
-    }
-}
-
-/// The proxy as the settings show it: none, while the network settings' file won't load (the banner says why).
-fn shown_proxy(config: &Config) -> String {
-    config.network.as_ref().map(|n| n.proxy.clone()).filter(|p| p != pms::config::NETWORK_UNREAD).unwrap_or_default()
 }

@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn a_pick_stays_until_it_ends() {
         let picked = Slot { pinned: Some("b".into()), ..slot(Some("b")) };
-        assert_eq!(assign(&[picked.clone()], &names(&["a", "b"])), [Some("b".to_string())]);
+        assert_eq!(assign(std::slice::from_ref(&picked), &names(&["a", "b"])), [Some("b".to_string())]);
         assert_eq!(assign(&[picked], &names(&["a"])), [Some("a".to_string())], "it ended");
     }
 
