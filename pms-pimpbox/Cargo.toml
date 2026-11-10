@@ -6,7 +6,7 @@ resolver = "3"
 
 [package]
 name = "pms-pimpbox"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 license = "GPL-2.0-only"
 description = "PIMPBOX: a console on a screen in the taskbar, and the PIMPBOX (room), the Doom engine it plays games with"

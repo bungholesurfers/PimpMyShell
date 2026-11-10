@@ -2,7 +2,7 @@
 # frame for a moment in time, with the graphics card, onto whatever it's handed, and that's all: no window, no clock. Ours entirely, so MIT.
 [package]
 name = "pimpbox-boot"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 license = "MIT"
 description = "PIMPBOX's boot animation, drawn by the graphics card"
