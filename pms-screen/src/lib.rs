@@ -96,6 +96,7 @@ pub enum Button {
     /// The console's video mode: how big a picture it puts out.
     Video480,
     Video720,
+    Video1080,
     /// The console, switched on or off: said to the console's own screen, by whatever looks after it.
     ConsoleOn,
     ConsoleOff,
@@ -112,7 +113,7 @@ pub const GAME_CHANNEL: u32 = 6;
 /// The channels whose picture a click pops out into a window of its own, on the desktop.
 pub const POPS_OUT: [u32; 1] = [GAME_CHANNEL];
 
-pub const BUTTONS: [Button; 27] = [
+pub const BUTTONS: [Button; 28] = [
     Button::ChannelUp,
     Button::ChannelDown,
     Button::Shuffle,
@@ -135,6 +136,7 @@ pub const BUTTONS: [Button; 27] = [
     Button::AddFavorite,
     Button::Video480,
     Button::Video720,
+    Button::Video1080,
     Button::ConsoleOn,
     Button::ConsoleOff,
     Button::GameNext,

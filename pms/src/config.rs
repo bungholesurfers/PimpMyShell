@@ -169,7 +169,7 @@ pub struct Config {
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub console_autostart: bool,
     /// How big a picture the console puts out, which is what its window shows: "480p" (640 by 480, the usual), "720p" or
-    /// "1080i". It's read when the console's switched on.
+    /// "1080i". A console that's on is told, and changes as it is.
     #[serde(default = "usual_video", skip_serializing_if = "is_usual_video")]
     pub console_video: String,
     /// A TV starting up runs through its channels, from `tv_intro_from` to `tv_intro_to`, game or no game. Off, it comes on where

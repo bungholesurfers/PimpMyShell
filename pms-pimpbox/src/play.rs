@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use room::doom::doomkeys::*;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, ClientToScreen, COLORONCOLOR, DIB_RGB_COLORS, HALFTONE, GetDC, GetStockObject, HBRUSH, ReleaseDC, SRCCOPY, SetStretchBltMode, StretchDIBits,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, COLORONCOLOR, DIB_RGB_COLORS, HALFTONE, GetDC, GetStockObject, HBRUSH, ReleaseDC, SRCCOPY, SetStretchBltMode, StretchDIBits,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
@@ -233,12 +233,22 @@ fn fit((across, down): (i32, i32), free: (i32, i32)) -> (i32, i32) {
 /// pixels a whole number of the screen's across and down, as many as there's room for on the screen, in its own pixels, so
 /// that it's as big a window on a dense screen as on any other; in the middle of the screen. (A picture too big for the
 /// screen even one to one is made to fit, and isn't as sharp.)
-fn place() -> (i32, i32, i32, i32) {
+fn place(now: Option<HWND>) -> (i32, i32, i32, i32) {
     unsafe {
         let (across, down) = crate::video::mode();
         let mut room = RECT::default();
         if SystemParametersInfoW(SPI_GETWORKAREA, 0, Some((&raw mut room).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_err() {
             room = RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) };
+        }
+        // A window that's there already stays on the screen it's on, about the place it's at: the room is that screen's.
+        let mut middle = None;
+        if let Some(window) = now {
+            let mut screen = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let mut at = RECT::default();
+            if GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &mut screen).as_bool() && GetWindowRect(window, &mut at).is_ok() {
+                room = screen.rcWork;
+                middle = Some(((at.left + at.right) / 2, (at.top + at.bottom) / 2));
+            }
         }
         let mut edges = RECT::default();
         let _ = AdjustWindowRect(&mut edges, STYLE, false);
@@ -247,7 +257,10 @@ fn place() -> (i32, i32, i32, i32) {
         let mut frame = RECT { left: 0, top: 0, right: width, bottom: height };
         let _ = AdjustWindowRect(&mut frame, STYLE, false);
         let (w, h) = (frame.right - frame.left, frame.bottom - frame.top);
-        (room.left + (room.right - room.left - w) / 2, (room.top + (room.bottom - room.top - h) / 2).max(0), w, h)
+        // In the middle of the screen, the first time; after that, its middle where its middle was, as far as it fits there.
+        let (cx, cy) = middle.unwrap_or(((room.left + room.right) / 2, (room.top + room.bottom) / 2));
+        let within = |at: i32, size: i32, from: i32, to: i32| at.min(to - size).max(from);
+        (within(cx - w / 2, w, room.left, room.right), within(cy - h / 2, h, room.top, room.bottom), w, h)
     }
 }
 
@@ -265,7 +278,7 @@ fn create() -> Option<HWND> {
             ..Default::default()
         };
         RegisterClassW(&class);
-        let (x, y, w, h) = place();
+        let (x, y, w, h) = place(None);
         let window = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("PimpMyShellPimpbox"), w!("PIMPBOX"), STYLE, x, y, w, h, None, None, Some(instance), None) {
             Ok(window) => window,
             Err(e) => {
@@ -317,7 +330,7 @@ fn close() {
 /// The console's picture has changed size: so does the window, if there is one, where it is or as near as it fits.
 pub fn fit_mode() {
     let Some(h) = hwnd() else { return };
-    let (x, y, w, h_) = place();
+    let (x, y, w, h_) = place(Some(h));
     unsafe {
         let _ = SetWindowPos(h, None, x, y, w, h_, SWP_NOZORDER | SWP_NOACTIVATE);
     }

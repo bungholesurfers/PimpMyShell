@@ -36,7 +36,7 @@ pub fn setting(id: &str) -> (&str, &str) {
         // TV and Twatch TV
         "shuffle_seconds" => ("Time between shuffles", "How long a shuffling TV stays on a channel. This is for all your TVs, and their remotes can change it too"),
         "shuffle_jitter" => ("Jitter", "Each shuffling TV changes channel a little late, by up to a quarter of the time above. When this is off, they all change together"),
-        "console_video" => ("Video mode", "How big a picture the console puts out, which is what its window shows, as many times over as fits your screen. Nearly everything of its day used 480p. Takes effect the next time the console is switched on"),
+        "console_video" => ("Video mode", "How big a picture the console puts out, which is what its window shows, as many times over as fits your screen. Nearly everything of its day used 480p. It changes at once, if the console's on"),
         "console_autostart" => ("Start the PIMPBOX when a TV tunes in", "Any TV landing on channel 6, even by shuffling, switches the console on. When this is off, channel 6 shows no signal until you switch it on"),
         "tv_intro" => ("Channel surf when a TV starts up", "When PimpMyShell starts, or you add a TV, it flips up through its channels before it settles. When this is off, it comes on at the channel it was left on"),
         "tv_intro_from" => ("Surf from", "The channel the run starts on"),

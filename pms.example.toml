@@ -47,7 +47,7 @@ theme = "auto"
 # console_autostart = false
 
 # How big a picture the console puts out, which is what its window shows (as many times over as fits your screen): "480p"
-# (640 by 480, what nearly everything of its day used), "720p" or "1080i". Read when the console's switched on.
+# (640 by 480, what nearly everything of its day used), "720p" or "1080i". A console that's on changes at once.
 # console_video = "480p"
 
 # A TV starting up (PimpMyShell starting, or a TV added) flips up through its channels, from tv_intro_from to tv_intro_to,

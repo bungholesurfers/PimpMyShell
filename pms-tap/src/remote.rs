@@ -104,6 +104,8 @@ thread_local! {
     static REMOTE: RefCell<Option<Remote>> = const { RefCell::new(None) };
     /// Another, beside the console's display while that's out on the desktop.
     static DOCKED: RefCell<Option<Remote>> = const { RefCell::new(None) };
+    /// The remote being built is that one.
+    static BUILDING_DOCKED: Cell<bool> = const { Cell::new(false) };
     static ON_TILE: Cell<bool> = const { Cell::new(false) };
     static ON_REMOTE: Cell<bool> = const { Cell::new(false) };
     /// The set the pointer's resting on, while it waits to open its remote: where it is, and which.
@@ -194,7 +196,8 @@ fn led() -> R<Border> {
 
 /// A button, with an LED if it has one. It goes in when it's pressed.
 fn button(text: &str, press: Button, light: Option<&Border>, width: f64) -> R<Border> {
-    let (b, _) = key(text, light, width, move || pressed(press))?;
+    let docked = building_docked();
+    let (b, _) = key(text, light, width, move || pressed_from(press, docked))?;
     Ok(b)
 }
 
@@ -242,10 +245,10 @@ fn key(text: &str, light: Option<&Border>, width: f64, then: impl Fn() + Send + 
 }
 
 /// The nuke key: it's right beside the one that adds a TV, so the first press only asks.
-fn nuke_pressed() {
+fn nuke_pressed(docked: bool) {
     if !ARMED.replace(true) {
         let mine = ASKING.fetch_add(1, Ordering::Relaxed) + 1;
-        REMOTE.with_borrow(|r| {
+        (if docked { &DOCKED } else { &REMOTE }).with_borrow(|r| {
             if let Some(r) = r {
                 let _ = r.nuke.SetText(&HSTRING::from(SURE));
                 let info = crate::screen::info(&r.source).unwrap_or_default();
@@ -264,7 +267,7 @@ fn nuke_pressed() {
         });
         return;
     }
-    pressed(Button::NukeTv);
+    pressed_from(Button::NukeTv, docked);
     close();
 }
 
@@ -273,18 +276,30 @@ fn calm_down() {
         return;
     }
     ASKING.fetch_add(1, Ordering::Relaxed);
-    REMOTE.with_borrow(|r| {
-        if let Some(r) = r {
-            let _ = r.nuke.SetText(&HSTRING::from(NUKE));
-        }
-    });
+    for remote in [&REMOTE, &DOCKED] {
+        remote.with_borrow(|r| {
+            if let Some(r) = r {
+                let _ = r.nuke.SetText(&HSTRING::from(NUKE));
+            }
+        });
+    }
     refresh();
 }
 
-pub(crate) fn pressed(button: Button) {
-    // The remote that's up, over the taskbar; or the one beside the console's display.
-    let up = REMOTE.with_borrow(|r| r.as_ref().filter(|r| r.popup.IsOpen().unwrap_or(false)).map(|r| r.source.clone()));
-    if let Some(source) = up.or_else(|| DOCKED.with_borrow(|d| d.as_ref().map(|d| d.source.clone()))) {
+/// Whether the remote that's being built just now is the one beside the console's display: for a key to know, as it's made,
+/// which of the two remotes it's on, and so whose set it acts for.
+pub(crate) fn building_docked() -> bool {
+    BUILDING_DOCKED.get()
+}
+
+/// The set a remote's for: the one beside the console's display, or the one over the taskbar.
+fn set_of(docked: bool) -> Option<String> {
+    (if docked { &DOCKED } else { &REMOTE }).with_borrow(|r| r.as_ref().map(|r| r.source.clone()))
+}
+
+/// A key's been pressed on one of the remotes: `docked`, the one beside the console's display.
+pub(crate) fn pressed_from(button: Button, docked: bool) {
+    if let Some(source) = set_of(docked) {
         crate::screen::press(&source, button);
     }
     // What the press did comes back in the screen's status.
@@ -294,8 +309,8 @@ pub(crate) fn pressed(button: Button) {
     });
 }
 
-fn tuned(channel: u32) {
-    if let Some(source) = REMOTE.with_borrow(|r| r.as_ref().map(|r| r.source.clone())) {
+fn tuned(channel: u32, docked: bool) {
+    if let Some(source) = set_of(docked) {
         crate::screen::tune(&source, channel);
     }
     std::thread::spawn(|| {
@@ -329,6 +344,14 @@ fn title_brush() -> R<LinearGradientBrush> {
 }
 
 fn build(root: &XamlRoot, docked: bool) -> R<Remote> {
+    // Every key made from here to the end of this knows which remote it's on.
+    BUILDING_DOCKED.set(docked);
+    let built = build_one(root, docked);
+    BUILDING_DOCKED.set(false);
+    built
+}
+
+fn build_one(root: &XamlRoot, docked: bool) -> R<Remote> {
     let title = label("TV", 10.0, LIGHT)?;
     title.SetFontWeight(windows::UI::Text::FontWeight { Weight: 700 }).map_err(w)?;
     let bar = Border::new().map_err(w)?;
@@ -402,9 +425,10 @@ fn build(root: &XamlRoot, docked: bool) -> R<Remote> {
             line.SetChild(&ui(&words)?).map_err(w)?;
             None
         };
+        let docked = building_docked();
         ui(&line)?
             .Tapped(&TappedEventHandler::new(move |_, _| {
-                tuned(number);
+                tuned(number, docked);
                 Ok(())
             }))
             .map_err(w)?;
@@ -428,7 +452,8 @@ fn build(root: &XamlRoot, docked: bool) -> R<Remote> {
         lights.push(light);
     }
     let another = button("ADD A TV", Button::AddTv, None, 68.0)?;
-    let (nuke_key, nuke) = key(NUKE, None, 91.0, nuke_pressed)?;
+    let docked_remote = building_docked();
+    let (nuke_key, nuke) = key(NUKE, None, 91.0, move || nuke_pressed(docked_remote))?;
     machines.Children().map_err(w)?.Append(&ui(&row(&[&another, &nuke_key])?)?).map_err(w)?;
 
     let body = StackPanel::new().map_err(w)?;

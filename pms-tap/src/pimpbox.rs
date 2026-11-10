@@ -163,10 +163,12 @@ fn pressable(look: &Look, inside: &UIElement, width: f64, press: Option<Button>)
     }))
     .map_err(w)?;
     let up = parts.clone();
+    // Which remote this tooltip's beside, and so whose set its keys are for.
+    let docked = crate::remote::building_docked();
     el.PointerReleased(&PointerEventHandler::new(move |_, _| {
         let _ = set_edge(colors, &up, false);
         if let Some(press) = press {
-            crate::remote::pressed(press);
+            crate::remote::pressed_from(press, docked);
         }
         Ok(())
     }))

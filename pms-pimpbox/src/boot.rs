@@ -139,11 +139,18 @@ fn play(name: &str, short: bool, sorry: bool, kept: Option<&std::path::Path>, sh
         if t >= length || shared.stop.load(Ordering::Relaxed) {
             break;
         }
-        // As big as the console's picture is, once there's a window to show that in, and as wide as it is either way. The
-        // taskbar gets as much of that as it's the shape for.
+        // As big as the console's picture is, once there's a window to show that in. With only the taskbar to show it, it's
+        // small, and the shape of the console's picture: the taskbar gets as much of that as it's the shape for.
         let mode = shared.mode.load(Ordering::Relaxed);
         let mode = ((mode >> 32) as usize, (mode & 0xFFFF_FFFF) as usize);
-        let size = if shared.wanted.load(Ordering::Relaxed) || mode.0 * 3 > mode.1 * 4 { mode } else { (W, H) };
+        let wanted = shared.wanted.load(Ordering::Relaxed);
+        let size = if wanted {
+            mode
+        } else if mode.0 * 3 > mode.1 * 4 {
+            (H * mode.0 / mode.1, H)
+        } else {
+            (W, H)
+        };
         picture.resize(size.0 * size.1, 0);
         gpu.picture(t, size, &mut picture).map_err(|e| e.to_string())?;
         if let Some(since) = noticed {
@@ -152,7 +159,10 @@ fn play(name: &str, short: bool, sorry: bool, kept: Option<&std::path::Path>, sh
         crate::show(&screen, &picture, size, size.0 as f32 / size.1 as f32, &mut shrunk);
         // At its own pace, which isn't the game's.
         shown += 1;
-        if let Ok(mut kept) = shared.picture.lock() {
+        // Kept for the window, when there is one: nobody else wants it.
+        if wanted
+            && let Ok(mut kept) = shared.picture.lock()
+        {
             kept.0 = u64::from(shown);
             kept.1 = size;
             kept.2.clone_from(&picture);

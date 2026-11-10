@@ -198,6 +198,7 @@ impl Component for Settings {
             }
             Msg::Tick => {
                 if self.m.polled.elapsed() > Duration::from_secs(2) {
+                    self.m.watching_procs = self.page == Page::General;
                     self.m.poll_daemon();
                 }
                 if let Some(page) = crate::model::page_asked().as_deref().and_then(page_tagged) {

@@ -172,13 +172,21 @@ impl Game {
             Ok(Some(how)) => {
                 if !how.success() {
                     // Said where whatever started the console keeps what it says: how it ended, and its last words.
-                    eprintln!("pms-pimpbox: POOM fell over ({how})");
                     std::thread::sleep(Duration::from_millis(60));
-                    if let Ok(said) = self.said.lock() {
-                        let words: Vec<&String> = said.iter().filter(|l| !l.trim().is_empty()).collect();
-                        for line in words.iter().rev().take(12).rev() {
+                    let words: Vec<String> = self.said.lock().map(|said| said.iter().filter(|l| !l.trim().is_empty()).cloned().collect()).unwrap_or_default();
+                    let last: Vec<String> = words.iter().rev().take(12).rev().cloned().collect();
+                    // Its last words once, however many times running it says them: one that falls over every time it's
+                    // started says the same each time, and the record needn't.
+                    static BEFORE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+                    let mut before = BEFORE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if *before == last && !last.is_empty() {
+                        eprintln!("pms-pimpbox: POOM fell over again ({how}), saying what it said before");
+                    } else {
+                        eprintln!("pms-pimpbox: POOM fell over ({how})");
+                        for line in &last {
                             eprintln!("pms-pimpbox: POOM said: {line}");
                         }
+                        *before = last;
                     }
                 }
                 Some(how.success())
@@ -230,7 +238,7 @@ fn main() {
     let kept = args.get(6).map(std::path::PathBuf::from);
     let started = Instant::now();
     let mut clicks = screen.clicks();
-    let keys = [Button::Video480, Button::Video720, Button::ConsoleOn, Button::ConsoleOff, Button::ConsoleGame];
+    let keys = [Button::Video480, Button::Video720, Button::Video1080, Button::ConsoleOn, Button::ConsoleOff, Button::ConsoleGame];
     let mut pressed = keys.map(|key| screen.presses(key));
     // Switched on, unless it's told it starts off: a moment of nothing, and then it comes on.
     let mut doing = if args.get(5).is_some_and(|a| a == "off") { Doing::Off } else { Doing::Dark(a_moment(), Then::Boot { short: false, sorry: false }) };
@@ -238,6 +246,16 @@ fn main() {
     // The newest picture of whatever's on; and room to work in.
     let (mut seen, mut picture) = (0u64, Vec::new());
     let (mut out, mut shrunk) = (Vec::new(), Vec::new());
+    // When the game last fell over, or couldn't be started: it isn't tried again sooner than the notice of that takes,
+    // whether or not there was a notice (with no graphics card there's none, and nothing else to slow it).
+    let mut fell: Option<Instant> = None;
+    let try_again = |fell: &mut Option<Instant>| {
+        let soonest = fell.map_or_else(Instant::now, |at| at + Duration::from_secs(12));
+        *fell = Some(Instant::now());
+        a_moment().max(soonest)
+    };
+    // Somebody's pressed a key at the game that's going: said once for each game, for whoever decides what can be closed.
+    let mut played = false;
     let mut shown_dark = Instant::now() - Duration::from_secs(1);
     loop {
         // A click on the screen opens the window, whatever's on, or nothing.
@@ -255,7 +273,7 @@ fn main() {
         let now_pressed = keys.map(|key| screen.presses(key));
         for (i, key) in keys.iter().enumerate().filter(|(i, _)| now_pressed[*i] != pressed[*i]) {
             match key {
-                Button::Video480 | Button::Video720 if video::name() != video::MODES[i].0 => {
+                Button::Video480 | Button::Video720 | Button::Video1080 if video::name() != video::MODES[i].0 => {
                     video::set(video::MODES[i].0);
                     if let Doing::Booting(booting) = &doing {
                         booting.set_mode(video::mode());
@@ -344,7 +362,7 @@ fn main() {
                         }
                         Then::Play if game.is_some() => Doing::Playing,
                         // There's no game to play: it couldn't be started. Said, the way one falling over is.
-                        Then::Play => Doing::Dark(a_moment(), Then::Boot { short: true, sorry: true }),
+                        Then::Play => Doing::Dark(try_again(&mut fell), Then::Boot { short: true, sorry: true }),
                     });
                 }
             }
@@ -377,6 +395,10 @@ fn main() {
             }
             Doing::Playing => {
                 let Some(playing) = game.as_mut() else { unreachable!() };
+                if !played && said.iter().any(|s| matches!(s, Said::Key { down: true, .. })) {
+                    played = true;
+                    eprintln!("pms-pimpbox: POOM played");
+                }
                 let mut there = said.into_iter().all(|said| playing.tell(said));
                 if watched == playing.resting {
                     playing.resting = !watched;
@@ -400,7 +422,8 @@ fn main() {
                     // means one that falls over every time is a quarter of a minute and more between tries, not a blur.
                     game = None;
                     shown_dark = Instant::now() - Duration::from_secs(1);
-                    next = Some(Doing::Dark(a_moment(), Then::Boot { short: true, sorry: !quit }));
+                    played = false;
+                    next = Some(Doing::Dark(if quit { a_moment() } else { try_again(&mut fell) }, Then::Boot { short: true, sorry: !quit }));
                 }
             }
         }

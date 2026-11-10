@@ -731,6 +731,7 @@ impl Tv {
             | Button::AddFavorite
             | Button::Video480
             | Button::Video720
+            | Button::Video1080
             | Button::ConsoleOn
             | Button::ConsoleOff
             | Button::GameNext
@@ -1191,7 +1192,9 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
             asked |= channel == GAME;
             changed = true;
         }
-        let console = shared.console().filter(|_| game_on);
+        // Its picture, while it's on. Sent away to make room, it's switched off but still there: then it's the sad set that
+        // goes up, saying why, and not the dark the console's putting out.
+        let console = shared.console().filter(|_| game_on && tv.evicted.is_none());
         if screen.clicks() != clicks {
             clicks = screen.clicks();
             changed = true;
@@ -1307,6 +1310,8 @@ pub struct Screens {
     spared_news: bool,
     /// The console's there, but switched off: dark, with no game going, and its display still there if it was out.
     game_off: bool,
+    /// The video mode the console that's there was last told of.
+    game_video: String,
     /// The last lines the game wrote to its stderr: a panic says why there, and nowhere else.
     game_said: Arc<Mutex<std::collections::VecDeque<String>>>,
     /// The shuffling the settings last said.
@@ -1410,6 +1415,11 @@ impl Screens {
                                 if said == "POOM started" {
                                     shared.played.store(false, Ordering::Relaxed);
                                 }
+                                // And one somebody's pressed a key at, in the console's window, has been: however long
+                                // ago the window was opened, and whichever game was in it then.
+                                if said == "POOM played" {
+                                    shared.played.store(true, Ordering::Relaxed);
+                                }
                             }
                             if let Ok(mut s) = said.lock() {
                                 if s.len() == KEPT {
@@ -1425,6 +1435,7 @@ impl Screens {
                 self.shared.played.store(false, Ordering::Relaxed);
                 self.game = Some(child);
                 self.game_off = !on;
+                self.game_video = video.to_string();
                 self.playing = Some(wad.to_path_buf());
             }
             Err(e) => crate::log(format!("console: {e}")),
@@ -1561,6 +1572,18 @@ impl Screens {
                     self.shared.played.store(false, Ordering::Relaxed);
                     self.playing = Some(wad);
                 }
+            }
+            // The settings say another video mode than the console's in: it's told, on or off, and changes as it is.
+            Some(_) if self.game.is_some() && self.game_video != video && self.shared.console().is_some() => {
+                let key = match video {
+                    "720p" => Button::Video720,
+                    "1080i" => Button::Video1080,
+                    _ => Button::Video480,
+                };
+                if let Some(console) = self.shared.console() {
+                    console.press(key);
+                }
+                self.game_video = video.to_string();
             }
             Some(wad) if wanted && self.game.is_none() => self.start_game(&wad, video, true),
             // On, when it's wanted on; off, when it isn't. Off, it's still there, and so is its display if that's out.

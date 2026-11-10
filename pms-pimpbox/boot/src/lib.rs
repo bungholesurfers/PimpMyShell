@@ -1004,10 +1004,11 @@ pub mod gpu {
     }
 
     /// The shader, compiled: its two stages, and how long compiling took, if it had to be compiled. With somewhere to keep
-    /// it, it's taken from there when it's there, and put there when it isn't.
-    fn shaders(source: &str, kept: Option<&std::path::Path>) -> Result<(Vec<u8>, Vec<u8>, Option<std::time::Duration>)> {
+    /// it, it's taken from there when it's there (unless it's to be compiled `afresh`), and put there when it isn't.
+    fn shaders(source: &str, kept: Option<&std::path::Path>, afresh: bool) -> Result<(Vec<u8>, Vec<u8>, Option<std::time::Duration>)> {
         let files = kept.map(|kept| kept_as(source, kept));
-        if let Some([vs, ps]) = &files
+        if !afresh
+            && let Some([vs, ps]) = &files
             && let (Ok(vs), Ok(ps)) = (std::fs::read(vs), std::fs::read(ps))
             && !vs.is_empty()
             && !ps.is_empty()
@@ -1021,7 +1022,13 @@ pub mod gpu {
         if let (Some(kept), Some([to_vs, to_ps])) = (kept, &files)
             && std::fs::create_dir_all(kept).is_ok()
         {
-            let _ = std::fs::write(to_vs, &vs).and_then(|()| std::fs::write(to_ps, &ps));
+            // Each written whole under another name, and only then given its own: it's never there half written.
+            for (to, bytes) in [(to_vs, &vs), (to_ps, &ps)] {
+                let first = to.with_extension(format!("{}-writing", std::process::id()));
+                if std::fs::write(&first, bytes).and_then(|()| std::fs::rename(&first, to)).is_err() {
+                    let _ = std::fs::remove_file(&first);
+                }
+            }
         }
         Ok((vs, ps, Some(took)))
     }
@@ -1110,9 +1117,15 @@ pub mod gpu {
             let lettered = boot.maker.clone().unwrap_or_else(|| dotted("PURPLE HAT", 6));
             let small = boot.small.clone().unwrap_or_else(|| dotted("ALL WHITES RESERVED.", 2));
             let source = header(&boot, &lettered, &small) + include_str!("boot.hlsl");
-            let (vs, ps, took) = shaders(&source, kept)?;
+            let (mut vs, mut ps, mut took) = shaders(&source, kept, false)?;
             let (mut corners, mut pixels, mut buffer) = (None, None, None);
             let room = D3D11_BUFFER_DESC { ByteWidth: size_of::<Moment>() as u32, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
+            // What was kept may not be what was compiled (cut short as it was written, or damaged since): if the card won't
+            // have it, it's compiled afresh, and that's kept instead.
+            let made = |vs: &[u8], ps: &[u8], corners: &mut Option<ID3D11VertexShader>, pixels: &mut Option<ID3D11PixelShader>| unsafe { device.CreateVertexShader(vs, None, Some(corners)).and_then(|()| device.CreatePixelShader(ps, None, Some(pixels))) };
+            if took.is_none() && kept.is_some() && made(&vs, &ps, &mut corners, &mut pixels).is_err() {
+                (vs, ps, took) = shaders(&source, kept, true)?;
+            }
             unsafe {
                 device.CreateVertexShader(&vs, None, Some(&mut corners))?;
                 device.CreatePixelShader(&ps, None, Some(&mut pixels))?;

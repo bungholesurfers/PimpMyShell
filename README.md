@@ -93,12 +93,18 @@ changes where it starts and stops, or turns that off.
 | 6 | The PIMPBOX: a game console plugged into your TVs. POOM (room) plays Doom's games on it |
 | 1295 | [Captain Midnight](https://en.wikipedia.org/wiki/Captain_Midnight_broadcast_signal_intrusion), who took over HBO's satellite feed in April 1986 over the price of scrambling |
 
-Give the console a game on Settings > PIMPBOX and it's on channel 6. The demos
-play in the taskbar. Click the picture to stop shuffling, then again to open a window and play: W, A, S and D or the arrows to
-move, the mouse to turn and shoot, E or space to open doors. The console keeps running when
-you change the channel, as a console does, and has a power button of its own. With nobody watching, it rests. Settings > PIMPBOX
-fetches [Freedoom](https://freedoom.github.io/) or the Doom shareware episode, on request, or you can add your own IWAD. No
-game data comes with PimpMyShell. Sound is off, and no audio device is opened.
+Give the console a game on Settings > PIMPBOX and it's on channel 6. It comes on with a boot animation of its own, and then
+the demos play in the taskbar. Click the picture to stop shuffling, then again to pop its display out into a window and play: W,
+A, S and D or the arrows to move, the mouse to turn and shoot, E or space to open doors. The window has the keys and the mouse
+only while there's a game to play, and Ctrl+Alt+G lets go of them. It stays when a game ends (the console comes back on by
+itself, with a shorter animation, and plays it again) and when the console's switched off, and it has the TV's remote and the
+console's own little settings window beside it. The console keeps running when you change the channel, as a console does, and
+has a power button of its own. With nobody watching, it rests.
+
+The console's settings window, beside the remote, chooses which game it plays and how big a picture it puts out: 480p, which is
+what nearly everything of its day used, or 720p, when the taskbar's set goes wide to match. Settings > PIMPBOX has 1080i too.
+Settings > PIMPBOX fetches [Freedoom](https://freedoom.github.io/) or the Doom shareware episode, on request, or you can add
+your own IWAD. No game data comes with PimpMyShell. Sound is off, and no audio device is opened.
 
 On battery a TV you leave alone sleeps, holding its last picture and sending nothing, and wakes for 30 seconds when you touch it.
 A sleeping TV costs what no TV does. On mains it runs at 60 frames a second, 30 while the machine stays busy, for a few percent of
@@ -159,8 +165,12 @@ The player is `pms-twatch.exe`, its own process, using Windows' own media stack.
 scaled down on the GPU and handed over in shared memory, like the console's.
 
 The console is `pms-pimpbox.exe`, its own process, so a crash can't touch your taskbar. What plays Doom's games on it is POOM:
-the engine from [room](https://github.com/sunsided/room). So it's under the GPL version 2, unlike the rest of PimpMyShell: its source is in
-[`pms-pimpbox`](pms-pimpbox), and it shares nothing with the MIT parts but frames in shared memory (`pms-screen`).
+the engine from [room](https://github.com/sunsided/room), which the console runs as a second process of the same program, so
+that the console and its window outlive a game that ends or falls over (when it falls over, the console says so, and why goes
+in the log). So it's under the GPL version 2, unlike the rest of PimpMyShell: its source is in [`pms-pimpbox`](pms-pimpbox), and
+it shares nothing with the MIT parts but frames in shared memory (`pms-screen`). Its boot animation
+([`pms-pimpbox/boot`](pms-pimpbox/boot), MIT) is drawn by the graphics card with Direct3D 11, from arithmetic alone: there's no
+picture, model or font file in it. Its one shader is compiled the first time and kept, and Settings > PIMPBOX can clear it.
 
 ## Using it
 
@@ -243,8 +253,8 @@ What it touches, all under your own user (no admin, no services, no drivers):
   dump of the taskbar's visual tree), `update-checked.txt` (when updates were last checked), `taskbar-told.txt` (whose
   replaced taskbar we've explained, so that it's only once), `welcomed.txt` (the welcome has been offered), `pms-128.png`,
   `tray-pinned.txt`, `seashell-carried-over.txt` (SeaShell's settings have been brought over once, and never come back),
-  `vidya` (games, each in a folder of its own: `vidya\poom` is the console's, with its games in `wads` and its settings and
-  saved games), `streamlink`, and `tap\pms_tap-<stamp>.dll` (see below).
+  `vidya` (games, each in a folder of its own: `vidya\poom` is POOM's, with its games in `wads` and its settings and
+  saved games, and `vidya\pimpbox\shaders` is the console's compiled shader), `streamlink`, and `tap\pms_tap-<stamp>.dll` (see below).
 - **`%TEMP%\pms-update`**: a downloaded update, until it's installed.
 
 It reads, but never writes, the notification database (`wpndatabase.db`), to get a toast's full content.

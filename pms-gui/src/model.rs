@@ -169,6 +169,8 @@ pub struct Model {
     pub theirs: Vec<Running>,
     /// How much of the graphics card each process is using: looked at each time the processes are.
     gpus: Option<pms::procs::Gpus>,
+    /// The processes are on show (the page they're on is): only then are they counted, which isn't free.
+    pub watching_procs: bool,
     /// How much dedicated memory the graphics cards have in use in all, in bytes: what's really on them.
     pub cards_in_use: Option<u64>,
     /// How long each had had a processor at that look, and when that was.
@@ -229,7 +231,8 @@ impl Model {
             polled: Instant::now() - Duration::from_secs(10),
             procs: Vec::new(),
             theirs: Vec::new(),
-            gpus: pms::procs::Gpus::new(),
+            gpus: None,
+            watching_procs: true,
             cards_in_use: None,
             procs_before: (Vec::new(), Instant::now()),
             update: Arc::default(),
@@ -249,6 +252,13 @@ impl Model {
         let log = pms_tap::logfile::Log::Daemon.path();
         self.last_log = std::fs::read_to_string(log).ok().and_then(|t| t.lines().last().map(str::to_string)).unwrap_or_default();
         self.polled = Instant::now();
+        if !self.watching_procs {
+            self.follow_disk();
+            return;
+        }
+        if self.gpus.is_none() {
+            self.gpus = pms::procs::Gpus::new();
+        }
         let (now, before) = (pms::procs::ours(), &self.procs_before);
         let apart = before.1.elapsed();
         let graphics = self.gpus.as_mut().map(pms::procs::Gpus::look);
@@ -387,10 +397,8 @@ impl Model {
     /// Switches the console off and deletes what it's kept compiled: it compiles it again the next time it comes on.
     pub fn clear_shaders(&mut self) {
         let sets: Vec<String> = self.config.meters.iter().filter(|m| m.style == pms::config::Style::Screen && m.set.as_deref() != Some("twatch")).map(|m| m.label.clone()).collect();
-        if pms::tv::switch_console_off(&sets) {
-            // It ends what it's doing as soon as it's told, which is within a second of the press.
-            std::thread::sleep(Duration::from_millis(1500));
-        }
+        // Nothing of it is held open: it's read when the console comes on, and that's all.
+        pms::tv::switch_console_off(&sets);
         let kept = pms::wads::shaders();
         self.message = match std::fs::remove_dir_all(&kept) {
             Ok(()) => ("Compiled shaders cleared".to_string(), false),
