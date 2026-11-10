@@ -72,8 +72,11 @@ pub fn home() -> PathBuf {
 }
 
 /// The console's home when it's been put somewhere else (PMS_POOM_HOME): there, and nowhere an earlier version kept things.
+/// A whole path, whatever was given, so that every program of ours means the same folder by it, wherever it was started;
+/// and nothing at all, if what was given is empty.
 fn elsewhere() -> Option<PathBuf> {
-    std::env::var_os("PMS_POOM_HOME").map(PathBuf::from)
+    let given = std::env::var_os("PMS_POOM_HOME").filter(|given| !given.is_empty())?;
+    std::path::absolute(PathBuf::from(given)).ok()
 }
 
 /// The first of `places` that's a folder, or the first of them, where none is yet: where something is, while it hasn't moved.
@@ -82,10 +85,35 @@ fn first_there(places: [PathBuf; 3]) -> PathBuf {
 }
 
 /// Where the console keeps its boot animation's shader compiled, so that it's only compiled once: its own folder among the
-/// games', beside its game program's. Emptying it costs a moment the next time the console comes on, and no more.
+/// games', beside its game program's. With the console's home put somewhere else, it's inside that, and never beside it:
+/// what's beside a folder somebody chose isn't ours.
 pub fn shaders() -> PathBuf {
-    let home = home();
-    home.parent().map_or_else(|| home.join("shaders"), |games| games.join("pimpbox").join("shaders"))
+    match elsewhere() {
+        Some(home) => home.join("shaders"),
+        None => vidya().join("pimpbox").join("shaders"),
+    }
+}
+
+/// Whether a file in that folder is one the console put there, by its name: a compiled stage of its shader, or one that
+/// was being written.
+fn is_kept_shader(name: &str) -> bool {
+    name.starts_with("boot-") && (name.ends_with(".vs") || name.ends_with(".ps") || name.ends_with("-writing"))
+}
+
+/// Takes away what the console's kept compiled in `kept`: its own files, by name, and nothing else that's there; then the
+/// folder, if that leaves it empty. How many files went. It costs a moment the next time the console comes on, and no more.
+pub fn clear_shaders_in(kept: &Path) -> std::io::Result<usize> {
+    let mut gone = 0;
+    for entry in std::fs::read_dir(kept)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() && is_kept_shader(&entry.file_name().to_string_lossy()) {
+            std::fs::remove_file(entry.path())?;
+            gone += 1;
+        }
+    }
+    // Only if it's empty: this doesn't take anything with it.
+    let _ = std::fs::remove_dir(kept);
+    Ok(gone)
 }
 
 /// Where WADs are kept. While they're still where an earlier version kept them, and haven't moved (`move_old`), there.
@@ -108,6 +136,10 @@ pub fn saves() -> PathBuf {
 /// and `wads` goes inside it. Only renames: nothing is copied, and nothing already in the new place is touched. What can't move
 /// stays where it was, and is still found there. Before the console starts: a game holds its WAD open.
 pub fn move_old() {
+    // With the console's home put somewhere else, what an earlier version kept stays where it is: it's not that home's.
+    if elsewhere().is_some() {
+        return;
+    }
     move_into(&local().join("poom"), &home());
     move_into(&local().join("doom"), &home());
     move_into(&local().join("wads"), &home().join("wads"));
@@ -331,7 +363,8 @@ pub fn add(path: &Path) -> Result<PathBuf, String> {
 
 /// Removes a WAD, by file name.
 pub fn remove(name: &str) -> Result<(), String> {
-    if name.contains(['/', '\\']) || !name.to_ascii_lowercase().ends_with(".wad") {
+    // A name and nothing but: no folder, no drive, nothing that could be anywhere but in the games' own folder.
+    if name.contains(['/', '\\', ':']) || Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) || !name.to_ascii_lowercase().ends_with(".wad") {
         return Err(format!("{name}: not a WAD"));
     }
     std::fs::remove_file(dir().join(name)).map_err(|e| format!("{name}: {e}"))?;
@@ -344,6 +377,33 @@ pub fn remove(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_the_shaders_takes_only_the_shaders() {
+        let kept = std::env::temp_dir().join(format!("pms-shaders-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&kept);
+        std::fs::create_dir_all(kept.join("somebody's folder")).unwrap();
+        for name in ["boot-0123-4.vs", "boot-0123-4.ps", "boot-0123-4.77-writing", "notes.txt", "boot.ps1", "holiday.vs"] {
+            std::fs::write(kept.join(name), "x").unwrap();
+        }
+        std::fs::write(kept.join("somebody's folder").join("boot-9-4.vs"), "x").unwrap();
+        assert_eq!(clear_shaders_in(&kept).unwrap(), 3, "the console's three, and no more");
+        let mut left: Vec<String> = std::fs::read_dir(&kept).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["boot.ps1", "holiday.vs", "notes.txt", "somebody's folder"], "what isn't its stays, and so does the folder");
+        assert!(kept.join("somebody's folder").join("boot-9-4.vs").exists(), "and nothing inside a folder is looked at");
+        // With only its own in it, the folder goes too; and one that isn't there is an error, not a deletion.
+        let _ = std::fs::remove_dir_all(&kept);
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join("boot-0123-4.vs"), "x").unwrap();
+        assert_eq!(clear_shaders_in(&kept).unwrap(), 1);
+        assert!(!kept.exists());
+        assert!(clear_shaders_in(&kept).is_err());
+        // A game's name is a name, and nothing that could be somewhere else.
+        for name in ["..\\x.wad", "a/b.wad", "D:x.wad", "x.txt", ".."] {
+            assert!(remove(name).is_err(), "{name}");
+        }
+    }
 
     /// A zip as releases come: deflated, in a folder named for its version, as Freedoom's and Streamlink's are.
     fn a_release() -> (Vec<u8>, Vec<u8>) {

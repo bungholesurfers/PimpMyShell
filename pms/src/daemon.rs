@@ -541,6 +541,19 @@ impl Daemon {
 
     /// What a TV's remote asked for that's in the settings: the file gets it, and everything goes on from there as if the settings
     /// window had done it.
+    /// Whether the settings file can be written over with what a remote's asked for. Not while it doesn't load: then it's
+    /// somebody's edit, half done or gone wrong, and what's running is an older file's settings. Writing those out would
+    /// take their edit away. What was asked is let go, and said.
+    fn file_is_ours_to_write(&self, who: &str) -> bool {
+        match config::load(&self.path) {
+            Ok(_) => true,
+            Err(e) => {
+                log(format!("{who}: not saved, as the settings file doesn't load just now and is left as it is ({e})"));
+                false
+            }
+        }
+    }
+
     fn do_what_the_tvs_asked(&mut self) {
         let asked = self.screens.take_asked();
         if asked == crate::tv::Asked::default() {
@@ -558,6 +571,9 @@ impl Daemon {
         }
         if let Some(video) = asked.video {
             config.console_video = video.into();
+        }
+        if !self.file_is_ours_to_write("TV") {
+            return;
         }
         if let Err(e) = config::save(&self.path, &config) {
             log(format!("TV: couldn't save that: {e}"));
@@ -641,7 +657,9 @@ impl Daemon {
             }
             crate::twatch::step_quality(&mut config, asked.quality);
             crate::twatch::step_volume(&mut config, asked.volume);
-            if let Err(e) = config::save(&self.path, &config) {
+            if !self.file_is_ours_to_write("Twatch TV") {
+                // Not saved, but the rest of what the sets asked is still done.
+            } else if let Err(e) = config::save(&self.path, &config) {
                 log(format!("Twatch TV: couldn't save that: {e}"));
             }
         }

@@ -140,8 +140,13 @@ Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\doom1.wad"
 Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\freedoom-COPYING.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\chosen.txt"
 Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\poom\wads"
-; The console's compiled shader, which it compiles again whenever it isn't there.
-Type: filesandordirs; Name: "{localappdata}\PimpMyShell\vidya\pimpbox"
+; The console's compiled shader, which it compiles again whenever it isn't there: its own files by name, and the folders
+; only if that leaves them empty.
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\pimpbox\shaders\boot-*.vs"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\pimpbox\shaders\boot-*.ps"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\pimpbox\shaders\boot-*-writing"
+Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\pimpbox\shaders"
+Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\pimpbox"
 Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\poom"
 Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya"
 ; Streamlink, fetched the same way.

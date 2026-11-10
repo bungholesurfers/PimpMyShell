@@ -399,9 +399,11 @@ impl Model {
         let sets: Vec<String> = self.config.meters.iter().filter(|m| m.style == pms::config::Style::Screen && m.set.as_deref() != Some("twatch")).map(|m| m.label.clone()).collect();
         // Nothing of it is held open: it's read when the console comes on, and that's all.
         pms::tv::switch_console_off(&sets);
+        // Its own files in its own folder, by name: nothing else that might be there, and no folder with anything in it.
         let kept = pms::wads::shaders();
-        self.message = match std::fs::remove_dir_all(&kept) {
-            Ok(()) => ("Compiled shaders cleared".to_string(), false),
+        self.message = match pms::wads::clear_shaders_in(&kept) {
+            Ok(0) => ("There were no compiled shaders to clear".to_string(), false),
+            Ok(_) => ("Compiled shaders cleared".to_string(), false),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ("There were no compiled shaders to clear".to_string(), false),
             Err(e) => (format!("We couldn't clear {}: {e}", pms::shown(&kept)), true),
         };
