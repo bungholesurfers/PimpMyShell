@@ -69,7 +69,7 @@ enum Page {
     Counters,
     Look,
     Tv,
-    Poom,
+    Pimpbox,
     Twatch,
     Hotmic,
     Toasts,
@@ -86,7 +86,7 @@ const PAGES: [(Page, &str, &str, (&str, &str)); 13] = [
     (Page::Counters, "counters", "\u{E8EF}", copy::COUNTERS),
     (Page::Look, "look", "\u{E771}", copy::LOOK),
     (Page::Tv, "tv", "\u{E7F4}", copy::TV),
-    (Page::Poom, "poom", "\u{E7FC}", copy::POOM),
+    (Page::Pimpbox, "pimpbox", "\u{E7FC}", copy::PIMPBOX),
     (Page::Twatch, "twatch", "\u{E714}", copy::TWATCH),
     (Page::Hotmic, "hotmic", "\u{E720}", copy::HOTMIC),
     (Page::Toasts, "toasts", "\u{E91C}", copy::TOASTS),
@@ -111,6 +111,10 @@ pub struct Settings {
     confirm: Option<Section>,
     /// Resetting every setting is waiting to be confirmed.
     confirm_all: bool,
+    /// Clearing the console's compiled shaders is waiting to be confirmed.
+    confirm_shaders: bool,
+    /// All of what's said about the graphics figures is showing, not only its first line.
+    gpu_note_open: bool,
     /// The box for editing favorites as text has been up long enough to be given its text (`favorites`).
     box_ready: bool,
     /// What floats behind the controls (dollars.rs), and where.
@@ -128,6 +132,8 @@ pub enum Msg {
     Reset(ContentDialogResult),
     /// The answer to whether to reset every setting.
     ResetAll(ContentDialogResult),
+    /// The answer to whether to switch the console off and clear what it's compiled.
+    ClearShaders(ContentDialogResult),
     Tick,
     /// What a control did: a change to the settings.
     Edit(Box<dyn FnOnce(&mut Settings) + Send>),
@@ -162,7 +168,7 @@ impl Component for Settings {
 
     fn create(path: &PathBuf, context: &ComponentContext<Self>) -> Self {
         tick_later(context);
-        Settings { m: Model::open(path.clone()), page: FIRST_PAGE.get().copied().unwrap_or(Page::General), meter: 0, pane_open: true, pane_mode: NavigationViewDisplayMode::Expanded, confirm: None, confirm_all: false, box_ready: false, dollars: Layer::default(), panel: ElementRef::new() }
+        Settings { m: Model::open(path.clone()), page: FIRST_PAGE.get().copied().unwrap_or(Page::General), meter: 0, pane_open: true, pane_mode: NavigationViewDisplayMode::Expanded, confirm: None, confirm_all: false, confirm_shaders: false, gpu_note_open: false, box_ready: false, dollars: Layer::default(), panel: ElementRef::new() }
     }
 
     fn update(&mut self, msg: Msg, context: &ComponentContext<Self>) {
@@ -183,6 +189,11 @@ impl Component for Settings {
             Msg::ResetAll(answer) => {
                 if std::mem::take(&mut self.confirm_all) && answer == ContentDialogResult::Primary {
                     self.m.reset_all();
+                }
+            }
+            Msg::ClearShaders(answer) => {
+                if std::mem::take(&mut self.confirm_shaders) && answer == ContentDialogResult::Primary {
+                    self.m.clear_shaders();
                 }
             }
             Msg::Tick => {
@@ -249,7 +260,7 @@ impl Component for Settings {
             Page::Counters => self.counters(cx),
             Page::Look => self.look(cx),
             Page::Tv => self.tv(cx),
-            Page::Poom => self.poom(cx),
+            Page::Pimpbox => self.pimpbox(cx),
             Page::Twatch => self.twatch(cx),
             Page::Hotmic => self.hotmic(cx),
             Page::Toasts => self.toasts(cx),
@@ -309,8 +320,15 @@ impl Component for Settings {
             .close_button_text("Cancel")
             .on_closed(cx.callback(Msg::ResetAll))
             .content(TextBlock::new().text(copy::RESET_ALL_ASK).text_wrapping(TextWrapping::Wrap));
+        let confirm_shaders = ContentDialog::new()
+            .is_open(self.confirm_shaders)
+            .title("Switch the PIMPBOX off and clear its shaders?")
+            .primary_button_text("Switch off and clear")
+            .close_button_text("Cancel")
+            .on_closed(cx.callback(Msg::ClearShaders))
+            .content(TextBlock::new().text(copy::CLEAR_SHADERS_ASK).text_wrapping(TextWrapping::Wrap));
         // The dollars first: over the acrylic, under everything else.
-        Grid::new().children((SwapChainPanel::new().element_ref(&self.panel), window, confirm, confirm_all))
+        Grid::new().children((SwapChainPanel::new().element_ref(&self.panel), window, confirm, confirm_all, confirm_shaders))
     }
 }
 
@@ -778,7 +796,7 @@ impl Settings {
         } else {
             Button::new().style(ButtonStyle::Accent).on_click(act(cx, |s| s.m.start_daemon())).content("Start")
         };
-        let header = card(Grid::new().columns([GridLength::Auto, GridLength::STAR, GridLength::Auto]).column_spacing(20.0).children((
+        let top: View = Grid::new().columns([GridLength::Auto, GridLength::STAR, GridLength::Auto]).column_spacing(20.0).children((
             Image::new().grid_column(0).source_data(EncodedImage::new(LOGO)).width(64.0).height(64.0),
             StackPanel::new().grid_column(1).spacing(2.0).vertical_alignment(VerticalAlignment::Center).children((
                 TextBlock::new().text("PimpMyShell").font_size(20.0).font_weight(FontWeight::SEMI_BOLD),
@@ -786,7 +804,76 @@ impl Settings {
                 state(running).margin(Thickness::new(0.0, 4.0, 0.0, 0.0)),
             )),
             Border::new().grid_column(2).vertical_alignment(VerticalAlignment::Center).content(start_stop),
-        )));
+        ));
+        // What's running of it: each process, under the one that started it, how busy it is and how much memory is its own.
+        let line = |cells: [String; 5], quiet: bool| -> View {
+            let [name, cpu, memory, gpu, video] = cells;
+            let said = |text: String, column: i32, right: bool| -> View {
+                let t = TextBlock::new().text(text).font_size(12.0).opacity(if quiet { 0.6 } else { 1.0 }).grid_column(column);
+                if right { t.horizontal_alignment(HorizontalAlignment::Right).into() } else { t.into() }
+            };
+            // A figure: each of its digits in a place as wide as any other's, so that figures line up under each other and
+            // don't shift about as they change; its unit after it, in a place of its own. Nothing at all is said quietly.
+            let figure = |text: String, column: i32| -> View {
+                let figures = text.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(text.len());
+                let (figures, unit) = text.split_at(figures);
+                if figures.is_empty() {
+                    return said(text.clone(), column, true);
+                }
+                // Not how busy a processor's been, though: none at all, to the last place shown, isn't none.
+                let nothing = column != 1 && figures.chars().all(|c| c == '0' || c == '.');
+                let place = |c: String, wide: f64| -> View { Border::new().width(wide).content(TextBlock::new().text(c).font_size(12.0).horizontal_alignment(HorizontalAlignment::Center)) };
+                let mut places: Vec<View> = figures.chars().map(|c| place(c.to_string(), if c == '.' { 3.5 } else { 7.0 })).collect();
+                places.push(place(unit.trim().to_string(), if unit.trim() == "%" { 12.0 } else { 24.0 }));
+                StackPanel::new()
+                    .orientation(Orientation::Horizontal)
+                    .horizontal_alignment(HorizontalAlignment::Right)
+                    .opacity(if nothing { 0.32 } else { 1.0 })
+                    .grid_column(column)
+                    .keyed_children(places.into_iter().enumerate().map(|(i, v)| KeyedView::new(i.to_string(), v)))
+            };
+            let value = |text: String, column: i32| if quiet { said(text, column, true) } else { figure(text, column) };
+            Grid::new()
+                .columns([GridLength::STAR, GridLength::Pixel(64.0), GridLength::Pixel(92.0), GridLength::Pixel(64.0), GridLength::Pixel(150.0)])
+                .children((said(name, 0, false), value(cpu, 1), value(memory, 2), value(gpu, 3), value(video, 4)))
+        };
+        let megabytes = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1_048_576.0);
+        let running = |p: &model::Running| {
+            let (gpu, video) = p.gpu.map_or_else(Default::default, |(busy, bytes)| (format!("{busy:.1}%"), megabytes(bytes)));
+            line([format!("{}{}", "\u{2003}".repeat(p.depth), p.name), p.cpu.map_or_else(String::new, |c| format!("{c:.2}%")), megabytes(p.memory), gpu, video], false)
+        };
+        let mut processes = vec![line(["Name", "CPU", "Memory", "GPU", "Dedi. GPU mem. commit"].map(String::from), true)];
+        processes.extend(m.procs.iter().map(running));
+        // And, a little apart, what isn't ours but does our work: the Explorer the taskbar's in, and the Desktop Window Manager.
+        if !m.theirs.is_empty() {
+            processes.push(TextBlock::new().text("").font_size(4.0).into());
+        }
+        for p in &m.theirs {
+            processes.push(running(p));
+            if !p.about.is_empty() {
+                processes.push(TextBlock::new().text(p.about).font_size(11.0).opacity(0.6).text_wrapping(TextWrapping::Wrap).margin(Thickness::new(0.0, 0.0, 0.0, 2.0)).into());
+            }
+        }
+        // What the graphics figures can and can't be trusted for; and what the cards really have in use, to set them against.
+        // In a line, with the rest of it for whoever asks.
+        if m.procs.iter().chain(&m.theirs).any(|p| p.gpu.is_some()) {
+            let quiet = |text: String| TextBlock::new().text(text).font_size(11.0).opacity(0.6).text_wrapping(TextWrapping::Wrap).vertical_alignment(VerticalAlignment::Center);
+            let in_use = m.cards_in_use.map_or_else(String::new, |bytes| format!(" Your graphics card has {} of dedicated memory in use in all, just now.", megabytes(bytes)));
+            let more = self.gpu_note_open;
+            let ask = Button::new().on_click(act(cx, move |s| s.gpu_note_open = !more)).content(TextBlock::new().text(if more { "Show less" } else { "Show more..." }).font_size(11.0));
+            processes.push(
+                Grid::new()
+                    .columns([GridLength::STAR, GridLength::Auto])
+                    .column_spacing(12.0)
+                    .margin(Thickness::new(0.0, 4.0, 0.0, 0.0))
+                    .children((quiet(format!("GPU memory figures may be inaccurate.{in_use}")).grid_column(0), Border::new().grid_column(1).content(ask))),
+            );
+            if more {
+                processes.push(quiet(pms::procs::GPU_MEMORY_IS.to_string()).into());
+            }
+        }
+        let running_now: View = StackPanel::new().spacing(3.0).keyed_children(processes.into_iter().enumerate().map(|(i, v)| KeyedView::new(i.to_string(), v)));
+        let header = card(StackPanel::new().spacing(12.0).children((top, running_now)));
         let files = group(
             "Your files",
             vec![
@@ -1541,7 +1628,7 @@ impl Settings {
             Some("\u{E7F4}"),
             "TVs on your taskbar",
             &if sets == 1 && pms::tv::console_running() {
-                "You have 1. Removing it quits POOM, and anything you haven't saved is lost.".to_string()
+                "You have 1. Removing it quits the PIMPBOX, and anything you haven't saved is lost.".to_string()
             } else {
                 format!("You have {sets}. Each has its own channel and remote, and they can all watch the same game.")
             },
@@ -1572,7 +1659,7 @@ impl Settings {
     }
 
     /// The console on channel 6: which game is in it, more to get, and whether a TV tuning in switches it on.
-    fn poom(&self, cx: &Cx) -> View {
+    fn pimpbox(&self, cx: &Cx) -> View {
         use pms::wads::Wad;
         let wads = pms::wads::list();
         let playing = pms::wads::chosen().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
@@ -1622,9 +1709,14 @@ impl Settings {
 
         let auto = self.m.config.console_autostart;
         let shipped = self.m.baseline.console_autostart;
-        let console = vec![row("console_autostart", auto != shipped, Some(act(cx, move |s| s.m.config.console_autostart = shipped)), toggle(cx, auto, |s, v| s.m.config.console_autostart = v))];
+        let (video, usual_video) = (self.m.config.console_video.clone(), self.m.baseline.console_video.clone());
+        let console = vec![
+            row("console_autostart", auto != shipped, Some(act(cx, move |s| s.m.config.console_autostart = shipped)), toggle(cx, auto, |s, v| s.m.config.console_autostart = v)),
+            row("console_video", video != usual_video, Some(act(cx, move |s| s.m.config.console_video = usual_video.clone())), choice(cx, &video, copy::CONSOLE_VIDEO, |s, v| s.m.config.console_video = v)),
+            settings_card(Some("\u{E74D}"), copy::CLEAR_SHADERS.0, copy::CLEAR_SHADERS.1, None, Button::new().on_click(act(cx, |s| s.confirm_shaders = true)).content("Clear...")),
+        ];
         let note = |text: &str| TextBlock::new().text(text.to_string()).text_wrapping(TextWrapping::Wrap).font_size(12.0).opacity(0.7);
-        StackPanel::new().spacing(4.0).children((heading(copy::POOM), missing_part(pms::parts::POOM), group("Which game plays", games), group("The console", console), group("Get more games", more), note(copy::POOM_HELP), note(copy::TV_NOTICE)))
+        StackPanel::new().spacing(4.0).children((heading(copy::PIMPBOX), missing_part(pms::parts::PIMPBOX), group("Which game plays", games), group("The console", console), group("Get more games", more), note(copy::PIMPBOX_HELP), note(copy::TV_NOTICE)))
     }
 
     /// What's wrong with the settings file, where, and the ways out, above every page.
@@ -2193,7 +2285,7 @@ enum Stop {
     Style,
     Confirm,
     Tv,
-    Poom,
+    Pimpbox,
     Twatch,
     Fresh,
     /// What's new, for somebody who's been here before.
@@ -2201,8 +2293,8 @@ enum Stop {
 }
 
 /// A first run's pages, and what's new since the version before for everybody else.
-const FIRST_RUN: [Stop; 7] = [Stop::Hello, Stop::Style, Stop::Confirm, Stop::Tv, Stop::Poom, Stop::Twatch, Stop::Fresh];
-const NEWS: [Stop; 4] = [Stop::News, Stop::Tv, Stop::Poom, Stop::Twatch];
+const FIRST_RUN: [Stop; 7] = [Stop::Hello, Stop::Style, Stop::Confirm, Stop::Tv, Stop::Pimpbox, Stop::Twatch, Stop::Fresh];
+const NEWS: [Stop; 4] = [Stop::News, Stop::Tv, Stop::Pimpbox, Stop::Twatch];
 
 /// The first run: a few choices, with what they look like, in the settings' clothes. Nothing's kept until the end, so
 /// closing it leaves the defaults.
@@ -2319,7 +2411,7 @@ impl Component for Welcome {
                 let on = settings_card(None, copy::WELCOME_TV_ON.0, copy::WELCOME_TV_ON.1, None, switch(self.tv, cx.callback(WelcomeMsg::Tv)));
                 (copy::WELCOME_TV.0, copy::WELCOME_TV.1, points(&copy::WELCOME_TV_POINTS, vec![on]))
             }
-            Stop::Poom => (copy::WELCOME_POOM.0, copy::WELCOME_POOM.1, self.poom(cx)),
+            Stop::Pimpbox => (copy::WELCOME_PIMPBOX.0, copy::WELCOME_PIMPBOX.1, self.pimpbox(cx)),
             Stop::Twatch => {
                 let words = match (self.no_channels(), self.twatch) {
                     (true, true) => copy::WELCOME_TWATCH_NEXT,
@@ -2381,7 +2473,7 @@ fn points(items: &[(&str, &str, &str)], after: Vec<View>) -> View {
 
 impl Welcome {
     /// The choices of game: one to fetch now, or the place to put your own.
-    fn poom(&self, cx: &mut ViewContext<Self>) -> View {
+    fn pimpbox(&self, cx: &mut ViewContext<Self>) -> View {
         use pms::wads::Wad;
         let wads = pms::wads::list();
         let have = |name: &str| wads.iter().any(|w| w.eq_ignore_ascii_case(name));

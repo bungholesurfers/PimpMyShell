@@ -1,0 +1,26 @@
+# The console's boot animation: a program of its own, as a console's is, that knows nothing of any game or engine. It draws a
+# frame for a moment in time, with the graphics card, onto whatever it's handed, and that's all: no window, no clock. Ours entirely, so MIT.
+[package]
+name = "pimpbox-boot"
+version = "0.1.6"
+edition = "2024"
+license = "MIT"
+description = "PIMPBOX's boot animation, drawn by the graphics card"
+publish = false
+
+[features]
+# Lettering from the fonts Windows has (`fonts`): the one thing here that isn't arithmetic, and only if asked for.
+system-fonts = ["windows/Win32_Graphics_Gdi"]
+# What the `play` example needs to put it in a window: nothing the animation itself uses.
+window = ["windows/Win32_Graphics_Dxgi", "windows/Win32_UI_WindowsAndMessaging", "windows/Win32_System_LibraryLoader", "windows/Win32_UI_Input_KeyboardAndMouse"]
+
+[dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Dxgi_Common"] }
+
+[[example]]
+name = "play"
+required-features = ["system-fonts", "window"]
+
+[[example]]
+name = "frames"
+required-features = ["system-fonts"]

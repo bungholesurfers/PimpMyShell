@@ -66,18 +66,22 @@ Source: "{#Bin}\pmsd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms_tap.dll"; DestDir: "{app}"; Flags: ignoreversion
-; Doom's engine: a program of its own, under the GPL, with what the GPL asks for beside it.
-Source: "{#Bin}\pms-poom.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The console, and Doom's engine in it: a program of its own, under the GPL, with what the GPL asks for beside it.
+Source: "{#Bin}\pms-pimpbox.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms-twatch.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\pms-poom\COPYING"; DestDir: "{app}"; DestName: "pms-poom-COPYING.txt"; Flags: ignoreversion
-Source: "..\pms-poom\engine\NOTICE.md"; DestDir: "{app}"; DestName: "pms-poom-NOTICE.md"; Flags: ignoreversion
+Source: "..\pms-pimpbox\COPYING"; DestDir: "{app}"; DestName: "pms-pimpbox-COPYING.txt"; Flags: ignoreversion
+Source: "..\pms-pimpbox\engine\NOTICE.md"; DestDir: "{app}"; DestName: "pms-pimpbox-NOTICE.md"; Flags: ignoreversion
 Source: "..\pms.example.toml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 ; The notice the background needs, as in the settings: read by the code below, and not installed.
 Source: "..\pms-gui\src\legal.txt"; Flags: dontcopy
 
-; What earlier versions installed under names that have changed: POOM was pms-doom before 0.1.5.
+; What earlier versions installed under names that have changed: the console was pms-doom before 0.1.5, and pms-poom after
+; that, until it was the PIMPBOX.
 [InstallDelete]
+Type: files; Name: "{app}\pms-poom.exe"
+Type: files; Name: "{app}\pms-poom-COPYING.txt"
+Type: files; Name: "{app}\pms-poom-NOTICE.md"
 Type: files; Name: "{app}\pms-doom.exe"
 Type: files; Name: "{app}\pms-doom-COPYING.txt"
 Type: files; Name: "{app}\pms-doom-NOTICE.md"
@@ -130,7 +134,7 @@ Type: files; Name: "{localappdata}\PimpMyShell\wads\doom1.wad"
 Type: files; Name: "{localappdata}\PimpMyShell\wads\freedoom-COPYING.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\wads\chosen.txt"
 Type: dirifempty; Name: "{localappdata}\PimpMyShell\wads"
-; Where they are from 0.1.5 on, inside POOM's own folder among the games. Saved games stay, and so do the folders with them.
+; Where they are from 0.1.5 on, inside POOM's own folder among the games (POOM being what the console plays them with). Saved games stay, and so do the folders with them.
 Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\freedoom1.wad"
 Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\doom1.wad"
 Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\freedoom-COPYING.txt"
@@ -285,8 +289,9 @@ begin
     Sleep(1500);
   end;
   EndOurs('pmsd.exe');
+  EndOurs('pms-pimpbox.exe');
+  // What it was called before, for an update from one of those.
   EndOurs('pms-poom.exe');
-  // What POOM was called before 0.1.5, for an update from one of those.
   EndOurs('pms-doom.exe');
   EndOurs('pms-twatch.exe');
   if EndOurs('pms-gui.exe') then

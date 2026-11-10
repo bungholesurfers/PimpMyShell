@@ -46,6 +46,10 @@ theme = "auto"
 # you switch the console on yourself.
 # console_autostart = false
 
+# How big a picture the console puts out, which is what its window shows (as many times over as fits your screen): "480p"
+# (640 by 480, what nearly everything of its day used), "720p" or "1080i". Read when the console's switched on.
+# console_video = "480p"
+
 # A TV starting up (PimpMyShell starting, or a TV added) flips up through its channels, from tv_intro_from to tv_intro_to,
 # where it stays: by default from Captain Midnight's 1295, round to the console on channel 6. Off, it comes on where it was left.
 # tv_intro      = false
@@ -352,5 +356,5 @@ value     = false
 # expr  = ["net_tx", "net_rx"]
 
 [[meter]]
-label = "TV"                 # a little TV: hover for its remote. With a game (Settings > TV), Space Pimpin' is on channel
+label = "TV"                 # a little TV: hover for its remote. With a game (Settings > TV), the PIMPBOX is on channel
 style = "screen"             # 6. Add another [[meter]] with its own label and style = "screen" for another set.

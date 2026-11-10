@@ -19,6 +19,7 @@ pub mod parts;
 mod pimpcast;
 pub mod pressure;
 pub mod problem;
+pub mod procs;
 pub mod streamlink;
 pub mod tv;
 pub mod twatch;

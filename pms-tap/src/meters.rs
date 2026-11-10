@@ -156,6 +156,8 @@ struct Spec {
     /// Screen: the name of the screen it shows, its shape, and whether it's put away for now.
     source: String,
     aspect: f64,
+    /// It was made wide, and stays so whatever it shows.
+    made_wide: bool,
     small: bool,
     /// Pie: the slice that glows.
     slice_glow: Option<SliceGlow>,
@@ -616,6 +618,11 @@ pub fn count() -> usize {
     STRIP.with_borrow(|s| s.as_ref().map_or(0, |s| s.meters.len()))
 }
 
+/// The taskbar's XAML root, for whatever has something to hang from it.
+pub(crate) fn root() -> Option<pms_xaml::XamlRoot> {
+    with_strip(|s| s.panel.XamlRoot().ok()).flatten()
+}
+
 fn with_strip<T>(f: impl FnOnce(&mut Strip) -> T) -> Option<T> {
     STRIP.with_borrow_mut(|s| s.as_mut().map(f))
 }
@@ -769,6 +776,7 @@ fn add(ctx: &Ctx, args: &[String]) -> R<String> {
         span: get("span").parse().unwrap_or(300),
         source: get("source").to_string(),
         aspect: if get("wide16") == "1" { SCREEN_WIDE } else { SCREEN_ASPECT },
+        made_wide: get("wide16") == "1",
         small: false,
         slice_glow: get("sliceglow").parse().ok().map(|slice| SliceGlow {
             slice,
@@ -821,6 +829,24 @@ pub(crate) fn screen_small(source: &str, small: bool) {
                 changed = Some(i);
             }
             m.spec.small = small;
+        }
+        changed
+    });
+    if let Some(Some(i)) = changed {
+        refit_one(i);
+    }
+}
+
+/// Makes the screen called `source` wide, 16:9, or the shape it was made: for a set that's showing a wide picture just now.
+pub(crate) fn screen_wide(source: &str, wide: bool) {
+    let changed = with_strip(|s| {
+        let mut changed = None;
+        for (i, m) in s.meters.iter_mut().enumerate().filter(|(_, m)| m.spec.style == Style::Screen && m.spec.source == source) {
+            let aspect = if wide || m.spec.made_wide { SCREEN_WIDE } else { SCREEN_ASPECT };
+            if m.spec.aspect != aspect {
+                changed = Some(i);
+            }
+            m.spec.aspect = aspect;
         }
         changed
     });

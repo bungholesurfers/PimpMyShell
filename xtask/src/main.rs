@@ -4,7 +4,7 @@
 //! Everyday release builds are for working on PimpMyShell: no LTO, so a change rebuilds in seconds. Releases can take
 //! every last percent with profile-guided optimisation, as Nagare's do, in steps or all at once (`pgo`): an
 //! instrumented build (`pgo-instrument`), a training run with it on this very taskbar (`pgo-train`), what it
-//! recorded merged into `pgo/pms.profdata` (POOM's into `pms-poom/pgo/poom.profdata`) beside a note of the compiler
+//! recorded merged into `pgo/pms.profdata` (the PIMPBOX's into `pms-pimpbox/pgo/pimpbox.profdata`) beside a note of the compiler
 //! (`pgo-merge`), and the optimised build from that, with fat LTO over one codegen unit (`pgo-build`). A profile fits only the compiler that recorded it
 //! and the code it was recorded from: after big changes, train again.
 
@@ -20,11 +20,11 @@ cargo xtask <task>:
                        profile), package them with Inno Setup 6 into target/installer/pms-setup-VERSION.exe,
                        and with --install install it silently over the installed copy
   pgo [SECONDS]        the whole PGO pass: pgo-instrument, pgo-train, pgo-merge, pgo-build (a few minutes)
-  pgo-instrument       the instrumented build, POOM's too, into target/pgo-instrumented
+  pgo-instrument       the instrumented build, the PIMPBOX's too, into target/pgo-instrumented
   pgo-train [SECONDS]  runs it on this taskbar for SECONDS (default 180, and about 120 at least) with pgo/train.toml:
                        every kind of meter, the TVs, the hot-mic alert, notifications, Freedoom fetched and played in
-                       POOM. A running daemon is stopped first and started again after. Leave the PC alone meanwhile.
-  pgo-merge            merge what it recorded into pgo/pms.profdata and pms-poom/pgo/poom.profdata (needs: rustup
+                       the PIMPBOX. A running daemon is stopped first and started again after. Leave the PC alone meanwhile.
+  pgo-merge            merge what it recorded into pgo/pms.profdata and pms-pimpbox/pgo/pimpbox.profdata (needs: rustup
                        component add llvm-tools)
   pgo-build            the optimised release build from those: target/release
   art                  render the icons and the installer's pictures (pms-art): assets/icon, installer/art
@@ -32,7 +32,7 @@ cargo xtask <task>:
 ";
 
 /// What the installer ships, from target/release.
-const SHIPPED: &[&str] = &["pmsd.exe", "pms.exe", "pms-gui.exe", "pms_tap.dll", "pms-poom.exe", "pms-twatch.exe"];
+const SHIPPED: &[&str] = &["pmsd.exe", "pms.exe", "pms-gui.exe", "pms_tap.dll", "pms-pimpbox.exe", "pms-twatch.exe"];
 
 type Result<T = ()> = std::result::Result<T, String>;
 
@@ -113,26 +113,26 @@ fn build() -> Result {
     doom(false)
 }
 
-/// pms-poom: GPL, and a workspace of its own, so that nothing of PimpMyShell's links it. Built apart and put with the rest. For a
+/// pms-pimpbox: GPL, and a workspace of its own, so that nothing of PimpMyShell's links it. Built apart and put with the rest. For a
 /// release (`release`), as the rest is: fat LTO, and the profile kept for it if there is one.
 fn doom(release: bool) -> Result {
-    step("pms-poom");
+    step("pms-pimpbox");
     let target = root().join("target").join("poom");
     let mut cmd = cargo();
-    cmd.current_dir(root().join("pms-poom")).args(["build", "--release", "--target-dir"]).arg(&target);
+    cmd.current_dir(root().join("pms-pimpbox")).args(["build", "--release", "--target-dir"]).arg(&target);
     if release {
         release_profile(&mut cmd);
-        let kept = kept_poom_profile();
+        let kept = kept_pimpbox_profile();
         if kept.exists() {
             check_compiler(&kept)?;
             cmd.env("RUSTFLAGS", format!("-Cprofile-use={}", kept.display()));
         } else {
-            println!("warning: no {}: POOM is built with fat LTO but no profile", kept.display());
+            println!("warning: no {}: the PIMPBOX is built with fat LTO but no profile", kept.display());
         }
     }
     run(&mut cmd)?;
-    let to = root().join("target").join("release").join("pms-poom.exe");
-    std::fs::copy(target.join("release").join("pms-poom.exe"), &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let to = root().join("target").join("release").join("pms-pimpbox.exe");
+    std::fs::copy(target.join("release").join("pms-pimpbox.exe"), &to).map_err(|e| format!("{}: {e}", to.display()))?;
     shipped_built()
 }
 
@@ -219,8 +219,8 @@ fn profiles_dir() -> PathBuf {
     root().join("target").join("pgo-profiles")
 }
 
-/// POOM's recordings, apart from the rest: its profile is kept apart too.
-fn poom_profiles_dir() -> PathBuf {
+/// The PIMPBOX's recordings, apart from the rest: its profile is kept apart too.
+fn pimpbox_profiles_dir() -> PathBuf {
     root().join("target").join("pgo-profiles-poom")
 }
 
@@ -232,9 +232,9 @@ fn kept_profile() -> PathBuf {
     root().join("pgo").join("pms.profdata")
 }
 
-/// POOM's profile, with its source: it's what running a GPL program recorded, and stays on that side.
-fn kept_poom_profile() -> PathBuf {
-    root().join("pms-poom").join("pgo").join("poom.profdata")
+/// The PIMPBOX's profile, with its source: it's what running a GPL program recorded, and stays on that side.
+fn kept_pimpbox_profile() -> PathBuf {
+    root().join("pms-pimpbox").join("pgo").join("pimpbox.profdata")
 }
 
 /// The compiler's own version line, which the profile's note records.
@@ -271,22 +271,22 @@ fn pgo_instrument() -> Result {
         release_profile(&mut cmd).env("RUSTFLAGS", &flags).args(["build", "--release", "--target-dir", "target/pgo-instrumented"]).args(targets);
         run(&mut cmd)?;
     }
-    // POOM, a workspace of its own, recording into a folder of its own, and put beside the daemon that starts it.
+    // The PIMPBOX, a workspace of its own, recording into a folder of its own, and put beside the daemon that starts it.
     let poom = root().join("target").join("pgo-instrumented-poom");
     let mut cmd = cargo();
     release_profile(&mut cmd)
-        .current_dir(root().join("pms-poom"))
-        .env("RUSTFLAGS", format!("-Cprofile-generate={} --cfg pms_pgo", poom_profiles_dir().display()))
+        .current_dir(root().join("pms-pimpbox"))
+        .env("RUSTFLAGS", format!("-Cprofile-generate={} --cfg pms_pgo", pimpbox_profiles_dir().display()))
         .args(["build", "--release", "--target-dir"])
         .arg(&poom);
     run(&mut cmd)?;
-    let to = instrumented().join("pms-poom.exe");
-    std::fs::copy(poom.join("release").join("pms-poom.exe"), &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let to = instrumented().join("pms-pimpbox.exe");
+    std::fs::copy(poom.join("release").join("pms-pimpbox.exe"), &to).map_err(|e| format!("{}: {e}", to.display()))?;
     // The notifications come from toast_lab, which isn't what's measured: an ordinary build.
     run(cargo().args(["build", "--release", "-p", "pms", "--example", "toast_lab"]))?;
     // Build scripts and proc macros were instrumented too, and ran: what they recorded is no use.
     fresh(&profiles_dir())?;
-    fresh(&poom_profiles_dir())
+    fresh(&pimpbox_profiles_dir())
 }
 
 /// Runs a PimpMyShell exe, waiting for it, ignoring how it went (some steps are only courtesy).
@@ -346,7 +346,7 @@ fn pgo_train(seconds: u64) -> Result {
     });
     let wads = poom_home.join("wads");
     let has_wad = |dir: &Path| std::fs::read_dir(dir).is_ok_and(|d| d.flatten().any(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("wad"))));
-    // With none from before either, a copy of one of yours, so that POOM is trained all the same (the fetching isn't).
+    // With none from before either, a copy of one of yours, so that the PIMPBOX is trained all the same (the fetching isn't).
     if !fetched && !has_wad(&wads) {
         let yours = std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("PimpMyShell").join("vidya").join("poom").join("wads"));
         let first = yours.and_then(|y| std::fs::read_dir(y).ok()).and_then(|d| d.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("wad"))));
@@ -359,7 +359,7 @@ fn pgo_train(seconds: u64) -> Result {
     }
     let game = fetched || has_wad(&wads);
     if !game {
-        println!("warning: no game, so POOM isn't trained (and keeps the profile it had)");
+        println!("warning: no game, so the PIMPBOX isn't trained (and keeps the profile it had)");
     }
     // Whichever daemon runs now (ours, the installed one) steps aside, and comes back after.
     let running = running_daemon();
@@ -409,11 +409,11 @@ fn pgo_train(seconds: u64) -> Result {
     pause(2000);
     mic("6");
     let _ = std::fs::write(&config, &settings);
-    // 62 s: POOM in its window: a new game, walking, turning, shooting, the map; closed (which pauses it), and opened again.
+    // 62 s: the PIMPBOX in its window: a new game, walking, turning, shooting, the map; closed (which pauses it), and opened again.
     until(62);
     if game {
-        println!("playing POOM");
-        poke(&["click", "poom"]);
+        println!("playing the PIMPBOX");
+        poke(&["click", "pimpbox"]);
         pause(2000);
         poke(&[
             "keys", "esc", "wait:600", "enter", "wait:600", "enter", "wait:600", "enter", "wait:1500", "up:2500", "right:700", "up:2000", "fire", "fire", "fire", "use", "left:900",
@@ -421,7 +421,7 @@ fn pgo_train(seconds: u64) -> Result {
         ]);
         poke(&["close"]);
         pause(2000);
-        poke(&["click", "poom"]);
+        poke(&["click", "pimpbox"]);
         pause(4000);
         poke(&["close"]);
     }
@@ -444,8 +444,8 @@ fn pgo_train(seconds: u64) -> Result {
     quietly(&cli, &["daemon", "stop"]);
     let _ = d.wait();
     // The daemon let go of the console, which ends with it, writing its profile as it goes.
-    if game && !gone("pms-poom.exe", Duration::from_secs(15)) {
-        println!("warning: POOM didn't end with the daemon, so it may not have written its profile");
+    if game && !gone("pms-pimpbox.exe", Duration::from_secs(15)) {
+        println!("warning: the PIMPBOX didn't end with the daemon, so it may not have written its profile");
     }
     if lab_ok && !registered {
         quietly(&lab, &["unregister"]);
@@ -514,10 +514,10 @@ fn pgo_merge() -> Result {
         return Err(format!("nothing recorded in {}; cargo xtask pgo-train first", profiles_dir().display()));
     }
     merge(&profdata, &profiles_dir(), &kept_profile())?;
-    if recorded(&poom_profiles_dir()) {
-        merge(&profdata, &poom_profiles_dir(), &kept_poom_profile())
+    if recorded(&pimpbox_profiles_dir()) {
+        merge(&profdata, &pimpbox_profiles_dir(), &kept_pimpbox_profile())
     } else {
-        println!("warning: POOM recorded nothing; {} stays as it was", kept_poom_profile().display());
+        println!("warning: the PIMPBOX recorded nothing; {} stays as it was", kept_pimpbox_profile().display());
         Ok(())
     }
 }

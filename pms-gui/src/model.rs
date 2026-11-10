@@ -105,6 +105,23 @@ pub enum Update {
     Failed(String),
 }
 
+/// A process, as the settings list it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Running {
+    pub name: String,
+    /// How deep under the one that started it.
+    pub depth: usize,
+    /// Its share of all the processors since the look before: none yet, the first time it's seen.
+    pub cpu: Option<f32>,
+    /// Its own memory, in bytes.
+    pub memory: u64,
+    /// How much of the graphics card it's using, as a percentage, and how many bytes of the card's own memory: none where
+    /// Windows doesn't say.
+    pub gpu: Option<(f32, u64)>,
+    /// What it is, where its name doesn't say enough.
+    pub about: &'static str,
+}
+
 pub struct Model {
     pub path: PathBuf,
     pub config: Config,
@@ -144,6 +161,18 @@ pub struct Model {
     pub autostart: String,
     pub last_log: String,
     pub polled: Instant,
+    /// PimpMyShell's processes, as they were at the last look: each one's name, how deep under the one that started it, its
+    /// share of all the processors since the look before (none yet, the first time it's seen), and its own memory in bytes.
+    pub procs: Vec<Running>,
+    /// The same for what isn't ours but does our work: the Explorer process the taskbar's in, which our part in the taskbar
+    /// is inside; and the Desktop Window Manager, which draws it.
+    pub theirs: Vec<Running>,
+    /// How much of the graphics card each process is using: looked at each time the processes are.
+    gpus: Option<pms::procs::Gpus>,
+    /// How much dedicated memory the graphics cards have in use in all, in bytes: what's really on them.
+    pub cards_in_use: Option<u64>,
+    /// How long each had had a processor at that look, and when that was.
+    procs_before: (Vec<(u32, u64)>, Instant),
     pub update: Arc<Mutex<Update>>,
     /// The file as we last read or wrote it. Others write it too (you in an editor, the daemon with the answer to its
     /// question or a notice's *Keep Windows notifications*): `follow_disk` notices.
@@ -198,6 +227,11 @@ impl Model {
             autostart: String::new(),
             last_log: String::new(),
             polled: Instant::now() - Duration::from_secs(10),
+            procs: Vec::new(),
+            theirs: Vec::new(),
+            gpus: pms::procs::Gpus::new(),
+            cards_in_use: None,
+            procs_before: (Vec::new(), Instant::now()),
             update: Arc::default(),
             disk: on_disk(&path_read),
         };
@@ -215,6 +249,23 @@ impl Model {
         let log = pms_tap::logfile::Log::Daemon.path();
         self.last_log = std::fs::read_to_string(log).ok().and_then(|t| t.lines().last().map(str::to_string)).unwrap_or_default();
         self.polled = Instant::now();
+        let (now, before) = (pms::procs::ours(), &self.procs_before);
+        let apart = before.1.elapsed();
+        let graphics = self.gpus.as_mut().map(pms::procs::Gpus::look);
+        self.cards_in_use = self.gpus.as_ref().and_then(pms::procs::Gpus::in_use);
+        let running = |p: &pms::procs::Proc, about: &'static str| Running {
+            name: p.name.clone(),
+            depth: p.depth,
+            cpu: before.0.iter().find(|(pid, _)| *pid == p.pid).map(|(_, busy)| pms::procs::share(*busy, p.busy, apart)),
+            memory: p.private,
+            // One that isn't using a card at all is using none of it: which is known, where the counters are.
+            gpu: graphics.as_ref().map(|g| g.get(&p.pid).copied().unwrap_or_default()),
+            about,
+        };
+        let theirs: Vec<(pms::procs::Proc, &'static str)> = [pms::procs::shell().map(|p| (p, "")), pms::procs::dwm().map(|p| (p, pms::procs::DWM_IS))].into_iter().flatten().collect();
+        self.procs = now.iter().map(|p| running(p, "")).collect();
+        self.theirs = theirs.iter().map(|(p, about)| running(p, about)).collect();
+        self.procs_before = (now.iter().chain(theirs.iter().map(|(p, _)| p)).map(|p| (p.pid, p.busy)).collect(), Instant::now());
         self.follow_disk();
     }
 
@@ -331,6 +382,21 @@ impl Model {
         if let Err(e) = pms::wads::remove(name) {
             *self.wad_job.lock().unwrap() = WadJob::Failed(e);
         }
+    }
+
+    /// Switches the console off and deletes what it's kept compiled: it compiles it again the next time it comes on.
+    pub fn clear_shaders(&mut self) {
+        let sets: Vec<String> = self.config.meters.iter().filter(|m| m.style == pms::config::Style::Screen && m.set.as_deref() != Some("twatch")).map(|m| m.label.clone()).collect();
+        if pms::tv::switch_console_off(&sets) {
+            // It ends what it's doing as soon as it's told, which is within a second of the press.
+            std::thread::sleep(Duration::from_millis(1500));
+        }
+        let kept = pms::wads::shaders();
+        self.message = match std::fs::remove_dir_all(&kept) {
+            Ok(()) => ("Compiled shaders cleared".to_string(), false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ("There were no compiled shaders to clear".to_string(), false),
+            Err(e) => (format!("We couldn't clear {}: {e}", pms::shown(&kept)), true),
+        };
     }
 
     /// Puts `name` in the console: the daemon notices.

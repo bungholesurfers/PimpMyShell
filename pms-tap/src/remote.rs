@@ -43,7 +43,7 @@ const MISSES: u32 = 3;
 const NUKE: &str = "NUKE THIS TV";
 const SURE: &str = "SURE?";
 /// What the display says while it's asking, if this is the last set and the console's running: it goes with it.
-const GAME_GOES: &str = "POOM WILL QUIT!";
+const GAME_GOES: &str = "PIMPBOX QUITS!";
 const STAYS_SURE: Duration = Duration::from_secs(3);
 
 /// Which time a remote has been opened: an older watch stops.
@@ -60,7 +60,7 @@ static OPENED: AtomicU32 = AtomicU32::new(0);
 /// How often an open remote looks at its set again: shuffling changes the channel, and the console comes and goes.
 const REFRESH: Duration = Duration::from_millis(500);
 /// How wide the console's own tooltip is, and the gap between it and the remote.
-const CONSOLE_WIDTH: f64 = 176.0;
+const CONSOLE_WIDTH: f64 = crate::pimpbox::WIDTH;
 const CONSOLE_GAP: f64 = 4.0;
 
 struct Remote {
@@ -75,16 +75,17 @@ struct Remote {
     /// What the nuke key says.
     nuke: TextBlock,
     /// The console's own tooltip, beside the remote while the set's on its channel, and what it says.
-    console: Popup,
-    console_game: TextBlock,
-    console_state: TextBlock,
-    console_help: TextBlock,
+    /// The console's own tooltip, beside it.
+    console: crate::pimpbox::Tooltip,
+    /// It's the one beside the console's display: where the console's tooltip goes, the other side of that.
+    dock: Option<(f64, f64)>,
     /// Where the remote went, for the console's tooltip to go beside it: left, top, and the room there is across.
     placed: Cell<(f64, f64, f64)>,
     /// Each machine's power light.
     lights: Vec<Border>,
     /// The channel list's rows, and each one's words.
-    channels: Vec<(u32, Border, TextBlock)>,
+    /// Each channel in the list: its number, its line, its words, and the mark that its picture pops out, if it does.
+    channels: Vec<(u32, Border, TextBlock, Option<TextBlock>)>,
     source: String,
 }
 
@@ -97,10 +98,12 @@ struct Machine {
     channel: Button,
 }
 
-const MACHINES: [Machine; 1] = [Machine { name: "POOM", power: Button::GamePower, watch: "GOTO CH 6", channel: Button::GameChannel }];
+const MACHINES: [Machine; 1] = [Machine { name: "PIMPBOX", power: Button::GamePower, watch: "GOTO CH 6", channel: Button::GameChannel }];
 
 thread_local! {
     static REMOTE: RefCell<Option<Remote>> = const { RefCell::new(None) };
+    /// Another, beside the console's display while that's out on the desktop.
+    static DOCKED: RefCell<Option<Remote>> = const { RefCell::new(None) };
     static ON_TILE: Cell<bool> = const { Cell::new(false) };
     static ON_REMOTE: Cell<bool> = const { Cell::new(false) };
     /// The set the pointer's resting on, while it waits to open its remote: where it is, and which.
@@ -278,8 +281,10 @@ fn calm_down() {
     refresh();
 }
 
-fn pressed(button: Button) {
-    if let Some(source) = REMOTE.with_borrow(|r| r.as_ref().map(|r| r.source.clone())) {
+pub(crate) fn pressed(button: Button) {
+    // The remote that's up, over the taskbar; or the one beside the console's display.
+    let up = REMOTE.with_borrow(|r| r.as_ref().filter(|r| r.popup.IsOpen().unwrap_or(false)).map(|r| r.source.clone()));
+    if let Some(source) = up.or_else(|| DOCKED.with_borrow(|d| d.as_ref().map(|d| d.source.clone()))) {
         crate::screen::press(&source, button);
     }
     // What the press did comes back in the screen's status.
@@ -323,7 +328,7 @@ fn title_brush() -> R<LinearGradientBrush> {
     Ok(gradient)
 }
 
-fn build(root: &XamlRoot) -> R<Remote> {
+fn build(root: &XamlRoot, docked: bool) -> R<Remote> {
     let title = label("TV", 10.0, LIGHT)?;
     title.SetFontWeight(windows::UI::Text::FontWeight { Weight: 700 }).map_err(w)?;
     let bar = Border::new().map_err(w)?;
@@ -381,7 +386,22 @@ fn build(root: &XamlRoot) -> R<Remote> {
         let line = Border::new().map_err(w)?;
         line.SetBackground(&brush(LIST)?).map_err(w)?;
         line.SetPadding(thickness(4.0, 1.0, 4.0, 1.0)).map_err(w)?;
-        line.SetChild(&ui(&words)?).map_err(w)?;
+        // A channel whose picture a click pops out into a window says so: the sign for that, at the end of its line.
+        let pops = if pms_screen::POPS_OUT.contains(&number) {
+            words.SetText(&HSTRING::from(format!("{number:<5}{name:<11}"))).map_err(w)?;
+            let sign = label("\u{E8A7}", 10.0, DARK)?;
+            sign.SetFontFamily(&FontFamily::CreateInstanceWithName(&HSTRING::from("Segoe Fluent Icons, Segoe MDL2 Assets")).map_err(w)?).map_err(w)?;
+            sign.SetVerticalAlignment(pms_xaml::VerticalAlignment::Center).map_err(w)?;
+            let both = StackPanel::new().map_err(w)?;
+            both.SetOrientation(Orientation::Horizontal).map_err(w)?;
+            both.Children().map_err(w)?.Append(&ui(&words)?).map_err(w)?;
+            both.Children().map_err(w)?.Append(&ui(&sign)?).map_err(w)?;
+            line.SetChild(&ui(&both)?).map_err(w)?;
+            Some(sign)
+        } else {
+            line.SetChild(&ui(&words)?).map_err(w)?;
+            None
+        };
         ui(&line)?
             .Tapped(&TappedEventHandler::new(move |_, _| {
                 tuned(number);
@@ -389,7 +409,7 @@ fn build(root: &XamlRoot) -> R<Remote> {
             }))
             .map_err(w)?;
         list.Children().map_err(w)?.Append(&ui(&line)?).map_err(w)?;
-        channels.push((number, line, words));
+        channels.push((number, line, words, pops));
     }
     let listed = sunken(&ui(&list)?)?;
     listed.SetMargin(thickness(0.0, 1.0, 3.0, 3.0)).map_err(w)?;
@@ -430,7 +450,7 @@ fn build(root: &XamlRoot) -> R<Remote> {
     popup.SetChild(&el).map_err(w)?;
     popup.SetShouldConstrainToRootBounds(false).map_err(w)?;
     popup.SetXamlRoot(root).map_err(w)?;
-    let (console, console_game, console_state, console_help) = build_console(root)?;
+    let console = crate::pimpbox::build(root, docked)?;
     Ok(Remote {
         popup,
         title,
@@ -441,9 +461,7 @@ fn build(root: &XamlRoot) -> R<Remote> {
         every,
         nuke,
         console,
-        console_game,
-        console_state,
-        console_help,
+        dock: None,
         placed: Cell::new((0.0, 0.0, 0.0)),
         lights,
         channels,
@@ -451,56 +469,10 @@ fn build(root: &XamlRoot) -> R<Remote> {
     })
 }
 
-/// The console's own tooltip, in the same plastic: what's in it, whether it's on, and how to play.
-fn build_console(root: &XamlRoot) -> R<(Popup, TextBlock, TextBlock, TextBlock)> {
-    let title = label("SPACE PIMPIN'", 10.0, LIGHT)?;
-    title.SetFontWeight(windows::UI::Text::FontWeight { Weight: 700 }).map_err(w)?;
-    let bar = Border::new().map_err(w)?;
-    bar.SetBackground(&title_brush()?.cast::<pms_xaml::Brush>().map_err(w)?).map_err(w)?;
-    bar.SetPadding(thickness(4.0, 2.0, 4.0, 2.0)).map_err(w)?;
-    bar.SetMargin(thickness(2.0, 2.0, 2.0, 0.0)).map_err(w)?;
-    bar.SetChild(&ui(&title)?).map_err(w)?;
-
-    let game = label("", 11.0, DISPLAY_TEXT)?;
-    game.SetFontFamily(&FontFamily::CreateInstanceWithName(&HSTRING::from("Cascadia Mono, Consolas")).map_err(w)?).map_err(w)?;
-    game.SetTextWrapping(pms_xaml::TextWrapping::Wrap).map_err(w)?;
-    let glass = Border::new().map_err(w)?;
-    glass.SetBackground(&brush(DISPLAY)?).map_err(w)?;
-    glass.SetPadding(thickness(5.0, 2.0, 5.0, 2.0)).map_err(w)?;
-    glass.SetChild(&ui(&game)?).map_err(w)?;
-    let screen = sunken(&ui(&glass)?)?;
-    screen.SetMargin(thickness(0.0, 0.0, 3.0, 4.0)).map_err(w)?;
-
-    let state = label("", 10.0, DARK)?;
-    state.SetTextWrapping(pms_xaml::TextWrapping::Wrap).map_err(w)?;
-    state.SetMargin(thickness(1.0, 0.0, 3.0, 4.0)).map_err(w)?;
-    let help = label("", 10.0, DARK)?;
-    help.SetTextWrapping(pms_xaml::TextWrapping::Wrap).map_err(w)?;
-    help.SetMargin(thickness(1.0, 0.0, 3.0, 2.0)).map_err(w)?;
-
-    let body = StackPanel::new().map_err(w)?;
-    body.SetMargin(thickness(5.0, 5.0, 2.0, 4.0)).map_err(w)?;
-    for part in [ui(&screen)?, ui(&state)?, ui(&help)?] {
-        body.Children().map_err(w)?.Append(&part).map_err(w)?;
-    }
-    let window = StackPanel::new().map_err(w)?;
-    window.Children().map_err(w)?.Append(&ui(&bar)?).map_err(w)?;
-    window.Children().map_err(w)?.Append(&ui(&body)?).map_err(w)?;
-    let (whole, _) = raised(&ui(&window)?)?;
-    whole.SetWidth(CONSOLE_WIDTH).map_err(w)?;
-    let el = ui(&whole)?;
-    follow_pointer(&el)?;
-    let popup = Popup::new().map_err(w)?;
-    popup.SetChild(&el).map_err(w)?;
-    popup.SetShouldConstrainToRootBounds(false).map_err(w)?;
-    popup.SetXamlRoot(root).map_err(w)?;
-    Ok((popup, game, state, help))
-}
-
 /// What the console's tooltip says: the game, how the console is, and what to do. None: it isn't shown, as the set isn't showing
 /// the console. `info` is what the set says about itself.
-fn console_words(s: &Status, info: &str) -> Option<(String, String, String)> {
-    if !s.tv_on || s.channel != pms_screen::GAME_CHANNEL {
+fn console_words(s: &Status, info: &str, always: bool) -> Option<(String, String, String)> {
+    if !always && (!s.tv_on || s.channel != pms_screen::GAME_CHANNEL) {
         return None;
     }
     let field = |name: &str| info.lines().find_map(|l| l.strip_prefix(name).and_then(|v| v.strip_prefix('\t'))).unwrap_or_default().to_string();
@@ -513,34 +485,40 @@ fn console_words(s: &Status, info: &str) -> Option<(String, String, String)> {
     } else if s.game_on {
         "The console is on.".into()
     } else {
-        "The console is off. Switch it on with POOM, on the remote.".into()
+        "The console is off. Switch it on with PIMPBOX, on the remote.".into()
     };
-    let help = if s.game_on && evicted.is_empty() {
-        "Click the picture to play, in a window of its own. Esc: the game's menu. Alt+Tab or a click elsewhere lets go of the mouse."
-    } else {
-        "Once it's on, click the picture to play."
+    let help = match (s.game_on && evicted.is_empty(), always) {
+        (true, false) => "Click the picture to pop it out into a window, and play there. Ctrl+Alt+G lets go of the keys and the mouse.",
+        (false, false) => "Click the picture to pop out its display, which is dark until it's on.",
+        // Beside its display, that's been done.
+        (true, true) => "Ctrl+Alt+G lets go of the keys and the mouse. A click in the picture takes them again.",
+        (false, true) => "",
     };
     Some((game.to_uppercase(), state, help.into()))
 }
 
 /// Shows or hides the console's tooltip, beside the remote.
 fn show_console(r: &Remote, s: &Status, info: &str) -> R<()> {
-    let Some((game, state, help)) = console_words(s, info).filter(|_| r.popup.IsOpen().unwrap_or(false)) else {
-        return r.console.SetIsOpen(false).map_err(w);
+    let Some((game, state, help)) = console_words(s, info, r.dock.is_some()).filter(|_| r.popup.IsOpen().unwrap_or(false)) else {
+        return r.console.popup.SetIsOpen(false).map_err(w);
     };
-    r.console_game.SetText(&HSTRING::from(game)).map_err(w)?;
-    r.console_state.SetText(&HSTRING::from(state)).map_err(w)?;
-    r.console_help.SetText(&HSTRING::from(help)).map_err(w)?;
-    let child = r.console.Child().map_err(w)?.cast::<pms_xaml::FrameworkElement>().map_err(w)?;
+    let video = info.lines().find_map(|l| l.strip_prefix("video\t")).unwrap_or_default();
+    r.console.say(&game, &state, &help, video, s.game_on && s.has_game)?;
+    if let Some((x, y)) = r.dock {
+        r.console.popup.SetHorizontalOffset(x.floor()).map_err(w)?;
+        r.console.popup.SetVerticalOffset(y.floor()).map_err(w)?;
+        return r.console.popup.SetIsOpen(true).map_err(w);
+    }
+    let child = r.console.popup.Child().map_err(w)?.cast::<pms_xaml::FrameworkElement>().map_err(w)?;
     child.Measure(Size { Width: f32::INFINITY, Height: f32::INFINITY }).map_err(w)?;
     let tall = child.DesiredSize().map_err(w)?.Height as f64;
     // Beside the remote, its bottom with the remote's: to the right if there's room, else to the left.
     let (left, bottom, room) = r.placed.get();
     let right = left + WIDTH + CONSOLE_GAP;
     let x = if right + CONSOLE_WIDTH + 4.0 <= room { right } else { (left - CONSOLE_GAP - CONSOLE_WIDTH).max(0.0) };
-    r.console.SetHorizontalOffset(x.floor()).map_err(w)?;
-    r.console.SetVerticalOffset((bottom - tall).floor()).map_err(w)?;
-    r.console.SetIsOpen(true).map_err(w)
+    r.console.popup.SetHorizontalOffset(x.floor()).map_err(w)?;
+    r.console.popup.SetVerticalOffset((bottom - tall).floor()).map_err(w)?;
+    r.console.popup.SetIsOpen(true).map_err(w)
 }
 
 /// Whether the pointer's within one of this process's popup windows that's showing, by where they are: asking what's under the
@@ -620,21 +598,127 @@ fn set_led(led: &Border, on: bool) -> R<()> {
 }
 
 fn refresh() {
-    REMOTE.with_borrow(|r| {
-        let Some(r) = r else { return };
-        let s = crate::screen::status(&r.source).unwrap_or_default();
-        let _ = show_status(r, s);
-    });
+    for remote in [&REMOTE, &DOCKED] {
+        remote.with_borrow(|r| {
+            let Some(r) = r.as_ref().filter(|r| r.popup.IsOpen().unwrap_or(false)) else { return };
+            let s = crate::screen::status(&r.source).unwrap_or_default();
+            let _ = show_status(r, s);
+        });
+    }
+}
+
+/// Where the console's display is on the screen, if it's out on the desktop (left, top, right, bottom), and where the
+/// taskbar's own window starts, all in the screen's pixels; and which window's in front just now (a number that's only for
+/// telling when that changes). Any thread.
+pub(crate) fn display_place() -> Option<[i32; 7]> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible};
+    unsafe {
+        let display = FindWindowW(windows_core::w!("PimpMyShellPimpbox"), windows_core::PCWSTR::null()).ok()?;
+        if !IsWindowVisible(display).as_bool() || IsIconic(display).as_bool() {
+            return None;
+        }
+        let taskbar = FindWindowW(windows_core::w!("Shell_TrayWnd"), windows_core::PCWSTR::null()).ok()?;
+        let (mut at, mut bar) = (RECT::default(), RECT::default());
+        GetWindowRect(display, &mut at).ok()?;
+        GetWindowRect(taskbar, &mut bar).ok()?;
+        Some([at.left, at.top, at.right, at.bottom, bar.left, bar.top, GetForegroundWindow().0 as usize as i32])
+    }
+}
+
+/// Puts the remote and the tooltip that are beside the console's display where the display is among the windows on the
+/// desktop: just over it, and under whatever's over it. They're windows of their own, and made to float over everything;
+/// beside a window that's behind another, that's where they should be too. UI thread.
+fn layer_with_display() {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, FindWindowW, GW_HWNDPREV, GetWindow, GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOP, IsWindowVisible, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+    unsafe {
+        let Ok(display) = FindWindowW(windows_core::w!("PimpMyShellPimpbox"), windows_core::PCWSTR::null()) else { return };
+        let mut at = RECT::default();
+        if GetWindowRect(display, &mut at).is_err() {
+            return;
+        }
+        // Ours that are showing, and right beside it: the two that are docked to it.
+        let mut beside = Vec::new();
+        let mut after = None;
+        while let Ok(window) = FindWindowExW(None, after, windows_core::w!("Xaml_WindowedPopupClass"), windows_core::PCWSTR::null()) {
+            after = Some(window);
+            let (mut process, mut area) = (0, RECT::default());
+            GetWindowThreadProcessId(window, Some(&mut process));
+            if process == GetCurrentProcessId() && IsWindowVisible(window).as_bool() && GetWindowRect(window, &mut area).is_ok() {
+                let touches = (area.right - at.left).abs() < 40 || (area.left - at.right).abs() < 40;
+                if touches && (area.top - at.top).abs() < 40 {
+                    beside.push(window);
+                }
+            }
+        }
+        for window in beside {
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+            let _ = SetWindowPos(window, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+            // Under whatever's just over the display; or on top, if nothing is.
+            let over = GetWindow(display, GW_HWNDPREV).ok().filter(|over| *over != window);
+            let _ = SetWindowPos(window, Some(over.unwrap_or(HWND_TOP)), 0, 0, 0, 0, flags);
+        }
+    }
+}
+
+/// Puts a remote and the console's tooltip beside the console's display, which is at `place` (`display_place`): the remote
+/// to its left, the tooltip to its right, their tops with its top. They're for the set showing `source`. None: the
+/// display's been put away, and so are they.
+pub(crate) fn dock(source: &str, place: Option<[i32; 7]>) {
+    let r = (|| -> R<()> {
+        let Some([left, top, right, _, bar_left, bar_top, _]) = place else {
+            DOCKED.with_borrow(|d| {
+                if let Some(d) = d {
+                    let _ = d.popup.SetIsOpen(false);
+                    let _ = d.console.popup.SetIsOpen(false);
+                }
+            });
+            return Ok(());
+        };
+        let root = crate::meters::root().ok_or("no taskbar to hang it from")?;
+        if DOCKED.with_borrow(Option::is_none) {
+            let built = build(&root, true)?;
+            DOCKED.with_borrow_mut(|d| *d = Some(built));
+        }
+        // The taskbar's window counts in its own units from its own corner: the screen's pixels, scaled, from there.
+        let scale = root.RasterizationScale().map_or(1.0, |s| s.max(0.5));
+        let at = |x: i32, y: i32| (f64::from(x - bar_left) / scale, f64::from(y - bar_top) / scale);
+        DOCKED.with_borrow_mut(|d| -> R<()> {
+            let d = d.as_mut().ok_or("no remote")?;
+            d.source = source.to_string();
+            let child = d.popup.Child().map_err(w)?.cast::<pms_xaml::FrameworkElement>().map_err(w)?;
+            child.Measure(Size { Width: f32::INFINITY, Height: f32::INFINITY }).map_err(w)?;
+            let wide = f64::from(child.DesiredSize().map_err(w)?.Width);
+            let ((x, y), (beyond, _)) = (at(left, top), at(right, top));
+            d.popup.SetHorizontalOffset((x - wide - CONSOLE_GAP).floor()).map_err(w)?;
+            d.popup.SetVerticalOffset(y.floor()).map_err(w)?;
+            d.dock = Some((beyond + CONSOLE_GAP, y));
+            d.popup.SetIsOpen(true).map_err(w)?;
+            show_status(d, crate::screen::status(source).unwrap_or_default())
+        })?;
+        layer_with_display();
+        Ok(())
+    })();
+    if let Err(e) = r {
+        crate::log(format!("remote beside the display: {e}"));
+    }
 }
 
 fn show_status(r: &Remote, s: Status) -> R<()> {
     let info = crate::screen::info(&r.source).unwrap_or_default();
     show_console(r, &s, &info)?;
     let name = pms_screen::CHANNELS.iter().find(|c| c.0 == s.channel).map_or("", |c| c.1);
-    for (number, line, words) in &r.channels {
+    for (number, line, words, pops) in &r.channels {
         let on = *number == s.channel && s.tv_on;
         line.SetBackground(&brush(if on { TITLE } else { LIST })?).map_err(w)?;
         words.SetForeground(&brush(if on { LIGHT } else { DARK })?).map_err(w)?;
+        if let Some(sign) = pops {
+            sign.SetForeground(&brush(if on { LIGHT } else { DARK })?).map_err(w)?;
+        }
     }
     // While the nuke key's asking, what it would do stays up.
     let text = if ARMED.get() && info.lines().any(|l| l == "alone\t1") {
@@ -699,7 +783,7 @@ fn open(root: &XamlRoot, source: &str, left: f64, top: f64, width: f64) {
         }
         crate::remote_modern::close();
         if REMOTE.with_borrow(Option::is_none) {
-            let built = build(root)?;
+            let built = build(root, false)?;
             REMOTE.with_borrow_mut(|r| *r = Some(built));
         }
         REMOTE.with_borrow_mut(|r| -> R<()> {
@@ -760,7 +844,7 @@ fn close_classic() {
     REMOTE.with_borrow(|r| {
         if let Some(r) = r {
             let _ = r.popup.SetIsOpen(false);
-            let _ = r.console.SetIsOpen(false);
+            let _ = r.console.popup.SetIsOpen(false);
         }
     });
 }
@@ -777,8 +861,12 @@ pub(crate) fn close() {
 pub(crate) fn off() {
     close();
     crate::remote_modern::off();
-    if let Some(r) = REMOTE.with_borrow_mut(Option::take) {
-        crate::stage::unbuild_popup(&r.popup);
-        crate::stage::unbuild_popup(&r.console);
+    for remote in [&REMOTE, &DOCKED] {
+        if let Some(r) = remote.with_borrow_mut(Option::take) {
+            let _ = r.popup.SetIsOpen(false);
+            let _ = r.console.popup.SetIsOpen(false);
+            crate::stage::unbuild_popup(&r.popup);
+            crate::stage::unbuild_popup(&r.console.popup);
+        }
     }
 }

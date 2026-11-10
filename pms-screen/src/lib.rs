@@ -26,7 +26,7 @@ const SLOTS: usize = 3;
 const SLOT_BYTES: usize = (MAX_SIDE * MAX_SIDE * 4) as usize;
 const PIXELS_AT: usize = 4096;
 const BYTES: usize = PIXELS_AT + SLOTS * SLOT_BYTES;
-const MAGIC: u32 = u32::from_le_bytes(*b"PMS4");
+const MAGIC: u32 = u32::from_le_bytes(*b"PMS6");
 /// As much as a screen can say about itself, in the room before the pixels.
 const INFO_BYTES: usize = 3072;
 
@@ -46,7 +46,7 @@ struct Header {
     /// Another that may need to, the game behind a TV.
     also: AtomicU32,
     /// How many times each button (`Button`) has been pressed.
-    presses: [AtomicU32; 24],
+    presses: [AtomicU32; 32],
     /// What's on, as `Status` packs it, for whatever shows the buttons.
     status: AtomicU32,
     /// When a reader last looked, in milliseconds since 1970: a game with nobody watching can rest.
@@ -93,13 +93,26 @@ pub enum Button {
     VolumeDown,
     /// Another channel for the favorites: the settings, where they're kept.
     AddFavorite,
+    /// The console's video mode: how big a picture it puts out.
+    Video480,
+    Video720,
+    /// The console, switched on or off: said to the console's own screen, by whatever looks after it.
+    ConsoleOn,
+    ConsoleOff,
+    /// Another game in the console: the next of those there are, or the one before.
+    GameNext,
+    GamePrev,
+    /// Said to the console's own screen: the game it's to play has changed, and its screen's `info` says to which.
+    ConsoleGame,
 }
 
 /// The channels there are, and what a remote calls them.
-pub const CHANNELS: [(u32, &str); 6] = [(2, "TEST CARD"), (3, "CRAB"), (4, "STATIC"), (5, "PIMPCAST"), (6, "POOM"), (1295, "MIDNIGHT")];
+pub const CHANNELS: [(u32, &str); 6] = [(2, "TEST CARD"), (3, "CRAB"), (4, "STATIC"), (5, "PIMPCAST"), (6, "PIMPBOX"), (1295, "MIDNIGHT")];
 pub const GAME_CHANNEL: u32 = 6;
+/// The channels whose picture a click pops out into a window of its own, on the desktop.
+pub const POPS_OUT: [u32; 1] = [GAME_CHANNEL];
 
-pub const BUTTONS: [Button; 20] = [
+pub const BUTTONS: [Button; 27] = [
     Button::ChannelUp,
     Button::ChannelDown,
     Button::Shuffle,
@@ -120,6 +133,13 @@ pub const BUTTONS: [Button; 20] = [
     Button::VolumeUp,
     Button::VolumeDown,
     Button::AddFavorite,
+    Button::Video480,
+    Button::Video720,
+    Button::ConsoleOn,
+    Button::ConsoleOff,
+    Button::GameNext,
+    Button::GamePrev,
+    Button::ConsoleGame,
 ];
 
 /// For what draws a screen, first thing: Windows keeps the pointer busy for seconds after a program starts, until it asks for its
@@ -159,17 +179,19 @@ pub struct Status {
     pub note: bool,
     /// Shuffling TVs each go a little late, instead of all together.
     pub jitter: bool,
+    /// What it's showing is a wide picture, 16:9: a set that can be is that shape while it does.
+    pub wide: bool,
 }
 
 impl Status {
     fn pack(self) -> u32 {
-        let flags = [self.tv_on, self.shuffle, self.has_game, self.game_on, self.collapsed, self.modern, self.muted, self.only, self.note, self.jitter];
-        flags.iter().enumerate().fold(self.channel << 10, |v, (i, on)| v | u32::from(*on) << i)
+        let flags = [self.tv_on, self.shuffle, self.has_game, self.game_on, self.collapsed, self.modern, self.muted, self.only, self.note, self.jitter, self.wide];
+        flags.iter().enumerate().fold(self.channel << 11, |v, (i, on)| v | u32::from(*on) << i)
     }
 
     fn unpack(v: u32) -> Status {
         let on = |bit: u32| v & 1 << bit != 0;
-        Status { channel: v >> 10, tv_on: on(0), shuffle: on(1), has_game: on(2), game_on: on(3), collapsed: on(4), modern: on(5), muted: on(6), only: on(7), note: on(8), jitter: on(9) }
+        Status { channel: v >> 11, tv_on: on(0), shuffle: on(1), has_game: on(2), game_on: on(3), collapsed: on(4), modern: on(5), muted: on(6), only: on(7), note: on(8), jitter: on(9), wide: on(10) }
     }
 }
 
@@ -419,7 +441,7 @@ mod tests {
         reader.press(Button::Shuffle);
         assert_eq!(writer.presses(Button::Shuffle), 1);
         assert_eq!(writer.presses(Button::ChannelUp), 0);
-        let status = Status { channel: 1295, tv_on: true, shuffle: true, has_game: false, game_on: true, collapsed: false, modern: true, muted: true, only: true, note: true, jitter: true };
+        let status = Status { channel: 1295, tv_on: true, shuffle: true, has_game: false, game_on: true, collapsed: false, modern: true, muted: true, only: true, note: true, jitter: true, wide: true };
         writer.set_status(status);
         assert_eq!(reader.status(), status);
         assert_eq!(reader.info(), "");

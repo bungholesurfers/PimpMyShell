@@ -1,8 +1,8 @@
 # Build output (cargo, cargo xtask installer).
 /target
-/pms-poom/target
+/pms-pimpbox/target
 
-# Raw PGO training output; only the merged pgo/pms.profdata and pms-poom/pgo/poom.profdata are kept.
+# Raw PGO training output; only the merged pgo/pms.profdata and pms-pimpbox/pgo/pimpbox.profdata are kept.
 *.profraw
 
 # What PimpMyShell and its tools leave beside things: logs, the settings window's first backup of a hand-written config.

@@ -145,8 +145,12 @@ pub(crate) fn stop() {
     TARGETS.with_borrow_mut(HashMap::clear);
 }
 
+/// One set is looking after what goes beside the console's display.
+static DOCKING: AtomicBool = AtomicBool::new(false);
+
 fn pump(f: &Arc<Feed>) {
     let running = || !f.stop.load(Ordering::Relaxed);
+    let mut looks_after = false;
     while running() {
         let Ok(screen) = Screen::open(&f.source) else {
             std::thread::sleep(Duration::from_millis(500));
@@ -157,7 +161,10 @@ fn pump(f: &Arc<Feed>) {
             *open = Some(screen.clone());
         }
         crate::log(format!("screen `{}`: showing", f.source));
-        let mut put_away = None;
+        let (mut put_away, mut widened) = (None, None);
+        // The console's display, out on the desktop, has a remote and the console's tooltip beside it: one set looks after
+        // that, the first there is of the kind with such a remote.
+        let mut beside: Option<(Option<[i32; 7]>, u32, String)> = None;
         // A picture made before this opened is still empty, and a channel that's holding still sends nothing new: what's there
         // goes up as soon as it can, whether or not anything new comes.
         let mut first = true;
@@ -170,11 +177,33 @@ fn pump(f: &Arc<Feed>) {
                 let source = f.source.clone();
                 crate::meters::on_ui(move || crate::meters::screen_small(&source, small));
             }
+            let wide = screen.status().wide;
+            if widened != Some(wide) {
+                widened = Some(wide);
+                let source = f.source.clone();
+                crate::meters::on_ui(move || crate::meters::screen_wide(&source, wide));
+            }
+            let status = screen.status();
+            if !status.modern && !status.note && (looks_after || !DOCKING.swap(true, Ordering::AcqRel)) {
+                looks_after = true;
+                let now = (crate::remote::display_place(), screen.presses(pms_screen::Button::GamePower).wrapping_add(u32::from(status.game_on) << 31 | status.channel << 8), screen.info());
+                if beside.as_ref() != Some(&now) && (now.0.is_some() || beside.as_ref().is_some_and(|b| b.0.is_some())) {
+                    let (source, place) = (f.source.clone(), now.0);
+                    crate::meters::on_ui(move || crate::remote::dock(&source, place));
+                }
+                // Once more a moment after it's first there, when the tooltip can be seen: that's when it takes its colors.
+                let settled = beside.as_ref().is_some_and(|b| b.0.is_some()) || now.0.is_none();
+                beside = Some(if settled { now } else { (now.0, u32::MAX, String::new()) });
+            }
             if fresh && !f.asked.swap(true, Ordering::AcqRel) {
                 let feed = f.clone();
                 crate::meters::on_ui(move || paint(&feed));
             }
         }
+    }
+    if looks_after {
+        DOCKING.store(false, Ordering::Release);
+        crate::meters::on_ui(|| crate::remote::dock("", None));
     }
     if let Ok(mut open) = f.open.lock() {
         *open = None;

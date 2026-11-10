@@ -70,10 +70,10 @@ pub fn favorite_live(handles: &[String]) -> Notice {
 pub fn console_spared() -> Notice {
     Notice {
         key: "console spared",
-        title: "POOM is still running, though memory is low".into(),
+        title: "The PIMPBOX is still running, though memory is low".into(),
         body: "You've been playing, so we didn't close your game.".into(),
         heading: "We left your game running".into(),
-        detail: "Your PC is low on memory, and POOM would usually close to free some. You've played this game, and closing it \
+        detail: "Your PC is low on memory, and the PIMPBOX would usually close to free some. You've played this game, and closing it \
                  would lose anything you haven't saved, so it keeps running until it's restarted.\n\n\
                  To free that memory yourself, save your game and switch the console off on the TV's remote."
             .into(),

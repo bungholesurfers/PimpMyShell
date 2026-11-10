@@ -80,7 +80,7 @@ fn page_tagged(tag: &str) -> Option<Page> {
         "counters" => Some(Page::Counters),
         "look" => Some(Page::Backdrop),
         "tv" => Some(Page::Tv),
-        "poom" => Some(Page::Poom),
+        "pimpbox" | "poom" => Some(Page::Pimpbox),
         "twatch" => Some(Page::Twatch),
         "hotmic" => Some(Page::Hotmic),
         "toasts" => Some(Page::Toasts),
@@ -172,7 +172,7 @@ enum Page {
     Counters,
     Backdrop,
     Tv,
-    Poom,
+    Pimpbox,
     Twatch,
     Hotmic,
     Toasts,
@@ -188,7 +188,7 @@ const PAGES: [(Page, &str, &str); 13] = [
     (Page::Counters, "Performance counters", "What your meters read"),
     (Page::Backdrop, "Taskbar look", "Background and glows"),
     (Page::Tv, "TV", "The little screen in your taskbar"),
-    (Page::Poom, "POOM", "The console on channel 6, and its games"),
+    (Page::Pimpbox, "PIMPBOX", "The console on channel 6, and its games"),
     (Page::Twatch, "Twatch TV", "Your favorite channels, live"),
     (Page::Hotmic, "Hot Mic", "Know when an app uses your microphone"),
     (Page::Toasts, "Notification Toast", "Notifications in the taskbar"),
@@ -378,7 +378,7 @@ impl eframe::App for Gui {
                     self.confirm = ask.or(self.confirm);
                 }
                 Page::Tv => tv(ui, &mut self.m),
-                Page::Poom => poom(ui, &mut self.m),
+                Page::Pimpbox => pimpbox(ui, &mut self.m),
                 Page::Twatch => {
                     twatch(ui, &mut self.m);
                     let mut ask = None;
@@ -1534,7 +1534,7 @@ fn tv(ui: &mut egui::Ui, m: &mut model::Model) {
         }
     });
     if sets == 1 && pms::tv::console_running() {
-        ui.label("Removing your last TV quits POOM, and anything you haven't saved is lost.");
+        ui.label("Removing your last TV quits the PIMPBOX, and anything you haven't saved is lost.");
     }
     ui.checkbox(&mut m.config.tv_intro, copy::setting("tv_intro").0).on_hover_text(copy::setting("tv_intro").1);
     if m.config.tv_intro {
@@ -1618,10 +1618,10 @@ fn missing_part(ui: &mut egui::Ui, file: &'static str) {
     }
 }
 
-fn poom(ui: &mut egui::Ui, m: &mut model::Model) {
+fn pimpbox(ui: &mut egui::Ui, m: &mut model::Model) {
     use pms::wads::Wad;
-    ui.label(copy::POOM.1);
-    missing_part(ui, pms::parts::POOM);
+    ui.label(copy::PIMPBOX.1);
+    missing_part(ui, pms::parts::PIMPBOX);
     ui.add_space(8.0);
     let wads = pms::wads::list();
     let playing = pms::wads::chosen().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
@@ -1675,8 +1675,12 @@ fn poom(ui: &mut egui::Ui, m: &mut model::Model) {
     }
     ui.add_space(8.0);
     ui.checkbox(&mut m.config.console_autostart, copy::setting("console_autostart").0).on_hover_text(copy::setting("console_autostart").1);
+    ui.horizontal(|ui| {
+        ui.label(copy::setting("console_video").0).on_hover_text(copy::setting("console_video").1);
+        choice(ui, "console_video", &mut m.config.console_video, copy::CONSOLE_VIDEO);
+    });
     ui.add_space(8.0);
-    ui.small(copy::POOM_HELP);
+    ui.small(copy::PIMPBOX_HELP);
     ui.small(copy::TV_NOTICE);
 }
 

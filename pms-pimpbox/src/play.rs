@@ -1,41 +1,43 @@
-//! The window you play in, opened by a click on the taskbar's screen. Input is simply this window's: there are no hooks, and
-//! raw mouse input only comes while it has the focus. So nothing can outlive it: Alt+Tab, a click elsewhere or closing it
-//! lets go of the pointer, because losing the focus does. Closing it pauses a game in progress, for the taskbar to keep.
+//! The console's window: its display, on your desktop, opened by a click on the taskbar's screen. It shows whatever the
+//! console's putting out, the console coming on, a game, or nothing much, and it's where a game is played from. It stays
+//! when a game ends. Input is simply this window's: there are no hooks, and raw mouse input only comes while it has the
+//! focus. So nothing can outlive it: Alt+Tab, a click elsewhere or closing it lets go of the pointer, because losing the
+//! focus does. Closing it only puts it away (and pauses a game in progress), for the taskbar to keep.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::ffi::c_void;
 
-use room::doom::d_event::{D_PostEvent, event_t};
-use room::doom::doomgeneric::{DOOMGENERIC_RESX, DOOMGENERIC_RESY};
 use room::doom::doomkeys::*;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, ClientToScreen, COLORONCOLOR, DIB_RGB_COLORS, GetDC, GetStockObject, HBRUSH, ReleaseDC, SRCCOPY, SetStretchBltMode, StretchDIBits,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, ClientToScreen, COLORONCOLOR, DIB_RGB_COLORS, HALFTONE, GetDC, GetStockObject, HBRUSH, ReleaseDC, SRCCOPY, SetStretchBltMode, StretchDIBits,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, SetProcessDpiAwarenessContext};
+use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Input::{GetRawInputData, HRAWINPUT, MOUSE_MOVE_RELATIVE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE, RegisterRawInputDevices, RAWINPUTDEVICE_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_core::w;
 
-const EV_MOUSE: i32 = 2;
-/// How wide the picture is, in DIPs: it's 4:3, as Doom was on a screen of its day.
-const WIDTH: i32 = 960;
-const HEIGHT: i32 = 720;
+use crate::link::Said;
+
+const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
 
 thread_local! {
     static WINDOW: Cell<isize> = const { Cell::new(0) };
     static GRABBED: Cell<bool> = const { Cell::new(false) };
-    static KEYS: RefCell<VecDeque<(bool, u8)>> = const { RefCell::new(VecDeque::new()) };
+    /// There's a game showing, which the mouse plays: only then is the pointer the window's to keep.
+    static PLAYING: Cell<bool> = const { Cell::new(false) };
+    /// Let go of with the keys for that (Ctrl+Alt+G): it isn't taken again until there's a click in the window.
+    static LET_GO: Cell<bool> = const { Cell::new(false) };
+    /// What's been done at the window since it was last asked: for whatever's playing.
+    static SAID: RefCell<Vec<Said>> = const { RefCell::new(Vec::new()) };
     /// Keys held now: let go of when the focus goes, or they'd stay held.
     static HELD: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// Movement since the last tic, and the buttons down.
+    /// Movement since it was last said, and the buttons down, and the buttons last said.
     static MOUSE: Cell<(i32, i32)> = const { Cell::new((0, 0)) };
+    static BUTTONS: Cell<i32> = const { Cell::new(0) };
     static SENT_BUTTONS: Cell<i32> = const { Cell::new(0) };
-    /// A game was paused by closing the window: opening it again carries on.
-    static WE_PAUSED: Cell<bool> = const { Cell::new(false) };
 }
 
 fn hwnd() -> Option<HWND> {
@@ -43,24 +45,8 @@ fn hwnd() -> Option<HWND> {
     (h != 0).then_some(HWND(h as *mut c_void))
 }
 
-fn in_game() -> bool {
-    unsafe { room::doom::g_game::usergame != 0 }
-}
-
-fn paused() -> bool {
-    unsafe { room::doom::g_game::paused != 0 }
-}
-
-fn tap(key: u8) {
-    KEYS.with_borrow_mut(|k| {
-        k.push_back((true, key));
-        k.push_back((false, key));
-    });
-}
-
-/// The next key, for the engine.
-pub fn next_key() -> Option<(bool, u8)> {
-    KEYS.with_borrow_mut(VecDeque::pop_front)
+fn say(said: Said) {
+    SAID.with_borrow_mut(|s| s.push(said));
 }
 
 pub fn is_open() -> bool {
@@ -106,14 +92,16 @@ fn doom_key(vk: u16) -> Option<u8> {
 }
 
 fn grab(h: HWND) {
-    if GRABBED.replace(true) {
+    if !PLAYING.get() || LET_GO.get() || GRABBED.replace(true) {
         return;
     }
+    title(h, true);
     clip(h);
     unsafe { ShowCursor(false) };
 }
 
-/// Keeps the pointer in the window. Windows lets go of a clip whenever the foreground changes, so this is said again each tic.
+/// Keeps the pointer in the window. Windows lets go of a clip whenever the foreground changes, so this is said again each time
+/// the window's messages are taken.
 fn clip(h: HWND) {
     unsafe {
         let mut area = RECT::default();
@@ -125,16 +113,25 @@ fn clip(h: HWND) {
     }
 }
 
+/// What the window's called: with how to get the keys and the mouse back, while it has them.
+fn title(h: HWND, held: bool) {
+    let _ = unsafe { SetWindowTextW(h, if held { w!("PIMPBOX - Ctrl+Alt+G lets go of the keys and the mouse") } else { w!("PIMPBOX") }) };
+}
+
 fn release() {
     if !GRABBED.replace(false) {
         return;
+    }
+    if let Some(h) = hwnd() {
+        title(h, false);
     }
     unsafe {
         let _ = ClipCursor(None);
         ShowCursor(true);
     }
-    let held: Vec<u8> = HELD.with_borrow_mut(std::mem::take);
-    KEYS.with_borrow_mut(|k| k.extend(held.into_iter().map(|key| (false, key))));
+    for key in HELD.with_borrow_mut(std::mem::take) {
+        say(Said::Key { down: false, key });
+    }
     MOUSE.set((0, 0));
 }
 
@@ -163,17 +160,22 @@ fn raw_mouse(lparam: LPARAM) {
     }
 }
 
-thread_local! {
-    static BUTTONS: Cell<i32> = const { Cell::new(0) };
-}
-
 unsafe extern "system" fn proc(h: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
             let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
             let repeat = down && (lparam.0 >> 30) & 1 != 0;
+            // Ctrl+Alt+G: the keys and the mouse are yours again, until you click in the window.
+            let held = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+            if down && wparam.0 == 0x47 && held(VK_CONTROL) && held(VK_MENU) {
+                if GRABBED.get() {
+                    LET_GO.set(true);
+                    release();
+                }
+                return LRESULT(0);
+            }
             if !repeat && let Some(key) = doom_key(wparam.0 as u16) {
-                KEYS.with_borrow_mut(|k| k.push_back((down, key)));
+                say(Said::Key { down, key });
                 HELD.with_borrow_mut(|held| {
                     held.retain(|k| *k != key);
                     if down {
@@ -196,9 +198,16 @@ unsafe extern "system" fn proc(h: HWND, message: u32, wparam: WPARAM, lparam: LP
         WM_ACTIVATE => {
             if wparam.0 & 0xFFFF == 0 {
                 release();
+                LET_GO.set(false);
             } else {
                 grab(h);
             }
+            LRESULT(0)
+        }
+        // A click in the picture, and it has them again.
+        WM_LBUTTONDOWN => {
+            LET_GO.set(false);
+            grab(h);
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -206,6 +215,39 @@ unsafe extern "system" fn proc(h: HWND, message: u32, wparam: WPARAM, lparam: LP
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(h, message, wparam, lparam) },
+    }
+}
+
+/// How big to show a picture `across` by `down` where there's `free` room: a whole number of times its size, as many as
+/// fit; or, where it doesn't fit even once, as much of that as does, the same shape.
+fn fit((across, down): (i32, i32), free: (i32, i32)) -> (i32, i32) {
+    let times = (free.0 / across).min(free.1 / down);
+    if times >= 1 {
+        return (across * times, down * times);
+    }
+    let wide = free.0.min(free.1 * across / down).max(1);
+    (wide, (wide * down / across).max(1))
+}
+
+/// Where the window goes, and how big it is, frame and all, for the console's picture as it is now: each of the picture's
+/// pixels a whole number of the screen's across and down, as many as there's room for on the screen, in its own pixels, so
+/// that it's as big a window on a dense screen as on any other; in the middle of the screen. (A picture too big for the
+/// screen even one to one is made to fit, and isn't as sharp.)
+fn place() -> (i32, i32, i32, i32) {
+    unsafe {
+        let (across, down) = crate::video::mode();
+        let mut room = RECT::default();
+        if SystemParametersInfoW(SPI_GETWORKAREA, 0, Some((&raw mut room).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_err() {
+            room = RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) };
+        }
+        let mut edges = RECT::default();
+        let _ = AdjustWindowRect(&mut edges, STYLE, false);
+        let (free_w, free_h) = (room.right - room.left - (edges.right - edges.left), room.bottom - room.top - (edges.bottom - edges.top));
+        let (width, height) = fit((across as i32, down as i32), (free_w, free_h));
+        let mut frame = RECT { left: 0, top: 0, right: width, bottom: height };
+        let _ = AdjustWindowRect(&mut frame, STYLE, false);
+        let (w, h) = (frame.right - frame.left, frame.bottom - frame.top);
+        (room.left + (room.right - room.left - w) / 2, (room.top + (room.bottom - room.top - h) / 2).max(0), w, h)
     }
 }
 
@@ -217,23 +259,17 @@ fn create() -> Option<HWND> {
         let class = WNDCLASSW {
             lpfnWndProc: Some(proc),
             hInstance: instance,
-            lpszClassName: w!("PimpMyShellPoom"),
+            lpszClassName: w!("PimpMyShellPimpbox"),
             hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
             hCursor: LoadCursorW(None, IDC_ARROW).ok()?,
             ..Default::default()
         };
         RegisterClassW(&class);
-        let scale = GetDpiForSystem() as i32;
-        let (width, height) = (WIDTH * scale / 96, HEIGHT * scale / 96);
-        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let mut frame = RECT { left: 0, top: 0, right: width, bottom: height };
-        let _ = AdjustWindowRect(&mut frame, style, false);
-        let (w, h) = (frame.right - frame.left, frame.bottom - frame.top);
-        let (x, y) = ((GetSystemMetrics(SM_CXSCREEN) - w) / 2, ((GetSystemMetrics(SM_CYSCREEN) - h) / 2).max(0));
-        let window = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("PimpMyShellPoom"), w!("Space Pimpin'"), style, x, y, w, h, None, None, Some(instance), None) {
+        let (x, y, w, h) = place();
+        let window = match CreateWindowExW(WINDOW_EX_STYLE(0), w!("PimpMyShellPimpbox"), w!("PIMPBOX"), STYLE, x, y, w, h, None, None, Some(instance), None) {
             Ok(window) => window,
             Err(e) => {
-                eprintln!("pms-poom: no window: {e}");
+                eprintln!("pms-pimpbox: no window: {e}");
                 return None;
             }
         };
@@ -245,7 +281,21 @@ fn create() -> Option<HWND> {
     }
 }
 
-/// Opens the window, carrying on with a game that closing it paused.
+/// Says whether there's a game showing. With one, the window keeps the pointer while it has the focus, and hides it; with
+/// none (the console coming on, or nothing playing) the pointer's left alone, free to go to the window's close button or
+/// anywhere else.
+pub fn playing(now: bool) {
+    if PLAYING.replace(now) == now {
+        return;
+    }
+    match hwnd() {
+        Some(h) if now && is_open() && unsafe { GetForegroundWindow() } == h => grab(h),
+        _ if !now => release(),
+        _ => {}
+    }
+}
+
+/// Opens the window.
 pub fn open() {
     let Some(h) = hwnd().or_else(create) else { return };
     unsafe {
@@ -253,9 +303,7 @@ pub fn open() {
         let _ = SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         let _ = SetForegroundWindow(h);
     }
-    if WE_PAUSED.replace(false) && paused() {
-        tap(KEY_PAUSE);
-    }
+    say(Said::Opened);
 }
 
 fn close() {
@@ -263,14 +311,24 @@ fn close() {
     if let Some(h) = hwnd() {
         let _ = unsafe { ShowWindow(h, SW_HIDE) };
     }
-    if in_game() && !paused() {
-        tap(KEY_PAUSE);
-        WE_PAUSED.set(true);
+    say(Said::Closed);
+}
+
+/// The console's picture has changed size: so does the window, if there is one, where it is or as near as it fits.
+pub fn fit_mode() {
+    let Some(h) = hwnd() else { return };
+    let (x, y, w, h_) = place();
+    unsafe {
+        let _ = SetWindowPos(h, None, x, y, w, h_, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if GRABBED.get() {
+        clip(h);
     }
 }
 
-/// Takes the window's messages, and hands the engine what the mouse did. Once a tic.
-pub fn pump() {
+/// Takes the window's messages, and gives back what was done at it since the last time: keys, the mouse, its opening and
+/// closing.
+pub fn messages() -> Vec<Said> {
     unsafe {
         let mut message = MSG::default();
         while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
@@ -283,29 +341,30 @@ pub fn pump() {
     {
         clip(h);
     }
-    let (x, _) = MOUSE.replace((0, 0));
+    let (across, _) = MOUSE.replace((0, 0));
     let buttons = BUTTONS.get();
-    if GRABBED.get() && (x != 0 || buttons != SENT_BUTTONS.get()) {
+    if GRABBED.get() && (across != 0 || buttons != SENT_BUTTONS.get()) {
         SENT_BUTTONS.set(buttons);
-        // Turning only: pushing the mouse forward walking you into things isn't what anyone expects now.
-        let event = event_t { type_: EV_MOUSE, data1: buttons, data2: x * 2, data3: 0, data4: 0 };
-        D_PostEvent(&event);
+        say(Said::Mouse { buttons, across });
     }
+    SAID.with_borrow_mut(std::mem::take)
 }
 
-/// Shows the engine's frame, at 4:3 whatever its own proportions.
-pub fn draw(source: &[u32]) {
+/// Shows a frame, `across` by `down` pixels: all of the window.
+pub fn draw(source: &[u32], (across, down): (usize, usize)) {
     let Some(h) = hwnd() else { return };
     unsafe {
         let mut area = RECT::default();
         let _ = GetClientRect(h, &mut area);
         let dc = GetDC(Some(h));
-        SetStretchBltMode(dc, COLORONCOLOR);
+        // Whole pixels, when it's shown a whole number of times its size; smoothed, when it had to be made to fit.
+        let whole = area.right % across as i32 == 0 && area.bottom % down as i32 == 0;
+        SetStretchBltMode(dc, if whole { COLORONCOLOR } else { HALFTONE });
         let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: DOOMGENERIC_RESX as i32,
-                biHeight: -(DOOMGENERIC_RESY as i32),
+                biWidth: across as i32,
+                biHeight: -(down as i32),
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -313,7 +372,7 @@ pub fn draw(source: &[u32]) {
             },
             ..Default::default()
         };
-        StretchDIBits(dc, 0, 0, area.right, area.bottom, 0, 0, DOOMGENERIC_RESX as i32, DOOMGENERIC_RESY as i32, Some(source.as_ptr() as *const c_void), &info, DIB_RGB_COLORS, SRCCOPY);
+        StretchDIBits(dc, 0, 0, area.right, area.bottom, 0, 0, across as i32, down as i32, Some(source.as_ptr() as *const c_void), &info, DIB_RGB_COLORS, SRCCOPY);
         ReleaseDC(Some(h), dc);
     }
 }

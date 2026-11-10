@@ -6,7 +6,7 @@
 //!   3      the crab bouncing around, changing color, as a DVD player's logo does when left alone
 //!   4      static
 //!   5      the PimpCast (pimpcast.rs): IT GON RAIN!
-//!   6      the console: Space Pimpin', or POOM to its friends (pms-poom), plugged in like a console of the day. It's a process
+//!   6      the console: the PIMPBOX (pms-pimpbox), which plays Doom's games with POOM, plugged in like a console of the day. It's a process
 //!          of its own with a screen of its own, and any number of TVs can tune in. Changing the channel doesn't touch it: it
 //!          has a power button of its own. With nobody watching it rests, and carries on when someone tunes back in. The channel
 //!          is always there: asked for with no game to play, it opens the settings' TV page, where the games are. With a game and
@@ -44,7 +44,7 @@ const MIDNIGHT_CHANNEL: u32 = 1295;
 /// The console's channel.
 pub const GAME: u32 = pms_screen::GAME_CHANNEL;
 /// The screen the console draws on.
-pub const CONSOLE: &str = "poom";
+pub const CONSOLE: &str = "pimpbox";
 /// Every channel, in the order up goes through them.
 pub const CHANNELS: [u32; 6] = [2, 3, 4, 5, GAME, MIDNIGHT_CHANNEL];
 /// Where a set starting up begins its run through the channels, and where it ends and stays, unless the settings say otherwise.
@@ -331,8 +331,9 @@ fn console_evicted(short: Option<&'static str>, running: bool, played: bool) -> 
     short.filter(|_| !(running && played))
 }
 
-/// A very sad little set, over whatever's up, dimmed, with why it's been sent away beneath it. Original art: dots, one row a string.
-pub(crate) fn evicted(c: &mut Canvas, why: &str) {
+/// The little set that's shown for one sent away, as dots, one row a string: very sad, unless it's a game it's made way for
+/// (`why` is "GAME ON"), which it's glad to. Then its mouth is the other way up.
+fn sent_away(why: &str) -> [&'static str; 12] {
     const SAD: [&str; 12] = [
         "....#....#....",
         ".....#..#.....",
@@ -347,7 +348,18 @@ pub(crate) fn evicted(c: &mut Canvas, why: &str) {
         "##############",
         "...##....##...",
     ];
+    let mut face = SAD;
+    if why == "GAME ON" {
+        face.swap(7, 8);
+    }
+    face
+}
+
+/// A little set, over whatever's up, dimmed, with why it's been sent away beneath it: sad about it, or not (`sent_away`).
+/// Original art.
+pub(crate) fn evicted(c: &mut Canvas, why: &str) {
     const GRAY: [u8; 3] = [214, 216, 224];
+    let face = sent_away(why);
     const WORDS: [u8; 3] = [170, 174, 186];
     for dot in c.px.as_chunks_mut::<4>().0 {
         for v in &mut dot[..3] {
@@ -355,10 +367,10 @@ pub(crate) fn evicted(c: &mut Canvas, why: &str) {
         }
     }
     let s = (c.h / 36).max(1);
-    let tall = (SAD.len() + 1 + 5 + 1 + 5) * s;
+    let tall = (face.len() + 1 + 5 + 1 + 5) * s;
     let top = c.h.saturating_sub(tall) / 2;
-    let left = c.w.saturating_sub(SAD[0].len() * s) / 2;
-    for (y, row) in SAD.iter().enumerate() {
+    let left = c.w.saturating_sub(face[0].len() * s) / 2;
+    for (y, row) in face.iter().enumerate() {
         for (x, _) in row.bytes().enumerate().filter(|(_, b)| *b == b'#') {
             for dy in 0..s {
                 for dx in 0..s {
@@ -369,7 +381,7 @@ pub(crate) fn evicted(c: &mut Canvas, why: &str) {
     }
     let lines = ["EVICTED:", why];
     for (i, line) in lines.iter().enumerate() {
-        c.text(line, c.w.saturating_sub(text_width(line, s)) / 2, top + (SAD.len() + 1 + i * 6) * s, s, WORDS, false);
+        c.text(line, c.w.saturating_sub(text_width(line, s)) / 2, top + (face.len() + 1 + i * 6) * s, s, WORDS, false);
     }
 }
 
@@ -411,6 +423,20 @@ pub fn add_tv(config: &mut crate::config::Config) {
 }
 
 /// Whether the console is running: taking the last set away would end it.
+/// Switches the console off, if it's on: a press of its power key on the remote of one of the sets called `sets`, which is
+/// how anyone switches it off. True if it was on.
+pub fn switch_console_off(sets: &[String]) -> bool {
+    for set in sets {
+        if let Ok(screen) = Screen::open(set)
+            && screen.status().game_on
+        {
+            screen.press(Button::GamePower);
+            return true;
+        }
+    }
+    false
+}
+
 pub fn console_running() -> bool {
     Screen::open(CONSOLE).is_ok()
 }
@@ -702,7 +728,14 @@ impl Tv {
             | Button::NukeTv
             | Button::VolumeUp
             | Button::VolumeDown
-            | Button::AddFavorite => {}
+            | Button::AddFavorite
+            | Button::Video480
+            | Button::Video720
+            | Button::ConsoleOn
+            | Button::ConsoleOff
+            | Button::GameNext
+            | Button::GamePrev
+            | Button::ConsoleGame => {}
             Button::GameChannel => {
                 self.shuffle = false;
                 self.tune(GAME);
@@ -711,7 +744,8 @@ impl Tv {
     }
 
     /// A click on the picture. Off, it turns it on. Shuffling, it stops that. After that, it's the console, if there's a game
-    /// running. Without one it's the next channel, or, on the console's own with no game at all, the news that there's none.
+    /// running, or the set's on the console's channel with a game in it, on or off: its display pops out. Otherwise it's the
+    /// next channel, or, on the console's own with no game at all, the news that there's none.
     pub fn click(&mut self, game_on: bool) -> Clicked {
         if !self.on {
             self.press(Button::TvPower);
@@ -727,7 +761,7 @@ impl Tv {
             self.press(Button::Shuffle);
             return Clicked::Done;
         }
-        if self.has_game && game_on {
+        if self.has_game && (game_on || CHANNELS[self.channel] == GAME) {
             if CHANNELS[self.channel] != GAME {
                 self.tune(GAME);
             }
@@ -929,7 +963,11 @@ impl Tv {
                         screen.watch();
                         screen.want(w as u32, h as u32);
                         match screen.latest(self.shown, w as u32, h as u32, c.px) {
-                            Some(n) => self.shown = n,
+                            Some(n) => {
+                                self.shown = n;
+                                // What was drawn the last time there was no signal isn't what's there now.
+                                self.drawn = None;
+                            }
                             None if self.shown != 0 && !number_up => return false,
                             None if self.shown == 0 => Self::no_signal(&mut c),
                             None => {}
@@ -985,6 +1023,12 @@ struct Shared {
     played: AtomicBool,
     /// A set landing on the console's channel switches it on.
     autostart: AtomicBool,
+    /// The console's display has been asked for, and the console isn't there to show one yet.
+    pop: AtomicBool,
+    /// The console's video mode, as the settings have it (which of `CONSOLE_VIDEO`); and one a remote's asked for since, and
+    /// one more than which, until the settings have it too.
+    video: AtomicU32,
+    video_asked: AtomicU32,
     /// A set starting up runs through its channels, and from where to where.
     intro: AtomicBool,
     intro_from: std::sync::atomic::AtomicU32,
@@ -1025,7 +1069,7 @@ fn state_file() -> PathBuf {
 fn open_settings(config: &Path) {
     use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
     let Ok(me) = std::env::current_exe() else { return };
-    match std::process::Command::new(me.with_file_name("pms-gui.exe")).arg("--page=poom").arg(config).spawn() {
+    match std::process::Command::new(me.with_file_name("pms-gui.exe")).arg("--page=pimpbox").arg(config).spawn() {
         Ok(gui) => {
             let _ = unsafe { AllowSetForegroundWindow(gui.id()) };
         }
@@ -1099,6 +1143,30 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
                     Button::GamePower if has_game => shared.game_on.store(!game_on, Ordering::Relaxed),
                     Button::GamePower | Button::GameChannel => asked = true,
                     Button::AddTv => shared.add_tv.store(true, Ordering::Relaxed),
+                    // Another game in the console: the next there is, or the one before, round and round. It's kept, as
+                    // the settings' choice of game is.
+                    Button::GameNext | Button::GamePrev => {
+                        let games = crate::wads::list();
+                        let now = crate::wads::chosen().and_then(|w| w.file_name().map(|n| n.to_string_lossy().into_owned()));
+                        if let Some(at) = now.and_then(|now| games.iter().position(|g| g.eq_ignore_ascii_case(&now)))
+                            && games.len() > 1
+                        {
+                            let to = (at + if *button == Button::GameNext { 1 } else { games.len() - 1 }) % games.len();
+                            if let Err(e) = crate::wads::choose(&games[to]) {
+                                crate::log(format!("console: couldn't choose {}: {e}", games[to]));
+                            }
+                        }
+                    }
+                    // The console's told straight away, if it's on: its picture changes size as it is. And the settings are
+                    // told, for the next time it's switched on.
+                    Button::Video480 | Button::Video720 => {
+                        let which = u32::from(*button == Button::Video720);
+                        shared.video.store(which, Ordering::Relaxed);
+                        shared.video_asked.store(which + 1, Ordering::Relaxed);
+                        if let Ok(console) = Screen::open(CONSOLE) {
+                            console.press(*button);
+                        }
+                    }
                     Button::NukeTv => {
                         if let Ok(mut nuked) = shared.nuked.lock() {
                             nuked.push(name.to_string());
@@ -1128,12 +1196,16 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
             clicks = screen.clicks();
             changed = true;
             match tv.click(game_on) {
-                Clicked::Play => {
-                    if let Some(console) = &console {
+                // The console's display pops out, on or off. If it's never been on, it has to be brought out first.
+                Clicked::Play => match shared.console() {
+                    Some(console) => {
                         console.click();
-                        shared.played.store(true, Ordering::Relaxed);
+                        if game_on {
+                            shared.played.store(true, Ordering::Relaxed);
+                        }
                     }
-                }
+                    None => shared.pop.store(true, Ordering::Relaxed),
+                },
                 Clicked::NoGame => asked = true,
                 Clicked::Done => {}
             }
@@ -1164,12 +1236,16 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
         let alone = shared.sets.load(Ordering::Relaxed) == 1 && shared.game_pid.load(Ordering::Relaxed) != 0;
         // And, for the console's own tooltip, what's in it and why it's gone, if it has.
         let title = shared.game_title.lock().map(|t| t.clone()).unwrap_or_default();
-        let info = format!("every\t{}\nalone\t{}\ngame\t{title}\nevicted\t{}\n", shuffle_words(seconds), u8::from(alone), tv.evicted.unwrap_or_default());
+        let video = crate::config::CONSOLE_VIDEO.get(shared.video.load(Ordering::Relaxed) as usize).copied().unwrap_or_default();
+        let info = format!("every\t{}\nalone\t{}\ngame\t{title}\nevicted\t{}\nvideo\t{video}\n", shuffle_words(seconds), u8::from(alone), tv.evicted.unwrap_or_default());
         if said != info {
             screen.set_info(&info);
             said = info;
         }
-        screen.set_status(Status { jitter, ..tv.status(shared.game_on.load(Ordering::Relaxed)) });
+        // On the console, with the console on and putting out a wide picture, the set's wide too.
+        let on = shared.game_on.load(Ordering::Relaxed);
+        let wide = tv.on_console() && on && tv.has_game && shared.video.load(Ordering::Relaxed) != 0;
+        screen.set_status(Status { jitter, wide, ..tv.status(on) });
         screen.set_also(shared.game_pid.load(Ordering::Relaxed));
         // A game's in front: one picture saying so, on a set that's on, and nothing more until it's over. Its remote still works.
         if shared.gaming.load(Ordering::Relaxed) && tv.on && !shared.resting.load(Ordering::Relaxed) {
@@ -1229,6 +1305,8 @@ pub struct Screens {
     /// The console is staying though memory is short, and whether that's yet to be said.
     spared: bool,
     spared_news: bool,
+    /// The console's there, but switched off: dark, with no game going, and its display still there if it was out.
+    game_off: bool,
     /// The last lines the game wrote to its stderr: a panic says why there, and nowhere else.
     game_said: Arc<Mutex<std::collections::VecDeque<String>>>,
     /// The shuffling the settings last said.
@@ -1243,6 +1321,8 @@ pub struct Asked {
     pub nuked: Vec<String>,
     /// How long a beat is now, and whether there's jitter.
     pub shuffling: Option<(u32, bool)>,
+    /// The console's video mode, now.
+    pub video: Option<&'static str>,
 }
 
 impl Screens {
@@ -1272,14 +1352,29 @@ impl Screens {
         self.shared.save();
     }
 
-    fn start_game(&mut self, wad: &Path) {
+    /// Switches the console that's there on or off: a word to it, on its screen. Off, its game ends and it's dark.
+    fn power(&mut self, on: bool) {
+        if self.game_off != on {
+            return;
+        }
+        if let Some(console) = self.shared.console() {
+            console.press(if on { Button::ConsoleOn } else { Button::ConsoleOff });
+            self.game_off = !on;
+            // Off, there's no game to have been played; and the one that starts when it's on again hasn't been.
+            self.shared.played.store(false, Ordering::Relaxed);
+            crate::log(format!("console: switched {}", if on { "on" } else { "off" }));
+        }
+    }
+
+    /// Starts the console, with `wad` in it, putting out a picture in the `video` mode: switched on, or off (for its display).
+    fn start_game(&mut self, wad: &Path, video: &str, on: bool) {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let Ok(me) = std::env::current_exe() else { return };
-        let exe = me.with_file_name(crate::parts::POOM);
+        let exe = me.with_file_name(crate::parts::PIMPBOX);
         let saves = crate::wads::saves();
         if !exe.is_file() {
-            return crate::parts::found_missing(crate::parts::POOM);
+            return crate::parts::found_missing(crate::parts::PIMPBOX);
         }
         if std::fs::create_dir_all(&saves).is_err() {
             return;
@@ -1288,6 +1383,9 @@ impl Screens {
             .arg(wad)
             .arg(CONSOLE)
             .arg(std::process::id().to_string())
+            .arg(video)
+            .arg(if on { "on" } else { "off" })
+            .arg(crate::wads::shaders())
             .current_dir(&saves)
             .stderr(std::process::Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW)
@@ -1298,11 +1396,21 @@ impl Screens {
                 const KEPT: usize = 200;
                 if let Some(err) = child.stderr.take() {
                     let said = self.game_said.clone();
+                    let shared = self.shared.clone();
                     if let Ok(mut s) = said.lock() {
                         s.clear();
                     }
                     std::thread::spawn(move || {
                         for line in std::io::BufRead::lines(std::io::BufReader::new(err)).map_while(Result::ok) {
+                            // What the console says for the record goes on it now: a game falling over in it doesn't end it.
+                            if let Some(said) = line.strip_prefix("pms-pimpbox: ") {
+                                crate::log(format!("console: {said}"));
+                                // A game that's just been started, by the console itself or by its being switched on, is
+                                // one nobody's played yet: it's the one before it that was.
+                                if said == "POOM started" {
+                                    shared.played.store(false, Ordering::Relaxed);
+                                }
+                            }
                             if let Ok(mut s) = said.lock() {
                                 if s.len() == KEPT {
                                     s.pop_front();
@@ -1316,6 +1424,7 @@ impl Screens {
                 self.shared.game_pid.store(child.id(), Ordering::Relaxed);
                 self.shared.played.store(false, Ordering::Relaxed);
                 self.game = Some(child);
+                self.game_off = !on;
                 self.playing = Some(wad.to_path_buf());
             }
             Err(e) => crate::log(format!("console: {e}")),
@@ -1334,7 +1443,8 @@ impl Screens {
         }
         let changed = self.shared.shuffle_changed.swap(false, Ordering::Relaxed);
         let shuffling = changed.then(|| (self.shared.shuffle_seconds.load(Ordering::Relaxed), self.shared.jitter.load(Ordering::Relaxed)));
-        Asked { add_tv: self.shared.add_tv.swap(false, Ordering::Relaxed), nuked, shuffling }
+        let video = self.shared.video_asked.swap(0, Ordering::Relaxed).checked_sub(1).and_then(|which| crate::config::CONSOLE_VIDEO.get(which as usize).copied());
+        Asked { add_tv: self.shared.add_tv.swap(false, Ordering::Relaxed), nuked, shuffling, video }
     }
 
     /// Whether the console has just been spared, since this was last asked.
@@ -1347,6 +1457,7 @@ impl Screens {
     /// `pressure.hidden`: a window covers the taskbar, so nothing on it can be seen. Sets stop drawing, and Twatch TVs do as they do
     /// with the display off.
     pub fn update(&mut self, config: &crate::config::Config, path: &Path, active: bool, battery: bool, dark: bool, pressure: crate::pressure::Pressure) {
+        let video = config.console_video.as_str();
         let hidden = pressure.hidden;
         self.shared.hidden.store(hidden, Ordering::Relaxed);
         // A game's only made way for when the settings say so.
@@ -1375,6 +1486,10 @@ impl Screens {
         }
         self.shared.resting.store(!active, Ordering::Relaxed);
         self.shared.autostart.store(config.console_autostart, Ordering::Relaxed);
+        // Only what the settings say, unless a remote is ahead of them.
+        if self.shared.video_asked.load(Ordering::Relaxed) == 0 {
+            self.shared.video.store(crate::config::CONSOLE_VIDEO.iter().position(|v| *v == config.console_video).unwrap_or(0) as u32, Ordering::Relaxed);
+        }
         self.shared.intro.store(config.tv_intro, Ordering::Relaxed);
         self.shared.intro_from.store(config.tv_intro_from, Ordering::Relaxed);
         self.shared.intro_to.store(config.tv_intro_to, Ordering::Relaxed);
@@ -1436,21 +1551,37 @@ impl Screens {
         }
         let wanted = self.shared.game_on.load(Ordering::Relaxed) && evicted.is_none();
         match wad {
-            // Another game chosen: out with the old cartridge.
-            Some(wad) if wanted && self.game.is_some() && self.playing.as_ref() != Some(&wad) => {
-                self.stop_game();
-                self.start_game(&wad);
+            // Another game chosen: out with the old cartridge. The console's told, and stays as it is, on or off: on, it
+            // comes back on with the new one by itself.
+            Some(wad) if self.game.is_some() && self.playing.as_ref() != Some(&wad) => {
+                if let Some(console) = self.shared.console() {
+                    console.set_info(&format!("wad\t{}\n", wad.display()));
+                    console.press(Button::ConsoleGame);
+                    crate::log(format!("console: now playing {}", wad.file_name().unwrap_or_default().to_string_lossy()));
+                    self.shared.played.store(false, Ordering::Relaxed);
+                    self.playing = Some(wad);
+                }
             }
-            Some(wad) if wanted && self.game.is_none() => self.start_game(&wad),
-            Some(_) if wanted => {}
-            _ if self.game.is_some() => self.stop_game(),
+            Some(wad) if wanted && self.game.is_none() => self.start_game(&wad, video, true),
+            // On, when it's wanted on; off, when it isn't. Off, it's still there, and so is its display if that's out.
+            Some(_) if wanted => self.power(true),
+            // Its display's been asked for, and it's never been on: it's brought out switched off.
+            Some(wad) if self.game.is_none() && self.shared.pop.load(Ordering::Relaxed) => self.start_game(&wad, video, false),
+            Some(_) if self.game.is_some() => self.power(false),
+            None if self.game.is_some() => self.stop_game(),
             _ => {}
         }
         if self.game.is_some()
             && let Ok(mut console) = self.shared.console.lock()
-            && console.is_none()
         {
-            *console = Screen::open(CONSOLE).ok().map(Arc::new);
+            if console.is_none() {
+                *console = Screen::open(CONSOLE).ok().map(Arc::new);
+            }
+            if let Some(console) = console.as_ref()
+                && self.shared.pop.swap(false, Ordering::Relaxed)
+            {
+                console.click();
+            }
         }
         // A set whose meter went stops; a new one starts.
         let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.sets).into_iter().partition(|(name, ..)| names.contains(&name));
@@ -1480,6 +1611,11 @@ mod tests {
         assert_eq!(console_evicted(short, true, true), None, "somebody has: it stays");
         assert_eq!(console_evicted(short, false, true), short, "with no game running, there's nothing to lose");
         assert_eq!(console_evicted(None, true, false), None, "and with plenty of memory, nothing goes");
+        // Sent away for want of memory it frowns: the corners of its mouth are below the middle. For a game, it smiles.
+        let (sad, glad) = (sent_away("RAM PRESSURE"), sent_away("GAME ON"));
+        assert_eq!((sad[7], sad[8]), ("#....####....#", "#...#....#...#"));
+        assert_eq!((glad[7], glad[8]), (sad[8], sad[7]));
+        assert!(sad.iter().zip(glad).enumerate().all(|(i, (a, b))| *a == b || i == 7 || i == 8), "and nothing else of it changes");
     }
 
     const W: usize = 64;
@@ -1646,8 +1782,10 @@ mod tests {
         assert_eq!(tv.click(false), Clicked::NoGame, "on its own channel, a click says so");
         assert_eq!(channel(&tv), GAME, "and stays there");
         let mut off = on(GAME, true);
-        assert_eq!(off.click(false), Clicked::Done, "with a game and the console off, it's only a channel");
-        assert_ne!(channel(&off), GAME);
+        assert_eq!(off.click(false), Clicked::Play, "with a game and the console off, its display still pops out");
+        assert_eq!(channel(&off), GAME, "and the set stays on it");
+        let mut elsewhere = on(3, true);
+        assert_eq!(elsewhere.click(false), Clicked::Done, "but on another channel, with the console off, a click's only the next channel");
         tv.press(Button::ChannelDown);
         tv.press(Button::GameChannel);
         assert_eq!(channel(&tv), GAME);

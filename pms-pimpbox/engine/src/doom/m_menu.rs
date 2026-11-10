@@ -1131,8 +1131,11 @@ extern "C" fn M_DrawOptions() {
     }
 }
 
-/// No-op activation callback for the Options menu item (navigation handled by `M_Responder`).
-extern "C" fn M_Options(_choice: c_int) {}
+/// Opens the Options menu, as `M_Options` does in the original: `M_SetupNextMenu(&OptionsDef)`. (It was left empty here,
+/// and nothing else opens it: Options did nothing.)
+extern "C" fn M_Options(_choice: c_int) {
+    M_SetupNextMenu(&raw mut OptionsDef);
+}
 
 /// Toggle the `showMessages` setting and display a confirmation HUD message.
 extern "C" fn M_ChangeMessages(_choice: c_int) {

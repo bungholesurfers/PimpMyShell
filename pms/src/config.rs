@@ -168,6 +168,10 @@ pub struct Config {
     /// A TV landing on the console's channel switches the console on, instead of showing no signal. On unless you say otherwise.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub console_autostart: bool,
+    /// How big a picture the console puts out, which is what its window shows: "480p" (640 by 480, the usual), "720p" or
+    /// "1080i". It's read when the console's switched on.
+    #[serde(default = "usual_video", skip_serializing_if = "is_usual_video")]
+    pub console_video: String,
     /// A TV starting up runs through its channels, from `tv_intro_from` to `tv_intro_to`, game or no game. Off, it comes on where
     /// it was left.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
@@ -347,6 +351,14 @@ fn default_channel() -> String {
 
 fn is_stable(s: &str) -> bool {
     s == "stable"
+}
+
+fn usual_video() -> String {
+    CONSOLE_VIDEO[0].into()
+}
+
+fn is_usual_video(s: &str) -> bool {
+    s == CONSOLE_VIDEO[0]
 }
 
 fn yes() -> bool {
@@ -714,7 +726,7 @@ pub fn settings_page(id: &str) -> &'static str {
         ("counters", _) => "counters",
         ("backdrop" | "start_glow" | "app_glow", _) => "look",
         ("network", _) => "network",
-        ("", "console_autostart") => "poom",
+        ("", "console_autostart" | "console_video") => "pimpbox",
         ("", k) if k.starts_with("tv_intro") || k.starts_with("shuffle_") => "tv",
         ("", "meter") => "meters",
         ("", "counters") => "counters",
@@ -735,6 +747,8 @@ pub fn issue_is_unknown(error: &str) -> bool {
 const THEMES: [&str; 3] = ["auto", "dark", "light"];
 const HEIGHTS: [&str; 3] = ["compact", "tall", "full"];
 const UPDATE_CHANNELS: [&str; 2] = ["stable", "latest"];
+/// The console's video modes, the usual one first: what pms-pimpbox knows them as.
+pub const CONSOLE_VIDEO: [&str; 3] = ["480p", "720p", "1080i"];
 const PICTURES: [&str; 4] = ["never", "initial", "low_memory", "always"];
 const HIGHER_FAVORITE: [&str; 2] = ["switch", "stay"];
 const MEDIA_CONTROLS: [&str; 3] = ["never", "unmuted", "playing"];
@@ -769,6 +783,7 @@ fn not_usable(c: &Config) -> Option<String> {
         choice("meter_height", &c.meter_height, &HEIGHTS),
         choice("bar_height", &c.bar_height, &HEIGHTS),
         choice("update_channel", &c.update_channel, &UPDATE_CHANNELS),
+        choice("console_video", &c.console_video, &CONSOLE_VIDEO),
         choice("tv_intro_from", &c.tv_intro_from.to_string(), &channels),
         choice("tv_intro_to", &c.tv_intro_to.to_string(), &channels),
         range("shuffle_seconds", c.shuffle_seconds, 5, 3600),
@@ -1564,7 +1579,7 @@ prxy = 1
         assert!(usual.issues.is_empty(), "{:?}", usual.issues);
         // Each issue's setting is on a page of the settings, and the notice opens the first one's.
         assert_eq!(["tv_intro_from", "toasts.position", "meter.style", "theme", "twatch.volume", "backdrop.tint"].map(settings_page), ["tv", "toasts", "meters", "general", "twatch", "look"]);
-        assert_eq!(settings_page("console_autostart"), "poom");
+        assert_eq!(settings_page("console_autostart"), "pimpbox");
         assert_eq!(["max_fps", "twatch.pictures", "twatch.volume", "meter_height", "rest_for_games"].map(settings_page), ["power", "power", "twatch", "general", "power"]);
         let dir = std::env::temp_dir().join(format!("pms-issues-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);

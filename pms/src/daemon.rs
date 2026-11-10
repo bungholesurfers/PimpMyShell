@@ -556,6 +556,9 @@ impl Daemon {
         if let Some((seconds, jitter)) = asked.shuffling {
             (config.shuffle_seconds, config.shuffle_jitter) = (seconds, jitter);
         }
+        if let Some(video) = asked.video {
+            config.console_video = video.into();
+        }
         if let Err(e) = config::save(&self.path, &config) {
             log(format!("TV: couldn't save that: {e}"));
         }

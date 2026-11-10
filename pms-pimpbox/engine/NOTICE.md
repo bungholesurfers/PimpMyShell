@@ -6,7 +6,7 @@ Doom, and the Doom source code id Software released under the GPL.
 
 Changed from that revision, on 2026-11-06:
 
-- The library alone is kept: `room/src`, without `main.rs`, `gpu.rs` and `platform/` (its window, which `pms-poom` replaces)
+- The library alone is kept: `room/src`, without `main.rs`, `gpu.rs` and `platform/` (its window, which `pms-pimpbox` replaces)
   or the regression tests in `doom/c_tests`, which need the original C.
 - `Cargo.toml` is new: it leaves out `winit`, `wgpu` and the other dependencies of that window.
 - `doom/i_system.rs` declares `strcasecmp` itself, for Windows, which `libc` doesn't have it on.
@@ -30,7 +30,7 @@ Copyright of what this descends from:
 - doomgeneric: ozkl and contributors.
 - room: Markus Mayer and contributors.
 
-The source of `pms-poom.exe` as it's built and released is in PimpMyShell's repository, in `pms-poom/`, at the release's tag:
+The source of `pms-pimpbox.exe` as it's built and released is in PimpMyShell's repository, in `pms-pimpbox/`, at the release's tag:
 <https://github.com/bungholesurfers/PimpMyShell>. Each release on GitHub also carries it as an archive.
 
 No game data is here. An IWAD comes from elsewhere.

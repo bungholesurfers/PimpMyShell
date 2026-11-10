@@ -68,12 +68,12 @@ jobs:
           $v = '${{ steps.version.outputs.value }}'
           New-Item -ItemType Directory -Force target\out | Out-Null
           Copy-Item "target\installer\pms-setup-$v.exe" target\out
-          # POOM's GPL and its notice go in under the names the installer gives them.
+          # The PIMPBOX's GPL and its notice go in under the names the installer gives them.
           New-Item -ItemType Directory -Force target\portable | Out-Null
-          $files = 'target\release\pmsd.exe', 'target\release\pms.exe', 'target\release\pms-gui.exe', 'target\release\pms_tap.dll', 'target\release\pms-poom.exe', 'target\release\pms-twatch.exe', 'pms.example.toml', 'LICENSE'
+          $files = 'target\release\pmsd.exe', 'target\release\pms.exe', 'target\release\pms-gui.exe', 'target\release\pms_tap.dll', 'target\release\pms-pimpbox.exe', 'target\release\pms-twatch.exe', 'pms.example.toml', 'LICENSE'
           Copy-Item $files target\portable
-          Copy-Item pms-poom\COPYING target\portable\pms-poom-COPYING.txt
-          Copy-Item pms-poom\engine\NOTICE.md target\portable\pms-poom-NOTICE.md
+          Copy-Item pms-pimpbox\COPYING target\portable\pms-pimpbox-COPYING.txt
+          Copy-Item pms-pimpbox\engine\NOTICE.md target\portable\pms-pimpbox-NOTICE.md
           Compress-Archive -Path target\portable\* -DestinationPath "target\out\pms-portable-$v.zip" -Force
           if ($env:PMS_UPDATE_KEY) {
             .\target\release\pms-release.exe manifest "target\out\pms-setup-$v.exe" $v target\out

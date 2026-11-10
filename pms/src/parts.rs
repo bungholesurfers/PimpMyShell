@@ -7,7 +7,7 @@ use std::sync::Mutex;
 /// Twatch TV's player.
 pub const TWATCH: &str = "pms-twatch.exe";
 /// The console on channel 6.
-pub const POOM: &str = "pms-poom.exe";
+pub const PIMPBOX: &str = "pms-pimpbox.exe";
 
 /// Where `file` should be: beside this exe.
 pub fn path(file: &str) -> Option<PathBuf> {
@@ -45,7 +45,7 @@ pub fn newly_missing() -> Vec<&'static str> {
 pub fn without(file: &str) -> &'static str {
     match file {
         TWATCH => "your Twatch TVs can't play live video",
-        POOM => "the console on channel 6 can't start",
+        PIMPBOX => "the console on channel 6 can't start",
         _ => "part of PimpMyShell can't work",
     }
 }
@@ -56,9 +56,9 @@ mod tests {
 
     #[test]
     fn whats_missing_is_said_once() {
-        found_missing(POOM);
-        found_missing(POOM);
-        assert_eq!(newly_missing(), [POOM]);
+        found_missing(PIMPBOX);
+        found_missing(PIMPBOX);
+        assert_eq!(newly_missing(), [PIMPBOX]);
         assert!(newly_missing().is_empty());
         assert!(!here("no-such-part-of-pms.exe"));
     }

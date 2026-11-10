@@ -18,6 +18,7 @@ mod remote;
 mod remote_modern;
 mod screen;
 mod pace;
+mod pimpbox;
 pub mod ipc;
 pub mod logfile;
 mod props;

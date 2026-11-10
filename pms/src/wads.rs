@@ -81,6 +81,13 @@ fn first_there(places: [PathBuf; 3]) -> PathBuf {
     places.iter().find(|p| p.is_dir()).unwrap_or(&places[0]).clone()
 }
 
+/// Where the console keeps its boot animation's shader compiled, so that it's only compiled once: its own folder among the
+/// games', beside its game program's. Emptying it costs a moment the next time the console comes on, and no more.
+pub fn shaders() -> PathBuf {
+    let home = home();
+    home.parent().map_or_else(|| home.join("shaders"), |games| games.join("pimpbox").join("shaders"))
+}
+
 /// Where WADs are kept. While they're still where an earlier version kept them, and haven't moved (`move_old`), there.
 pub fn dir() -> PathBuf {
     if elsewhere().is_some() {

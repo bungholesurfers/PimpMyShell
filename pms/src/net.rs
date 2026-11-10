@@ -161,7 +161,7 @@ pub const USES: [(Use, &str, &str, &str); 4] = [
     (
         Use::Downloads,
         "Downloads",
-        "POOM and Twatch TV",
+        "PIMPBOX and Twatch TV",
         "When you select Download: Freedoom from https://github.com/freedoom/freedoom/releases, Doom's shareware episode from https://deb.debian.org, Streamlink from https://github.com/streamlink/windows-builds by way of https://api.github.com, and, by itself, now and then while a live stream won't open, asking there whether a newer Streamlink would fix it",
     ),
 ];

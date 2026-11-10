@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 # GPL, and a workspace of its own: see its Cargo.toml.
-exclude = ["pms-poom"]
+exclude = ["pms-pimpbox"]
 members = ["pms-recon", "pms-tap", "pms-xaml", "pms-screen", "pms-twatch", "pms", "pms-gui", "pms-art", "pms-res", "pms-ui", "xtask"]
 
 # One version for every crate - PimpMyShell's, which each exe and the TAP carry in their version resource, the

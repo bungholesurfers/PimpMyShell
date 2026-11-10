@@ -1,13 +1,13 @@
 //! What PGO training (`cargo xtask pgo`) does to PimpMyShell, as somebody would: fetches a game, presses a TV's remote, clicks a
-//! screen, plays in POOM's window.
+//! screen, plays in the PIMPBOX's window.
 //!
 //!   pgo_poke wad                       fetches Freedoom into the console's home (PMS_POOM_HOME), through your proxy if you
 //!                                      have one, and chooses it
 //!   pgo_poke press <screen> <button>   a remote's button: up down shuffle power game-power game
-//!   pgo_poke click <screen>            a click on the picture (on the console, `poom`, that opens its window)
-//!   pgo_poke keys <key[:ms]>..         keys for POOM's window, each held `ms` (120 if not said): esc enter up down left right
+//!   pgo_poke click <screen>            a click on the picture (on the console, `pimpbox`, that opens its window)
+//!   pgo_poke keys <key[:ms]>..         keys for the PIMPBOX's window, each held `ms` (120 if not said): esc enter up down left right
 //!                                      fire use tab, or wait:ms
-//!   pgo_poke close                     closes POOM's window, as its close button does
+//!   pgo_poke close                     closes the PIMPBOX's window, as its close button does
 
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ fn main() {
             None => Err("click <screen>".into()),
         },
         Some("keys") => keys(&args[1..]),
-        Some("close") => poom().map(|h| drop(unsafe { PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0)) })),
+        Some("close") => pimpbox().map(|h| drop(unsafe { PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0)) })),
         _ => Err("pgo_poke wad | press <screen> <button> | click <screen> | keys <key[:ms]>.. | close".into()),
     };
     if let Err(e) = result {
@@ -71,13 +71,13 @@ fn button(name: &str) -> Option<Button> {
     })
 }
 
-fn poom() -> Result<HWND, String> {
-    unsafe { FindWindowW(w!("PimpMyShellPoom"), None) }.map_err(|_| "POOM's window isn't open".into())
+fn pimpbox() -> Result<HWND, String> {
+    unsafe { FindWindowW(w!("PimpMyShellPimpbox"), None) }.map_err(|_| "The PIMPBOX's window isn't open".into())
 }
 
-/// Each key down, held, and up, posted to POOM's window: it reads them from its messages, focus or none.
+/// Each key down, held, and up, posted to the PIMPBOX's window: it reads them from its messages, focus or none.
 fn keys(keys: &[String]) -> Result<(), String> {
-    let window = poom()?;
+    let window = pimpbox()?;
     for key in keys {
         let (name, ms) = key.split_once(':').map_or((key.as_str(), 120), |(k, ms)| (k, ms.parse().unwrap_or(120)));
         let vk: usize = match name {

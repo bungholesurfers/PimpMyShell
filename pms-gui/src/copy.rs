@@ -16,11 +16,11 @@ pub fn setting(id: &str) -> (&str, &str) {
         "software_gpus" => ("Include software graphics adapters", "Count Microsoft Basic Render Driver, which runs on the CPU, in GPU meters"),
         "rest_when_covered" => (
             "Rest while the taskbar's covered",
-            "When a window fills the screen your taskbar's on (a game, a video, a presentation), nobody can see your TVs, so they stop drawing and POOM rests. Twatch TVs with their sound off stop too; ones with sound go on playing it. All of it's back the moment the taskbar is",
+            "When a window fills the screen your taskbar's on (a game, a video, a presentation), nobody can see your TVs, so they stop drawing and the PIMPBOX rests. Twatch TVs with their sound off stop too; ones with sound go on playing it. All of it's back the moment the taskbar is",
         ),
         "rest_for_games" => (
             "Rest while you play",
-            "When a game fills your screen and keeps your graphics card busy, your TVs show GAME ON and stop drawing, Twatch TVs make way, and POOM stops, unless you've played it since it started. All come back about 20 seconds after the game",
+            "When a game fills your screen and keeps your graphics card busy, your TVs show GAME ON and stop drawing, Twatch TVs make way, and the PIMPBOX stops, unless you've played it since it started. All come back about 20 seconds after the game",
         ),
         "max_fps" => ("Limit animation frame rate", "Cap ongoing animations, such as Hot Mic's and the notification rings. When it's off, they run at your display's refresh rate"),
         "battery_fps" => ("Frame rate on battery", "A lower cap while your PC runs on battery. 0 means no cap"),
@@ -36,10 +36,11 @@ pub fn setting(id: &str) -> (&str, &str) {
         // TV and Twatch TV
         "shuffle_seconds" => ("Time between shuffles", "How long a shuffling TV stays on a channel. This is for all your TVs, and their remotes can change it too"),
         "shuffle_jitter" => ("Jitter", "Each shuffling TV changes channel a little late, by up to a quarter of the time above. When this is off, they all change together"),
-        "console_autostart" => ("Start POOM when a TV tunes in", "Any TV landing on channel 6, even by shuffling, switches the console on. When this is off, channel 6 shows no signal until you switch it on"),
+        "console_video" => ("Video mode", "How big a picture the console puts out, which is what its window shows, as many times over as fits your screen. Nearly everything of its day used 480p. Takes effect the next time the console is switched on"),
+        "console_autostart" => ("Start the PIMPBOX when a TV tunes in", "Any TV landing on channel 6, even by shuffling, switches the console on. When this is off, channel 6 shows no signal until you switch it on"),
         "tv_intro" => ("Channel surf when a TV starts up", "When PimpMyShell starts, or you add a TV, it flips up through its channels before it settles. When this is off, it comes on at the channel it was left on"),
         "tv_intro_from" => ("Surf from", "The channel the run starts on"),
-        "tv_intro_to" => ("Surf to", "Where the run ends, and the TV stays. On 6 with a game, POOM starts"),
+        "tv_intro_to" => ("Surf to", "Where the run ends, and the TV stays. On 6 with a game, the PIMPBOX starts"),
         "twatch.media_controls" => ("Show in Windows' media controls", "Where Windows shows what's playing: the volume flyout, the lock screen, and your keyboard's media keys. It's never by default, so a TwaTV doesn't take over your media keys"),
         "twatch.pictures" => ("Pictures instead of video", "A still of the channel every minute, for hardly any CPU or network. It doesn't need Streamlink. On battery you get these anyway"),
         "twatch.volume" => ("Volume", "How loud every TwaTV is, when its sound is on. Any set's remote can change it too"),
@@ -172,10 +173,10 @@ pub const WELCOME_TV_POINTS: [(&str, &str, &str); 3] = [
     ("\u{E7F4}", "Six channels of nonsense", "A test card, a crab that never hits the corner, static, the PimpCast, a console, and a very angry man from 1986"),
     ("\u{E7E8}", "Off means out of your way", "Switch one off and a few seconds later it's just a small button. Click it to bring the set back"),
 ];
-pub const WELCOME_TV_ON: (&str, &str) = ("Keep a TV on my taskbar", "You can add more, or take them all away, in Settings, under TV. Its games are under POOM");
+pub const WELCOME_TV_ON: (&str, &str) = ("Keep a TV on my taskbar", "You can add more, or take them all away, in Settings, under TV. Its games are under PIMPBOX");
 /// What's new, for somebody who had PimpMyShell before it had these.
 pub const WHATS_NEW: (&str, &str) = ("Your taskbar got toys", "Since you last looked: a TV with six channels, a console on channel 6, and Twitch on a little flat-screen. Three quick stops, and each is yours to keep or skip.");
-pub const WELCOME_POOM: (&str, &str) = ("Pimps on Mars.", "Try it on Channel 6. Play games like Doom, Freedoom, etc. Click on the TV to pop a window on your desktop. Alt+Tab when the boss walks by (Alt+F4 works too. Game state isn't nuked.)");
+pub const WELCOME_PIMPBOX: (&str, &str) = ("Pimps on Mars.", "Try it on Channel 6. Play games like Doom, Freedoom, etc. Click on the TV to pop a window on your desktop. Alt+Tab when the boss walks by (Alt+F4 works too. Game state isn't nuked.)");
 pub const WELCOME_TWATCH: (&str, &str) = ("Twatch TV", "Twitch, on a little flat-screen, live. Name your favorite channels and the best one that's on just plays. No account, no sign-in, nothing to click.");
 pub const WELCOME_TWATCH_POINTS: [(&str, &str, &str); 3] = [
     ("\u{E734}", "Best first", "Your favorites go in order. When a better one goes live, it takes over. Switch on more sets, and up to three come out by themselves when a few are on"),
@@ -207,7 +208,7 @@ pub const LOG_CONTENTS: &[(&str, &[&str])] = &[
             "When you used your PC: every line has the date and time, in UTC, so not where you are",
             "The names of apps that notify you, and of apps that use your microphone",
             "Twitch channels from your favorites, when something about one comes up",
-            "Which game POOM played",
+            "Which game the PIMPBOX played",
             "When a game was in front of everything, though not which one",
             "File and folder paths, with your user name taken out",
             "Your version of Windows, and other software that's loaded into Explorer or changes the taskbar",
@@ -234,6 +235,9 @@ pub const LEGAL: &str = include_str!("legal.txt");
 pub const THEMES: &[(&str, &str)] = &[("auto", "Use my Windows mode"), ("dark", "Dark"), ("light", "Light")];
 pub const HEIGHTS: &[(&str, &str)] = &[("compact", "Compact (75%)"), ("tall", "Tall (88%)"), ("full", "Full")];
 pub const CHANNELS: &[(&str, &str)] = &[("stable", "Stable"), ("latest", "Latest")];
+pub const CLEAR_SHADERS: (&str, &str) = ("Compiled shaders", "The PIMPBOX compiles its boot animation for your graphics card once, and keeps the result. Clearing it makes it compile again the next time it comes on, which takes a moment");
+pub const CLEAR_SHADERS_ASK: &str = "This switches the PIMPBOX off, which ends the game it's playing: anything you haven't saved is lost. Its compiled shaders are then deleted. The next time it comes on it compiles them again, showing a small wheel while it does.";
+pub const CONSOLE_VIDEO: &[(&str, &str)] = &[("480p", "480p (640 by 480)"), ("720p", "720p (1280 by 720)"), ("1080i", "1080i (1920 by 1080)")];
 pub const TOAST_STYLES: &[(&str, &str)] = &[("standard", "Standard"), ("pimped", "Pimped")];
 pub const TOAST_POSITIONS: &[(&str, &str)] = &[("clock", "Left of the clock"), ("tray", "Left of the system tray"), ("tv", "Left of your first TV"), ("mic", "Left of the Hot Mic label")];
 pub const CONFIRMS: &[(&str, &str)] = &[("card", "In the notification"), ("window", "In a window"), ("off", "Don't ask")];
@@ -261,7 +265,7 @@ pub const GENERAL: (&str, &str) = ("General", "");
 pub const METERS: (&str, &str) = ("Meters", "Your meters, in their order on the taskbar, left to right. Select one to change it, and move it with the arrows. Where they go among your TVs is on the Widgets page.");
 /// When PimpMyShell gets out of the way, and what it does by itself.
 pub const POWER: (&str, &str) = ("Power & performance", "When PimpMyShell gets out of the way: when nobody can see it, for your games, on battery, and for your memory and your data.");
-pub const POWER_BY_ITSELF: &str = "Some of it happens by itself. On battery, a TV you leave alone sleeps, and Twatch TVs show pictures. When memory or video memory runs short, Twatch TVs make way, and so does POOM, unless you've been playing it. When the PC is busy, TVs draw at half speed.";
+pub const POWER_BY_ITSELF: &str = "Some of it happens by itself. On battery, a TV you leave alone sleeps, and Twatch TVs show pictures. When memory or video memory runs short, Twatch TVs make way, and so does the PIMPBOX, unless you've been playing it. When the PC is busy, TVs draw at half speed.";
 /// Under Twatch TV's settings: where its pictures went.
 pub const TWATCH_POWER: &str = "Pictures instead of video, to save memory or data, are under Power & performance.";
 /// The logs' page.
@@ -287,10 +291,10 @@ pub const COUNTERS: (&str, &str) = (
     "The Windows performance counters your meters read, by their English paths. Use their names in meter expressions, along with ram_total, vram_total, swap_total, swap_used, and cpu_count. To find paths, run typeperf -q.",
 );
 pub const LOOK: (&str, &str) = ("Taskbar look", "Replace the taskbar's standard acrylic with your own background, with a look for dark mode and one for light mode.");
-pub const TV: (&str, &str) = ("TV", "A little TV in your taskbar. Point at it for its remote: channels, shuffle, power, and another TV if one isn't enough. Channel 6 is Space Pimpin', your console: its games are under POOM.");
+pub const TV: (&str, &str) = ("TV", "A little TV in your taskbar. Point at it for its remote: channels, shuffle, power, and another TV if one isn't enough. Channel 6 is the PIMPBOX, your console: its games are under PIMPBOX.");
 pub const TV_HELP: &str = "On the TV: click the picture to stop shuffling. On channel 6, click again to play. On battery, a TV you leave alone sleeps.";
-pub const POOM: (&str, &str) = ("POOM", "Space Pimpin', or POOM to its friends: a console on channel 6 of your TVs. Give it a game, and any TV tuned to 6 plays it.");
-pub const POOM_HELP: &str = "On a TV on channel 6, click the picture to play: a window opens on your desktop. Esc opens the game's menu. Alt+Tab, or clicking away, lets go of the mouse. Closing the window pauses the game. Changing the channel doesn't turn the console off: it has its own power button on the TV's remote. Asking for channel 6 with no game brings you here.";
+pub const PIMPBOX: (&str, &str) = ("PIMPBOX", "A console on channel 6 of your TVs. Give it a game, and any TV tuned to 6 plays it. It plays Doom's games with POOM (room).");
+pub const PIMPBOX_HELP: &str = "On a TV on channel 6, click the picture to play: a window opens on your desktop. Esc opens the game's menu. Alt+Tab, or clicking away, lets go of the mouse. Closing the window pauses the game. Changing the channel doesn't turn the console off: it has its own power button on the TV's remote. Asking for channel 6 with no game brings you here.";
 /// Where the order of what's in the taskbar is changed, for the pages of what's in it.
 pub const ORDER_HINT: &str = "To move it along the taskbar, use the arrows on the Widgets page.";
 pub const TWATCH: (&str, &str) = ("Twatch TV", "A flat-screen set that plays your favorite Twitch channels while they're live, as live video in your taskbar. Point at it for its remote, and click the picture to open the channel. On battery it shows pictures instead, and goes back to video when you plug in. Live video needs Streamlink, just below.");
@@ -302,7 +306,7 @@ pub const TWATCH_CHECK_EXTRAS: [(&str, &str); 5] = [("0", "None"), ("60", "Up to
 pub const TWATCH_QUALITIES: [(&str, &str); 5] = [("1080p60", "1080p, 60 frames a second"), ("720p60", "720p, 60 frames a second"), ("720p", "720p, 30 frames a second"), ("480p", "480p, 30 frames a second"), ("360p", "360p")];
 pub const TWATCH_MORE_SETS: [(&str, &str); 3] = [("0", "Off"), ("1", "Up to one more"), ("2", "Up to two more")];
 /// The TV's channels, as the settings name them.
-pub const TV_CHANNELS: [(&str, &str); 6] = [("1295", "1295: Captain Midnight"), ("2", "2: Test card"), ("3", "3: The crab"), ("4", "4: Static"), ("5", "5: PimpCast"), ("6", "6: POOM")];
+pub const TV_CHANNELS: [(&str, &str); 6] = [("1295", "1295: Captain Midnight"), ("2", "2: Test card"), ("3", "3: The crab"), ("4", "4: Static"), ("5", "5: PimpCast"), ("6", "6: PIMPBOX")];
 pub const TWATCH_MEDIA_CONTROLS: [(&str, &str); 3] = [("never", "Never"), ("unmuted", "While its sound is on"), ("playing", "Whenever it's playing video")];
 /// Above the Twatch TV page while there are favorites, video is wanted, and Streamlink isn't here.
 pub const TWATCH_NO_STREAMLINK: (&str, &str) = ("Live video needs Streamlink", "You have favorites, but without Streamlink your TwaTVs can't play them. Download it below, or choose Always under Pictures instead of video, further down, for a still every minute.");
@@ -311,7 +315,7 @@ pub const RESET_ALL: (&str, &str) = ("Reset settings", "Everything back to how i
 pub const RESET_ALL_ASK: &str = "Every setting goes back to how it came, Twatch TV's included. Your Twatch TV favorites, your network settings, your games and your answer about updates stay. What your settings are now is kept beside them, as pms.toml.before-reset.";
 pub const TWATCH_NETWORK: &str = "What Twatch TV asks of the internet, and how to send it through a proxy, is under Network.";
 pub const TWATCH_NOTICE: &str = "Twitch is a trademark of Twitch Interactive, Inc. PimpMyShell isn't affiliated with Twitch. Streamlink is a separate program under the BSD 2-Clause License, built by GitHub's runners from its own source.";
-pub const TV_NOTICE: &str = "DOOM is a registered trademark of id Software LLC, a ZeniMax Media company. PimpMyShell isn't affiliated with or endorsed by id Software, ZeniMax, Bethesda or Microsoft. Space Pimpin' (POOM) runs a Doom engine, pms-poom.exe, under the GNU GPL version 2, with no warranty; its source is in PimpMyShell's repository on GitHub. The rest of PimpMyShell is under the MIT License, and each game keeps its own license.";
+pub const TV_NOTICE: &str = "DOOM is a registered trademark of id Software LLC, a ZeniMax Media company. PimpMyShell isn't affiliated with or endorsed by id Software, ZeniMax, Bethesda or Microsoft. The PIMPBOX, pms-pimpbox.exe, plays them with POOM (room), a Doom engine, and is under the GNU GPL version 2, with no warranty; its source is in PimpMyShell's repository on GitHub. The rest of PimpMyShell is under the MIT License, and each game keeps its own license.";
 pub const NETWORK: (&str, &str) = ("Network", "Everything PimpMyShell uses the internet for, and a proxy to send any of it through. There's no account, no analytics and no ads: nothing about you or your PC is sent anywhere.");
 pub const PROXY: (&str, &str) = (
     "SOCKS5 proxy",

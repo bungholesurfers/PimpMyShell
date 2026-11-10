@@ -68,9 +68,9 @@ it needs the real thing to be there.
 - **A watchdog** that backs off if explorer ever crashes with PimpMyShell in it.
 - **Signed updates**, checked every day or two if you agree (or whenever you ask), installed only when you say so.
 - **Out of the way when it can't be seen.** While a window fills the screen your taskbar's on, a game or a video, your TVs
-  stop drawing, POOM rests, and Twatch TVs with their sound off stop: from about a quarter of a CPU thread to a few percent,
+  stop drawing, the PIMPBOX rests, and Twatch TVs with their sound off stop: from about a quarter of a CPU thread to a few percent,
   back the moment the taskbar is. While a game's on (it fills the screen, keeps your graphics card busy, and somebody's
-  playing, keyboard, mouse or controller), Twatch TVs make way too, and POOM stops unless you've been playing it. Both are
+  playing, keyboard, mouse or controller), Twatch TVs make way too, and the PIMPBOX stops unless you've been playing it. Both are
   on Settings > Power & performance.
 - **Easy on the battery.** Unplugged, the hot-mic animation drops to 30 fps by default. `max_fps` caps it always.
 
@@ -90,13 +90,13 @@ changes where it starts and stops, or turns that off.
 | 2 | The test card |
 | 3 | The crab, bouncing around and changing color, as a DVD player's logo does when it's left alone |
 | 4 | Static |
-| 6 | Space Pimpin', or POOM to its friends: a game console plugged into your TVs |
+| 6 | The PIMPBOX: a game console plugged into your TVs. POOM (room) plays Doom's games on it |
 | 1295 | [Captain Midnight](https://en.wikipedia.org/wiki/Captain_Midnight_broadcast_signal_intrusion), who took over HBO's satellite feed in April 1986 over the price of scrambling |
 
-Give the console a game on Settings > POOM and it's on channel 6. The demos
+Give the console a game on Settings > PIMPBOX and it's on channel 6. The demos
 play in the taskbar. Click the picture to stop shuffling, then again to open a window and play: W, A, S and D or the arrows to
 move, the mouse to turn and shoot, E or space to open doors. The console keeps running when
-you change the channel, as a console does, and has a power button of its own. With nobody watching, it rests. Settings > POOM
+you change the channel, as a console does, and has a power button of its own. With nobody watching, it rests. Settings > PIMPBOX
 fetches [Freedoom](https://freedoom.github.io/) or the Doom shareware episode, on request, or you can add your own IWAD. No
 game data comes with PimpMyShell. Sound is off, and no audio device is opened.
 
@@ -158,9 +158,9 @@ in a few seconds.
 The player is `pms-twatch.exe`, its own process, using Windows' own media stack. The video never touches a window: frames are
 scaled down on the GPU and handed over in shared memory, like the console's.
 
-The console is `pms-poom.exe`, its own process, so a crash can't touch your taskbar. It's the engine from
-[room](https://github.com/sunsided/room), and it's under the GPL version 2, unlike the rest of PimpMyShell: its source is in
-[`pms-poom`](pms-poom), and it shares nothing with the MIT parts but frames in shared memory (`pms-screen`).
+The console is `pms-pimpbox.exe`, its own process, so a crash can't touch your taskbar. What plays Doom's games on it is POOM:
+the engine from [room](https://github.com/sunsided/room). So it's under the GPL version 2, unlike the rest of PimpMyShell: its source is in
+[`pms-pimpbox`](pms-pimpbox), and it shares nothing with the MIT parts but frames in shared memory (`pms-screen`).
 
 ## Using it
 
@@ -623,7 +623,7 @@ install` in the checkout fetches it. The pin matters because a PGO profile only 
 Everything runs through `cargo xtask` (an alias in `.cargo/config.toml`):
 
 ```
-cargo xtask build        release build of all that ships (pmsd, pms, pms-gui, the TAP, pms-poom, pms-twatch) into target\release
+cargo xtask build        release build of all that ships (pmsd, pms, pms-gui, the TAP, pms-pimpbox, pms-twatch) into target\release
 cargo xtask check        clippy with warnings as errors, then every test
 cargo xtask installer    build, then pack target\installer\pms-setup-VERSION.exe with Inno Setup 6
                          (--no-build packs what's built, --pgo packs the PGO build, --install installs it silently)
@@ -637,10 +637,10 @@ workflow's when there's no profile).
 
 PGO training runs on your own taskbar with `pgo/train.toml`, which turns on what the defaults leave off: every meter style, two
 TVs, the backdrop and glows. Then it does what people do, on a timetable: the TVs surf, the microphone is held, notifications
-arrive (from `toast_lab`), the mic's label moves, Freedoom is fetched and played in POOM's window, and the remotes change channels.
+arrive (from `toast_lab`), the mic's label moves, Freedoom is fetched and played in the PIMPBOX's window, and the remotes change channels.
 After that it just runs, for the rest of the time. Leave the PC alone meanwhile: a game window opens, and notifications pop up.
-The training's files, its game among them, stay in `target\pgo-train`, so your config, TVs and games are left alone. POOM's
-profile is kept with its source, in `pms-poom\pgo`.
+The training's files, its game among them, stay in `target\pgo-train`, so your config, TVs and games are left alone. The PIMPBOX's
+profile is kept with its source, in `pms-pimpbox\pgo`.
 
 The installer needs **Inno Setup 6**: `winget install --id JRSoftware.InnoSetup --scope user`. VERSION is the
 workspace's version, in the root `Cargo.toml` (`[workspace.package]`), which every crate takes.
@@ -659,14 +659,14 @@ Two TAPs racing for one pipe is no fun.
 The crab is [**Red Crab** by Scout](https://openclipart.org/detail/192996/red-crab), Openclipart 192996, public domain
 (CC0 1.0). See `art\openclipart-192996\SOURCE.txt`. The logo adds a dollar to it, rendered by `pms-art`.
 
-POOM's engine is [room](https://github.com/sunsided/room) by Markus Mayer and contributors, a Rust port descended from
+POOM (room), which plays Doom's games on it, is [room](https://github.com/sunsided/room) by Markus Mayer and contributors, a Rust port descended from
 [doomgeneric](https://github.com/ozkl/doomgeneric) by ozkl, [Chocolate Doom](https://www.chocolate-doom.org/) by Simon Howard,
 and the Doom source code id Software released under the GPL.
 
 ## License
 
-PimpMyShell is under the MIT License, except POOM (`pms-poom`), which is under the GPL version 2 (`pms-poom/COPYING`,
-installed as `pms-poom-COPYING.txt`), with what it descends from and how it's changed in `pms-poom/engine/NOTICE.md`.
+PimpMyShell is under the MIT License, except the PIMPBOX (`pms-pimpbox`), which is under the GPL version 2 (`pms-pimpbox/COPYING`,
+installed as `pms-pimpbox-COPYING.txt`), with what it descends from and how it's changed in `pms-pimpbox/engine/NOTICE.md`.
 
 DOOM is a registered trademark of id Software LLC, a ZeniMax Media company. Twitch is a trademark of Twitch Interactive, Inc.
 PimpMyShell isn't affiliated with or endorsed by either, or by Bethesda or Microsoft. No game data comes with PimpMyShell:
