@@ -20,7 +20,7 @@ fn every_notice() -> Vec<Notice> {
         notices::settings_issues(file, &names(&["unknown field `x`, expected `y`", "a", "b", "c", "d", "e", "f"])),
         notices::network_settings(Path::new(r"C:\nowhere\pms-network.toml"), "TOML parse error at line 1, column 1"),
         notices::notification_access(),
-        notices::newer_streamlink("9.9.9"),
+        notices::newer_streamlink("9.9.9", "8.6.3-1"),
         notices::no_streamlink(),
         notices::missing_part(pms::parts::TWATCH),
         notices::missing_part(pms::parts::POOM),

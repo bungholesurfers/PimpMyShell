@@ -2072,7 +2072,7 @@ pub fn run(path: &Path) -> Result<(), String> {
             d.do_what_the_sets_asked();
             d.look_after_explorer();
             if let Some(version) = crate::twatch::newer_streamlink() {
-                d.notices.raise(notices::newer_streamlink(&version));
+                d.notices.raise(notices::newer_streamlink(&version, &crate::streamlink::version().unwrap_or_default()));
             }
             if crate::twatch::no_streamlink() {
                 d.notices.raise(notices::no_streamlink());

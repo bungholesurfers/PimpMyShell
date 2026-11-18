@@ -229,9 +229,9 @@ pub fn notification_access() -> Notice {
 const TWATCH_SETTINGS: &str = "pms:twatch";
 
 /// Streamlink couldn't open a live channel, and there's a newer one. Nothing's been fetched: it's new code from elsewhere, so
-/// it's for you to say, knowing what's been checked and what hasn't.
-pub fn newer_streamlink(version: &str) -> Notice {
-    let have = crate::streamlink::version().unwrap_or_default();
+/// it's for you to say, knowing what's been checked and what hasn't. `have` is the Streamlink there is, which whoever raises
+/// this has just compared against.
+pub fn newer_streamlink(version: &str, have: &str) -> Notice {
     Notice {
         key: "streamlink",
         title: t::NEWER_STREAMLINK_TITLE.with(&[("version", &version)]),
