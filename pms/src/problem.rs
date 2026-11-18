@@ -4,6 +4,8 @@
 
 use std::path::Path;
 
+use crate::lang::problem as t;
+
 /// What's wrong with a settings file.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Problem {
@@ -47,8 +49,8 @@ impl Problem {
     /// All of it, for a dialog.
     pub fn words(&self) -> String {
         let place = match (self.line, &self.source) {
-            (Some(n), Some(source)) => format!("Line {n}: {source}\n"),
-            (Some(n), None) => format!("Line {n}\n"),
+            (Some(n), Some(source)) => format!("{}\n", t::LINE_AT.with(&[("n", &n), ("text", source)])),
+            (Some(n), None) => format!("{}\n", t::LINE.with(&[("n", &n)])),
             _ => String::new(),
         };
         let hint = self.hint.as_ref().map_or(String::new(), |h| format!("\n{h}"));
@@ -88,39 +90,39 @@ fn nearest<'a>(word: &str, choices: &[&'a str]) -> Option<&'a str> {
 fn plain(message: &str) -> (String, Option<String>) {
     let message = message.trim();
     let names = quoted(message);
-    let hint = |word: &str, choices: &[&str]| nearest(word, choices).map(|n| format!("Did you mean `{n}`?"));
+    let hint = |word: &str, choices: &[&str]| nearest(word, choices).map(|n| t::DID_YOU_MEAN.with(&[("word", &n)]));
     if message.starts_with("unknown field `")
         && let [word, choices @ ..] = names.as_slice()
     {
         // What's only there so that old files can still be read isn't a thing to suggest.
         let choices: Vec<&str> = choices.iter().copied().filter(|c| *c != "thumbnails").collect();
-        return (format!("`{word}` isn't a setting here."), hint(word, &choices));
+        return (t::NOT_A_SETTING.with(&[("word", word)]), hint(word, &choices));
     }
     if message.starts_with("unknown variant `")
         && let [word, choices @ ..] = names.as_slice()
     {
-        return (format!("`{word}` isn't one of the choices: {}.", choices.join(", ")), hint(word, choices));
+        return (t::NOT_A_CHOICE.with(&[("word", word), ("choices", &choices.join(", "))]), hint(word, choices));
     }
     if message.starts_with("out of range: `")
         && let (Some(word), Some((_, range))) = (names.first(), message.split_once(", expected "))
     {
-        return (format!("`{word}` is out of range: it goes from {}.", range.trim()), None);
+        return (t::OUT_OF_RANGE.with(&[("word", word), ("range", &range.trim())]), None);
     }
     if message.starts_with("bad color `")
         && let Some(word) = names.first()
     {
-        return (format!("`{word}` isn't a color: use #RRGGBB, or #AARRGGBB for one you can see through."), None);
+        return (t::NOT_A_COLOR.with(&[("word", word)]), None);
     }
     if let Some((found, expected)) = message.strip_prefix("invalid type: ").or_else(|| message.strip_prefix("invalid value: ")).and_then(|m| m.split_once(", expected ")) {
         let want = match expected.trim() {
-            "a boolean" => "true or false",
-            "a string" => "text in quotes",
-            "a sequence" => "a list in square brackets",
-            e if e.starts_with(['u', 'i', 'f']) && e[1..].chars().all(|c| c.is_ascii_digit()) => "a number",
+            "a boolean" => t::WANT_BOOLEAN.t(),
+            "a string" => t::WANT_TEXT.t(),
+            "a sequence" => t::WANT_LIST.t(),
+            e if e.starts_with(['u', 'i', 'f']) && e[1..].chars().all(|c| c.is_ascii_digit()) => t::WANT_NUMBER.t(),
             e => e,
         };
         let found = found.split_once(' ').map_or(found, |(_, value)| value).trim_matches('`');
-        return (format!("This should be {want}, not {found}."), None);
+        return (t::SHOULD_BE.with(&[("want", &want), ("found", &found)]), None);
     }
     (message.to_string(), None)
 }

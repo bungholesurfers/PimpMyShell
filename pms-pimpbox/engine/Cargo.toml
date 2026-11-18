@@ -11,11 +11,16 @@ name = "room"
 path = "src/lib.rs"
 
 [features]
+default = ["sound"]
 rangecheck = []
+# The sound device (rodio's playback, on cpal). Without it the engine plays silently, as with -nosound, and holds nothing of
+# COM, whose ole32 brings user32 and gdi32 with it: so the game can be started without win32k (pms-poom does without).
+sound = ["rodio/playback"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
-rodio = "0.23"
+# Only its mixing: no decoders (the engine decodes Doom's own sounds itself, and synthesises its music).
+rodio = { version = "0.23", default-features = false }
 rustysynth = "1"
 libc = "0.2"

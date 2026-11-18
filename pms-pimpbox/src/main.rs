@@ -1,13 +1,17 @@
 //! The PIMPBOX: a console on a screen in the taskbar. It comes on with its boot animation (`boot`), plays a game, and puts
 //! what the game draws on its screen (pms-screen), shrunk to the size the taskbar asks for, and in its window (`play`), its
-//! display on your desktop, at the size of its video mode (`video`). The game is POOM (`poom`): Doom's games on `room`, a
-//! Rust port of the Doom engine, as a process of its own that this starts, so that the console and its window are still
-//! there when a game ends: then it comes back on by itself, with a shorter animation, and plays the game again. Switched
-//! off (its screen's power keys), it's dark, and its window stays. Before it comes on and after, and before a game's seen,
-//! there's a moment of nothing, never the same length twice.
+//! display on your desktop, at the size of its video mode (`video`). The game is POOM (pms-poom.exe, beside this): Doom's
+//! games on `room`, a Rust port of the Doom engine, a program of its own that this starts, so that the console and its
+//! window are still there when a game ends: then it comes back on by itself, with a shorter animation, and plays the game
+//! again. Switched off (its screen's power keys), it's dark, and its window stays. Before it comes on and after, and before
+//! a game's seen, there's a moment of nothing, never the same length twice.
 //!
 //!   pms-pimpbox <iwad> [screen] [parent process] [video mode] [on|off] [folder for compiled shaders]
-//!   pms-pimpbox --poom <iwad> <pictures>          the game: what the console starts
+//!               [--poom-sandbox <container>...] [--language <code>] [--efficient closed|always|never]
+//!
+//! `--efficient` says when it and its game are in efficiency mode (pms-spawn's `power`): while its window is closed (all
+//! anybody sees of it then is a picture the size of a stamp), always, or never (Windows decides, as for any program). Without
+//! it, never.
 //!
 //! With a parent (the daemon), it goes when the parent does (0 is none). The video mode is how big a picture the console
 //! puts out, which is what its window shows: 480p unless it's told 720p or 1080i. The screen's video keys change it while
@@ -16,19 +20,22 @@
 #![windows_subsystem = "windows"]
 
 mod boot;
-mod link;
+mod capture;
 mod play;
-mod poom;
 mod sorry;
 mod spinner;
-mod unix;
+mod taskicon;
 mod video;
 
 use std::io::Write;
-use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use poom::link;
 use link::{ACROSS, DOWN, Pictures, Said};
+
+/// The game, beside this.
+const POOM: &str = "pms-poom.exe";
 use pms_screen::{Button, Screen};
 
 /// Part of a frame whose rows are `stride` pixels long (the part `across` by `down` pixels that starts `left` pixels in),
@@ -80,15 +87,54 @@ fn show(screen: &Screen, source: &[u32], (across, down): (usize, usize), shape: 
     screen.publish(w as u32, h as u32, shrunk);
 }
 
-/// Ends this process when `parent` ends, however it does.
+/// Leaves when `parent` ends, however it does. If it can't be watched, its job (pms-spawn) still ends this with it.
 fn go_with(parent: u32) {
     use windows::Win32::System::Threading::{INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
-    let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent) }) else { std::process::exit(0) };
+    let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent) }) else { return };
     let handle = handle.0 as isize;
     std::thread::spawn(move || {
         unsafe { WaitForSingleObject(windows::Win32::Foundation::HANDLE(handle as *mut _), INFINITE) };
-        poom::leave();
+        leave();
     });
+}
+
+/// Up to four speed demos for the title loop of the game in `iwad`, picked anew each time: from those the daemon's checked play
+/// in step on it (its demos.rs), which it lists in `demos\play.txt` among the games, `<game>\t<demo>` a line. None while speed
+/// demos are switched off: then there's no list.
+fn demos_for(iwad: &str) -> Vec<String> {
+    use std::hash::{BuildHasher, Hasher};
+    let Some(list) = std::path::Path::new(iwad).parent().map(|games| games.join("demos").join("play.txt")) else { return Vec::new() };
+    let text = std::fs::read_to_string(list).unwrap_or_default();
+    let mut demos: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .filter(|(game, demo)| game.eq_ignore_ascii_case(iwad) && std::path::Path::new(demo).is_file())
+        .map(|(_, demo)| demo.to_string())
+        .collect();
+    let mut picked = Vec::new();
+    while !demos.is_empty() && picked.len() < 4 {
+        let mut dice = std::collections::hash_map::RandomState::new().build_hasher();
+        dice.write_usize(picked.len());
+        picked.push(demos.swap_remove((dice.finish() % demos.len() as u64) as usize));
+    }
+    if !picked.is_empty() {
+        eprintln!("pms-pimpbox: POOM's title loop has {} speed demos", picked.len());
+    }
+    picked
+}
+
+/// Ends this process, and its game with it (its job).
+fn leave() -> ! {
+    // An instrumented build (PGO training) writes what it recorded first: exit, on Windows, ends the process before the
+    // runtime would have.
+    #[cfg(pms_pgo)]
+    unsafe {
+        unsafe extern "C" {
+            fn __llvm_profile_write_file() -> i32;
+        }
+        __llvm_profile_write_file();
+    }
+    std::process::exit(0)
 }
 
 /// What the console's doing.
@@ -110,6 +156,16 @@ enum Then {
     Play,
 }
 
+/// Efficiency mode (pms-spawn's `power`) for the console and its game, as `--efficient` says, with its window `open` or not.
+/// Its timers are left alone: the game keeps time by them.
+fn efficiency(how: &str, open: bool) -> u32 {
+    match how {
+        "always" => pms_spawn::power::EFFICIENT,
+        "closed" if !open => pms_spawn::power::EFFICIENT,
+        _ => pms_spawn::power::WINDOWS,
+    }
+}
+
 /// How long the dark lasts: from half a second to a whole one, and not the same twice.
 fn a_moment() -> Instant {
     use std::hash::{BuildHasher, Hasher};
@@ -120,7 +176,7 @@ fn a_moment() -> Instant {
 
 /// The game, as the console has hold of it.
 struct Game {
-    child: Child,
+    child: pms_spawn::Child,
     /// Whether it's been told to stand still.
     resting: bool,
     /// The last things it said on its way: why it fell over, if it does.
@@ -128,10 +184,33 @@ struct Game {
 }
 
 impl Game {
-    /// Starts the game in `iwad`, standing still, putting its pictures up as `pictures`.
-    fn start(iwad: &str, pictures: &str) -> Option<Game> {
-        let me = std::env::current_exe().ok()?;
-        match Command::new(me).args(["--poom", iwad, pictures]).stdin(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+    /// Starts the game in `iwad`, standing still, putting its pictures up in `pictures`: in `sandbox`, if it's given one, and
+    /// then without windows or drawing too (win32k). It's a helper (pms-spawn): its own job inside the console's, its only
+    /// process, and the pictures' handle and its two pipes all it has of the console's. `demos` play in its title loop.
+    fn start(iwad: &str, pictures: &Pictures, sandbox: Option<&pms_spawn::Container>, demos: &[String], power: u32) -> Option<Game> {
+        let Some(game) = std::env::current_exe().ok().map(|me| me.with_file_name(POOM)).filter(|g| g.is_file()) else {
+            eprintln!("pms-pimpbox: POOM didn't start: there's no {POOM} beside the console");
+            return None;
+        };
+        let handle = match pms_spawn::Shared::new(pictures.handle()) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("pms-pimpbox: POOM didn't start: {e}");
+                return None;
+            }
+        };
+        let spawned = pms_spawn::Command::new(game).args([iwad, &handle.number().to_string()]).args(demos).inherit(&handle).stdin(pms_spawn::Stdio::Piped).stderr(pms_spawn::Stdio::Piped)
+            // The console's own job has these limits, and holds the game too: Windows won't have them on a job inside it as well.
+            .ui_limits(false)
+            .power(power);
+        // Only sandboxed: switched off, the sandbox is all of it, so that a PC whose security software won't have a program
+        // without win32k still has a switch that brings the game back.
+        let spawned = match sandbox {
+            Some(c) => spawned.container(c.clone()).mitigations(pms_spawn::mitigate::USUAL | pms_spawn::mitigate::NO_WIN32K),
+            None => spawned,
+        }
+        .spawn();
+        match spawned {
             Ok(mut child) => {
                 // Said where whatever started the console keeps what it says: a game that's only just started hasn't been
                 // played, whatever the one before it was.
@@ -140,8 +219,18 @@ impl Game {
                 let said = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
                 if let Some(from) = child.stderr.take() {
                     let said = said.clone();
+                    let given = demos.to_vec();
                     std::thread::spawn(move || {
                         for line in std::io::BufRead::lines(std::io::BufReader::new(from)).map_while(Result::ok) {
+                            // Which speed demo it's showing: said on, as the demo's file, for the PIMPBOX card to say whose run it is.
+                            if let Some(n) = line.strip_prefix("pms-poom: showing demo ").and_then(|n| n.trim().parse::<usize>().ok()) {
+                                eprintln!("pms-pimpbox: POOM shows {}", given.get(n).map_or("nothing", String::as_str));
+                                continue;
+                            }
+                            if line.starts_with("pms-poom: showing no demo") {
+                                eprintln!("pms-pimpbox: POOM shows nothing");
+                                continue;
+                            }
                             if let Ok(mut said) = said.lock() {
                                 if said.len() == 40 {
                                     said.pop_front();
@@ -168,9 +257,10 @@ impl Game {
     /// Whether it's ended; and if it has, whether it ended as a game does that's been quit, or fell over.
     fn over(&mut self) -> Option<bool> {
         match self.child.try_wait() {
-            Ok(None) => None,
-            Ok(Some(how)) => {
-                if !how.success() {
+            None => None,
+            Some(code) => {
+                let how = format!("exit code {code:#x}");
+                if code != 0 {
                     // Said where whatever started the console keeps what it says: how it ended, and its last words.
                     std::thread::sleep(Duration::from_millis(60));
                     let words: Vec<String> = self.said.lock().map(|said| said.iter().filter(|l| !l.trim().is_empty()).cloned().collect()).unwrap_or_default();
@@ -189,46 +279,66 @@ impl Game {
                         *before = last;
                     }
                 }
-                Some(how.success())
+                Some(code == 0)
             }
-            Err(_) => Some(false),
         }
     }
 
     /// Ends it, there and then.
     fn end(mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.kill();
+        self.child.wait();
     }
 }
 
 fn main() {
     pms_screen::started();
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).is_some_and(|a| a == "--poom") {
-        match (args.get(2), args.get(3)) {
-            (Some(iwad), Some(pictures)) => poom::main(iwad, pictures),
-            _ => std::process::exit(2),
-        }
+    // What it says, in the language PimpMyShell speaks: `--language <code>`, from the daemon. English otherwise.
+    if let Some(at) = args.iter().position(|a| a == "--language").and_then(|at| args.get(at + 1)).and_then(|code| pms_lang::find(code)) {
+        pms_lang::set(at);
     }
     let Some(mut iwad) = args.get(1).cloned() else {
         eprintln!("usage: pms-pimpbox <iwad> [screen] [parent process] [video mode] [on|off]");
         std::process::exit(2);
     };
-    let name = args.get(2).map_or("pimpbox", String::as_str);
-    if let Some(parent) = args.get(3).and_then(|p| p.parse().ok()).filter(|p| *p != 0) {
-        go_with(parent);
-    }
-    video::set(args.get(4).map_or("", String::as_str));
-    let screen = match Screen::create(name) {
-        Ok(s) => s,
+    // Its screen: handed to it by the daemon, as `handles:<memory>:<event>`, or by name, run by hand.
+    let screen = match args.get(2).map_or("pimpbox", String::as_str) {
+        given if given.starts_with("handles:") => {
+            let numbers: Vec<usize> = given["handles:".len()..].split(':').filter_map(|n| n.parse().ok()).collect();
+            match numbers.as_slice() {
+                [mapping, event] => Screen::from_handles(*mapping, *event),
+                _ => Err(format!("{given}: not two handles")),
+            }
+        }
+        name => Screen::create(name),
+    };
+    let screen = match screen {
+        Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("pms-pimpbox: {e}");
             std::process::exit(1);
         }
     };
-    let pictures_name = format!("Local\\PimpMyShell.Pimpbox.{}", std::process::id());
-    let pictures = match Pictures::open(&pictures_name) {
+    if let Some(parent) = args.get(3).and_then(|p| p.parse().ok()).filter(|p| *p != 0) {
+        go_with(parent);
+    }
+    video::set(args.get(4).map_or("", String::as_str));
+    // Another game is only ever another IWAD in the folder the first came from: whatever else the screen says isn't.
+    let games = std::path::Path::new(&iwad).parent().map(std::path::Path::to_path_buf);
+    let a_game = |wad: &str| {
+        let wad = std::path::Path::new(wad);
+        wad.parent().map(std::path::Path::to_path_buf) == games && wad.extension().is_some_and(|x| x.eq_ignore_ascii_case("wad")) && wad.is_file()
+    };
+    // The game's sandbox, if the daemon made one: `--poom-sandbox <container SID> <capability SIDs> <0|1 for LPAC> <folder>`,
+    // the SIDs in hexadecimal.
+    let sandbox = args.iter().position(|a| a == "--poom-sandbox").and_then(|at| {
+        let from_hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>();
+        let sid = from_hex(args.get(at + 1)?)?;
+        let capabilities = args.get(at + 2)?.split(',').filter(|s| !s.is_empty()).map(from_hex).collect::<Option<Vec<_>>>()?;
+        Some(pms_spawn::Container { sid, capabilities, lpac: args.get(at + 3)? == "1", folder: std::path::PathBuf::from(args.get(at + 4)?) })
+    });
+    let pictures = match Pictures::unnamed() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("pms-pimpbox: {e}");
@@ -254,6 +364,9 @@ fn main() {
         *fell = Some(Instant::now());
         a_moment().max(soonest)
     };
+    // When it's in efficiency mode, and whether its window was open when that was last seen to.
+    let efficient = args.iter().position(|a| a == "--efficient").and_then(|at| args.get(at + 1)).cloned().unwrap_or_else(|| "never".into());
+    let mut efficient_for: Option<bool> = None;
     // Somebody's pressed a key at the game that's going: said once for each game, for whoever decides what can be closed.
     let mut played = false;
     let mut shown_dark = Instant::now() - Duration::from_secs(1);
@@ -298,7 +411,7 @@ fn main() {
                 // the new one the short way, as it's been on all along. Switched off, it's only what it'll play.
                 Button::ConsoleGame => {
                     let Some(wad) = screen.info().lines().find_map(|l| l.strip_prefix("wad\t").map(str::to_string)) else { continue };
-                    if wad == iwad {
+                    if wad == iwad || !a_game(&wad) {
                         continue;
                     }
                     iwad = wad;
@@ -323,6 +436,16 @@ fn main() {
         }
         // The mouse is the game's while there's a game, and yours otherwise.
         play::playing(matches!(doing, Doing::Playing));
+        // In efficiency mode or not, as the window is, for the console and its game alike (it isn't inherited).
+        let open = play::is_open();
+        if efficient_for != Some(open) {
+            efficient_for = Some(open);
+            let power = efficiency(&efficient, open);
+            pms_spawn::set_own_power(power);
+            if let Some(game) = &game {
+                game.child.set_power(power);
+            }
+        }
         let said = play::messages();
         let watched = screen.watched_within(1500) || play::is_open() || started.elapsed() < Duration::from_secs(3);
         match &doing {
@@ -353,8 +476,8 @@ fn main() {
                             if let Some(old) = game.take() {
                                 old.end();
                             }
-                            game = Game::start(&iwad, &pictures_name);
-                            let booting = boot::start(name, video::mode(), short, sorry, kept.clone());
+                            game = Game::start(&iwad, &pictures, sandbox.as_ref(), &demos_for(&iwad), efficiency(&efficient, play::is_open()));
+                            let booting = boot::start(screen.clone(), video::mode(), short, sorry, kept.clone());
                             if play::is_open() {
                                 booting.want();
                             }
@@ -430,7 +553,21 @@ fn main() {
         if let Some(next) = next {
             doing = next;
         }
-        // With no one watching and nothing to show them, there's no hurry.
-        std::thread::sleep(Duration::from_millis(if watched { 4 } else { 100 }));
+        // What's over the picture in the window, if it's moving.
+        play::tick();
+        // The window's icon: the boot animation's colors while it plays (from the moment of dark before the long one, which is
+        // where it starts), and the program file's orange otherwise.
+        if let Some(h) = play::window() {
+            let look = match &doing {
+                Doing::Booting(booting) => booting.look(),
+                Doing::Dark(_, Then::Boot { short: false, .. }) => pimpbox_boot::Look::Rain,
+                _ => pimpbox_boot::Look::Mark,
+            };
+            taskicon::show(h, look);
+        }
+        // With no one watching and nothing to show them, there's no hurry; but while it boots, its icon's changing, and the
+        // taskbar asks the window for each new one, which it answers only between these.
+        let booting = matches!(doing, Doing::Booting(_) | Doing::Dark(_, Then::Boot { short: false, .. }));
+        std::thread::sleep(Duration::from_millis(if watched || booting { 4 } else { 100 }));
     }
 }

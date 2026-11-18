@@ -14,7 +14,8 @@ use std::process::Command;
 const USAGE: &str = "\
 cargo xtask <task>:
   build                release build of every exe and the TAP: target/release
-  check                clippy (warnings are errors) and the tests
+  check                clippy (warnings are errors) and the tests, the PIMPBOX's own too; and that every handler in
+                       the TAP runs through its guard
   installer [--no-build] [--pgo] [--install]
                        build the release exes (unless --no-build; with --pgo, the optimised build from the kept
                        profile), package them with Inno Setup 6 into target/installer/pms-setup-VERSION.exe,
@@ -28,11 +29,72 @@ cargo xtask <task>:
                        component add llvm-tools)
   pgo-build            the optimised release build from those: target/release
   art                  render the icons and the installer's pictures (pms-art): assets/icon, installer/art
+  lang [--stamp CODE]  how much of what PimpMyShell says each language in lang/ has, which texts it hasn't, and which it
+                       made from English that has changed since. --stamp marks every translation in lang/CODE.toml as
+                       made from the English there is now: for once they've been looked over
   help                 this
 ";
 
+/// How far along each language is: how many of the texts it has of its own, and which it hasn't, which are said in English.
+fn lang(rest: &[&str]) -> Result {
+    match rest {
+        [] => {
+            for (at, language) in pms_lang::LANGUAGES.iter().enumerate() {
+                let (missing, stale) = (pms_lang::MISSING[at], pms_lang::STALE[at]);
+                println!("{} ({}): {} of {} texts; {} made from English that has changed since", language.code, language.name, pms_lang::TEXTS - missing.len(), pms_lang::TEXTS, stale.len());
+                for key in missing {
+                    println!("    missing  {key}");
+                }
+                for key in stale {
+                    println!("    stale    {key}");
+                }
+            }
+            Ok(())
+        }
+        ["--stamp", code] => stamp(code),
+        _ => Err("cargo xtask lang [--stamp <code>]".into()),
+    }
+}
+
+/// Marks every translation in lang/<code>.toml as made from the English there is now: `# en:<fingerprint>` at the end of
+/// its line, in place of the one it had. For after a translation's been looked over against its English.
+fn stamp(code: &str) -> Result {
+    if pms_lang::find(code) == Some(0) {
+        return Err("English is what the others are made from: it has nothing to be stamped against".into());
+    }
+    let path = root().join("lang").join(format!("{code}.toml"));
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let crlf = text.contains("\r\n");
+    let mut section = String::new();
+    let mut stamped = 0;
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if let Some(name) = trimmed.strip_prefix('[').and_then(|s| s.split_once(']')).map(|(name, _)| name) {
+                section = name.to_string();
+                return line.to_string();
+            }
+            let Some((key, _)) = trimmed.split_once('=').filter(|_| !trimmed.starts_with('#')) else { return line.to_string() };
+            let Some((.., english)) = pms_lang::FINGERPRINTS.iter().find(|(s, k, _)| *s == section && *k == key.trim()) else { return line.to_string() };
+            let kept = line.rfind("  # en:").map_or(line, |at| &line[..at]).trim_end();
+            if kept.trim_end().ends_with("\"\"") || kept.trim_end().ends_with("''") {
+                return kept.to_string();
+            }
+            stamped += 1;
+            format!("{kept}  # en:{english:08x}")
+        })
+        .collect();
+    let nl = if crlf { "\r\n" } else { "\n" };
+    std::fs::write(&path, lines.join(nl) + nl).map_err(|e| format!("{}: {e}", path.display()))?;
+    println!("{}: {stamped} translations stamped as made from the English there is now", path.display());
+    Ok(())
+}
+
 /// What the installer ships, from target/release.
-const SHIPPED: &[&str] = &["pmsd.exe", "pms.exe", "pms-gui.exe", "pms_tap.dll", "pms-pimpbox.exe", "pms-twatch.exe"];
+const SHIPPED: &[&str] = &["pmsd.exe", "pms.exe", "pms-gui.exe", "pms_tap.dll", "pms-pimpbox.exe", "pms-poom.exe", "pms-twatch.exe", "pms-fetch.exe"];
+/// What the PIMPBOX's workspace makes: the console, and its game.
+const PIMPBOX_EXES: [&str; 2] = ["pms-pimpbox.exe", "pms-poom.exe"];
 
 type Result<T = ()> = std::result::Result<T, String>;
 
@@ -42,6 +104,7 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("build") => build(),
         Some("check") => check(),
+        Some("lang") => lang(&rest),
         Some("art") => art(),
         Some("installer") => installer(rest.contains(&"--no-build"), rest.contains(&"--pgo"), rest.contains(&"--install")),
         Some("pgo") => seconds(&rest).and_then(pgo),
@@ -109,7 +172,7 @@ fn art() -> Result {
 fn build() -> Result {
     step("release build");
     free();
-    run(cargo().args(["build", "--release", "-p", "pms", "-p", "pms-gui", "-p", "pms-tap", "-p", "pms-twatch"]))?;
+    run(cargo().args(["build", "--release", "-p", "pms", "-p", "pms-gui", "-p", "pms-tap", "-p", "pms-twatch", "-p", "pms-fetch"]))?;
     doom(false)
 }
 
@@ -117,9 +180,9 @@ fn build() -> Result {
 /// release (`release`), as the rest is: fat LTO, and the profile kept for it if there is one.
 fn doom(release: bool) -> Result {
     step("pms-pimpbox");
-    let target = root().join("target").join("poom");
-    let mut cmd = cargo();
-    cmd.current_dir(root().join("pms-pimpbox")).args(["build", "--release", "--target-dir"]).arg(&target);
+    let target = pimpbox_target();
+    let mut cmd = pimpbox();
+    cmd.args(["build", "--release", "--target-dir"]).arg(&target);
     if release {
         release_profile(&mut cmd);
         let kept = kept_pimpbox_profile();
@@ -131,8 +194,10 @@ fn doom(release: bool) -> Result {
         }
     }
     run(&mut cmd)?;
-    let to = root().join("target").join("release").join("pms-pimpbox.exe");
-    std::fs::copy(target.join("release").join("pms-pimpbox.exe"), &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    for exe in PIMPBOX_EXES {
+        let to = root().join("target").join("release").join(exe);
+        std::fs::copy(target.join("release").join(exe), &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    }
     shipped_built()
 }
 
@@ -146,10 +211,170 @@ fn shipped_built() -> Result {
 }
 
 fn check() -> Result {
+    step("handlers");
+    handlers_guarded()?;
+    step("network");
+    network_in_its_place()?;
+    step("panels");
+    panels_parsed()?;
     step("clippy");
     run(cargo().args(["clippy", "--release", "--workspace", "--all-targets", "--", "-D", "warnings"]))?;
     step("tests");
-    run(cargo().args(["test", "--release", "--workspace"]))
+    run(cargo().args(["test", "--release", "--workspace"]))?;
+    // The PIMPBOX is a workspace of its own, which the two above never see. Both are for what's ours in it, the console, its
+    // boot animation and the game's program. The engine is somebody else's code, kept as it came: it has its warnings, and its tests are for
+    // where it came from (they want `fmemopen`, and a module of C to compare with that isn't here), so they don't build on
+    // Windows. It's still compiled, as what the console's made of.
+    step("pms-pimpbox: clippy");
+    run(pimpbox().args(["clippy", "--release"]).args(PIMPBOX_OURS).args(["--no-deps", "--all-targets", "--target-dir"]).arg(pimpbox_target()).args(["--", "-D", "warnings"]))?;
+    step("pms-pimpbox: tests");
+    run(pimpbox().args(["test", "--release"]).args(PIMPBOX_OURS).arg("--target-dir").arg(pimpbox_target()))
+}
+
+/// The packages in the PIMPBOX's workspace that are PimpMyShell's own.
+const PIMPBOX_OURS: [&str; 6] = ["-p", "pms-pimpbox", "-p", "pimpbox-boot", "-p", "pms-poom"];
+
+/// Cargo, in the PIMPBOX's workspace.
+fn pimpbox() -> Command {
+    let mut c = cargo();
+    c.current_dir(root().join("pms-pimpbox"));
+    c
+}
+
+/// Where the PIMPBOX is built: with the rest, so that one `target` holds everything, and apart in it.
+fn pimpbox_target() -> PathBuf {
+    root().join("target").join("poom")
+}
+
+/// Every handler XAML calls in the TAP is to run its body through `guard` (pms-tap's lib.rs): a panic that got out of one
+/// would end Explorer. This reads the TAP's source and fails on a handler that doesn't.
+/// The files that may reach the network, and how, by what they call. Anything that goes online is listed on the settings'
+/// Network page with the programs that do it (net::USES, and pms-gui's copy::programs): a file not here that starts to
+/// reach the network fails the check, as the reminder to put it on that page (and to say whether the proxy can carry it).
+const NETWORK_FILES: &[&str] = &["pms/src/net.rs", "pms/src/relay.rs", "pms-twatch/src/main.rs", "pms-fetch/src/main.rs", "pms-fetch/src/broker.rs", "pms-fetch/src/relay.rs"];
+const NETWORK_CALLS: &[&str] = &["ureq::", "TcpStream", "UdpSocket", "TcpListener", "socket2", "AdaptiveMediaSource", "WinHttp", "InternetOpen", "URLDownloadToFile", "HttpClient", "reqwest", "WSASocket"];
+
+fn network_in_its_place() -> Result {
+    let mut found = Vec::new();
+    let mut files = Vec::new();
+    for top in ["pms", "pms-gui", "pms-tap", "pms-twatch", "pms-fetch", "pms-screen", "pms-ui", "pms-art", "pms-recon", "pms-lang", "pms-pimpbox/src", "pms-pimpbox/boot/src", "pms-pimpbox/poom/src"] {
+        rust_files(&root().join(top), &mut files);
+    }
+    for file in &files {
+        let shown = file.strip_prefix(root()).unwrap_or(file).to_string_lossy().replace('\\', "/");
+        let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        for (n, line) in text.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or_default();
+            if let Some(call) = NETWORK_CALLS.iter().find(|c| code.contains(*c))
+                && !NETWORK_FILES.contains(&shown.as_str())
+            {
+                found.push(format!("{shown}:{}: {call}", n + 1));
+            }
+        }
+    }
+    if !found.is_empty() {
+        return Err(format!(
+            "these reach the network from a file that isn't known to: put what they do on the Network page (pms::net::USES and copy::programs, and whether the proxy carries it), then add the file to NETWORK_FILES in xtask:\n  {}",
+            found.join("\n  ")
+        ));
+    }
+    println!("{} files looked at; only {} reach the network", files.len(), NETWORK_FILES.join(", "));
+    Ok(())
+}
+
+/// In Explorer, a Grid, StackPanel, Canvas or Path the TAP makes with `new()` is never freed: the TAP makes them from markup
+/// (pms-tap's stage.rs, which says why); and a font family made for each element that uses it isn't either: stage::font
+/// makes each once. This fails on one made the other way, anywhere in the TAP but there.
+const NEVER_FREED: &[&str] = &["Grid::new()", "StackPanel::new()", "Canvas::new()", "Path::new()", "FontFamily::CreateInstanceWithName"];
+
+fn panels_parsed() -> Result {
+    let mut files = Vec::new();
+    rust_files(&root().join("pms-tap"), &mut files);
+    let mut found = Vec::new();
+    for file in &files {
+        let shown = file.strip_prefix(root()).unwrap_or(file).to_string_lossy().replace('\\', "/");
+        if shown == "pms-tap/src/stage.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        for (n, line) in text.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or_default();
+            if let Some(made) = NEVER_FREED.iter().find(|m| code.contains(*m)) {
+                found.push(format!("{shown}:{}: {made}", n + 1));
+            }
+        }
+    }
+    if !found.is_empty() {
+        return Err(format!("these are never freed in Explorer: make them with crate::stage::grid(), stack_panel(), canvas(), path() or font() instead:\n  {}", found.join("\n  ")));
+    }
+    println!("{} files looked at; every panel, path and font family is made the way that's freed", files.len());
+    Ok(())
+}
+
+/// Every .rs file under `dir`, but not under a `target` folder.
+fn rust_files(dir: &Path, into: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.file_name().is_some_and(|n| n != "target") {
+            rust_files(&path, into);
+        } else if path.extension().is_some_and(|x| x == "rs") {
+            into.push(path);
+        }
+    }
+}
+
+fn handlers_guarded() -> Result {
+    let dir = root().join("pms-tap").join("src");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten().map(|f| f.path()).filter(|p| p.extension().is_some_and(|x| x == "rs")).collect();
+    files.sort();
+    let (mut seen, mut bare) = (0, Vec::new());
+    for file in files {
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let (handlers, unguarded) = handlers(&text);
+        seen += handlers;
+        bare.extend(unguarded.iter().map(|line| format!("{}:{line}", file.display())));
+    }
+    if seen == 0 {
+        // Then it's this that's stopped seeing them, not the TAP that's stopped having them.
+        return Err(format!("found no handlers in {}", dir.display()));
+    }
+    if !bare.is_empty() {
+        return Err(format!("a panic in one of these would end Explorer; start its closure with crate::guard(|| ...):\n  {}", bare.join("\n  ")));
+    }
+    println!("all {seen} of the TAP's handlers go through guard");
+    Ok(())
+}
+
+/// How many handlers `text` makes (`SomethingHandler::new(|..| ..)`, with or without `::<..>`), and the lines of those whose
+/// closure doesn't begin with `crate::guard(`.
+fn handlers(text: &str) -> (usize, Vec<usize>) {
+    let (mut seen, mut bare, mut from) = (0, Vec::new(), 0);
+    while let Some(found) = text[from..].find("Handler::") {
+        let at = from + found;
+        from = at + "Handler::".len();
+        let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        if text[line_start..at].contains("//") {
+            continue;
+        }
+        let rest = &text[from..];
+        let rest = match rest.strip_prefix('<') {
+            Some(types) => match types.lines().next().and_then(|line| line.find(">::")) {
+                Some(end) => &types[end + ">::".len()..],
+                None => continue,
+            },
+            None => rest,
+        };
+        let Some(closure) = rest.strip_prefix("new(") else { continue };
+        seen += 1;
+        let closure = closure.trim_start();
+        let closure = closure.strip_prefix("move").map_or(closure, str::trim_start);
+        let body = closure.strip_prefix('|').and_then(|c| c.split_once('|')).map(|(_, body)| body.trim_start());
+        if !body.is_some_and(|body| body.starts_with("crate::guard(")) {
+            bare.push(text[..at].matches('\n').count() + 1);
+        }
+    }
+    (seen, bare)
 }
 
 /// The app's version: the workspace's (`[workspace.package]` in Cargo.toml), which every crate takes.
@@ -280,8 +505,10 @@ fn pgo_instrument() -> Result {
         .args(["build", "--release", "--target-dir"])
         .arg(&poom);
     run(&mut cmd)?;
-    let to = instrumented().join("pms-pimpbox.exe");
-    std::fs::copy(poom.join("release").join("pms-pimpbox.exe"), &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    for exe in PIMPBOX_EXES {
+        let to = instrumented().join(exe);
+        std::fs::copy(poom.join("release").join(exe), &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    }
     // The notifications come from toast_lab, which isn't what's measured: an ordinary build.
     run(cargo().args(["build", "--release", "-p", "pms", "--example", "toast_lab"]))?;
     // Build scripts and proc macros were instrumented too, and ran: what they recorded is no use.
@@ -386,7 +613,7 @@ fn pgo_train(seconds: u64) -> Result {
     let poke = |args: &[&str]| quietly(&poke, args);
     let mic = |s: &str| hold.exists() && quietly(&hold, &[s]);
 
-    // 0 s: both TVs flip up through their channels, from 1295 round to the console on 6, which comes on and plays its demos.
+    // 0 s: both TVs flip up through their channels, from 1295 round to the console on 304, which comes on and plays its demos.
     // 8 s: the microphone: a long hold (the broad warning, then the label), then quick ones (the label's "closed" path).
     until(8);
     println!("holding the microphone");
@@ -443,8 +670,8 @@ fn pgo_train(seconds: u64) -> Result {
     }
     quietly(&cli, &["daemon", "stop"]);
     let _ = d.wait();
-    // The daemon let go of the console, which ends with it, writing its profile as it goes.
-    if game && !gone("pms-pimpbox.exe", Duration::from_secs(15)) {
+    // The daemon let go of the console, which ends with it, writing its profile as it goes; and its game with that.
+    if game && !PIMPBOX_EXES.iter().all(|exe| gone(exe, Duration::from_secs(15))) {
         println!("warning: the PIMPBOX didn't end with the daemon, so it may not have written its profile");
     }
     if lab_ok && !registered {
@@ -533,7 +760,7 @@ fn pgo_build() -> Result {
     let mut cmd = cargo();
     release_profile(&mut cmd)
         .env("RUSTFLAGS", format!("-Cprofile-use={}", kept.display()))
-        .args(["build", "--release", "-p", "pms", "-p", "pms-gui", "-p", "pms-tap", "-p", "pms-twatch"]);
+        .args(["build", "--release", "-p", "pms", "-p", "pms-gui", "-p", "pms-tap", "-p", "pms-twatch", "-p", "pms-fetch"]);
     run(&mut cmd)?;
     doom(true)
 }
@@ -543,4 +770,23 @@ fn pgo(seconds: u64) -> Result {
     pgo_train(seconds)?;
     pgo_merge()?;
     pgo_build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handlers;
+
+    #[test]
+    fn a_handler_without_its_guard_is_found() {
+        let guarded = "el.Tapped(&TappedEventHandler::new(move |_, _| crate::guard(|| {\n    Ok(())\n})))\n";
+        assert_eq!(handlers(guarded), (1, vec![]));
+        let spelled_out = "x.Completed(&TypedEventHandler::<IInspectable, Args>::new(move |_, _| crate::guard(|| Ok(()))))\nlet h = DispatchedHandler::new(|| crate::guard(|| Ok(())));\n";
+        assert_eq!(handlers(spelled_out), (2, vec![]));
+
+        let bare = "let a = 1;\nel.Tapped(&TappedEventHandler::new(move |_, _| {\n    Ok(())\n}))\nlet h = EventHandler::<IInspectable>::new(|_, _| {\n    Ok(())\n});\n";
+        assert_eq!(handlers(bare), (2, vec![2, 5]), "by line");
+        // Its own guard, by another name, isn't the one that's looked for; and a comment's mention isn't a handler.
+        assert_eq!(handlers("PointerEventHandler::new(|_, _| guard(|| Ok(())))"), (1, vec![1]));
+        assert_eq!(handlers("// like PointerEventHandler::new(|_, _| { .. })\nfn handler() {}\n"), (0, vec![]));
+    }
 }

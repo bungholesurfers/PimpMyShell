@@ -30,8 +30,10 @@ DisableProgramGroupPage=yes
 DisableWelcomePage=no
 DisableDirPage=auto
 DisableReadyPage=yes
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+; x64 Windows only, and not Windows on Arm, which runs x64 programs but whose Explorer can't load an x64 DLL: the TAP
+; couldn't go in, and what was installed would do nothing. (x64compatible, as this was, lets that happen.)
+ArchitecturesAllowed=x64os
+ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0.22000
 UninstallDisplayIcon={app}\pms-gui.exe
 UninstallDisplayName=PimpMyShell
@@ -66,9 +68,12 @@ Source: "{#Bin}\pmsd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms_tap.dll"; DestDir: "{app}"; Flags: ignoreversion
-; The console, and Doom's engine in it: a program of its own, under the GPL, with what the GPL asks for beside it.
+; The console, and the game it plays on Doom's engine: programs of their own, under the GPL, with what the GPL asks for
+; beside them.
 Source: "{#Bin}\pms-pimpbox.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Bin}\pms-poom.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Bin}\pms-twatch.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Bin}\pms-fetch.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\pms-pimpbox\COPYING"; DestDir: "{app}"; DestName: "pms-pimpbox-COPYING.txt"; Flags: ignoreversion
 Source: "..\pms-pimpbox\engine\NOTICE.md"; DestDir: "{app}"; DestName: "pms-pimpbox-NOTICE.md"; Flags: ignoreversion
 Source: "..\pms.example.toml"; DestDir: "{app}"; Flags: ignoreversion
@@ -77,9 +82,8 @@ Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreve
 Source: "..\pms-gui\src\legal.txt"; Flags: dontcopy
 
 ; What earlier versions installed under names that have changed: the console was pms-doom before 0.1.5, and pms-poom after
-; that, until it was the PIMPBOX.
+; that, until it was the PIMPBOX. (pms-poom.exe is the console's game now, which [Files] puts in place of the old one.)
 [InstallDelete]
-Type: files; Name: "{app}\pms-poom.exe"
 Type: files; Name: "{app}\pms-poom-COPYING.txt"
 Type: files; Name: "{app}\pms-poom-NOTICE.md"
 Type: files; Name: "{app}\pms-doom.exe"
@@ -94,6 +98,10 @@ Name: "{autodesktop}\PimpMyShell"; Filename: "{app}\pms-gui.exe"; Tasks: desktop
 ; The same value (PimpMyShell) the settings' and tray's "start at sign-in" writes; the uninstaller removes it whichever wrote it (see below).
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PimpMyShell"; \
   ValueData: """{app}\pmsd.exe"""; Flags: uninsdeletevalue; Tasks: autostart; Check: AsksAboutSignIn
+
+[UninstallRun]
+; The helpers' sandboxes: their containers, and the permissions given to PimpMyShell's folders for them.
+Filename: "{app}\pms.exe"; Parameters: "sandbox off"; Flags: runhidden waituntilterminated; RunOnceId: "SandboxOff"
 
 [UninstallDelete]
 ; What the updater downloads: the last installer it fetched, its log, tried.txt; then the folder, if that emptied it.
@@ -136,9 +144,17 @@ Type: files; Name: "{localappdata}\PimpMyShell\wads\chosen.txt"
 Type: dirifempty; Name: "{localappdata}\PimpMyShell\wads"
 ; Where they are from 0.1.5 on, inside POOM's own folder among the games (POOM being what the console plays them with). Saved games stay, and so do the folders with them.
 Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\freedoom1.wad"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\freedoom2.wad"
 Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\doom1.wad"
 Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\freedoom-COPYING.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\chosen.txt"
+; The speed demos the console fetched from the Doom Speed Demo Archive (demos.rs), and what it noted of them.
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\demos\*.lmp"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\demos\demos.toml"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\demos\demos.toml-writing"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\demos\play.txt"
+Type: files; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\demos\play.txt-writing"
+Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\poom\wads\demos"
 Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\poom\wads"
 ; The console's compiled shader, which it compiles again whenever it isn't there: its own files by name, and the folders
 ; only if that leaves them empty.
@@ -149,8 +165,19 @@ Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\pimpbox\shaders"
 Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\pimpbox"
 Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya\poom"
 Type: dirifempty; Name: "{localappdata}\PimpMyShell\vidya"
-; Streamlink, fetched the same way.
+; Streamlink, fetched the same way, and the settings folder PimpMyShell gives it (its own, and each run's).
 Type: filesandordirs; Name: "{localappdata}\PimpMyShell\streamlink"
+Type: filesandordirs; Name: "{localappdata}\PimpMyShell\streamlink-home"
+; What the sandboxes last said went wrong, and the made-up logins each use goes to the SOCKS proxy as (net.rs).
+Type: files; Name: "{localappdata}\PimpMyShell\sandbox.txt"
+Type: files; Name: "{localappdata}\PimpMyShell\socks-logins.txt"
+; The welcome's news already shown, the programs the tray icon was put on the taskbar for, and the logo notifications show.
+Type: files; Name: "{localappdata}\PimpMyShell\news.txt"
+Type: files; Name: "{localappdata}\PimpMyShell\tray-pinned.txt"
+Type: files; Name: "{localappdata}\PimpMyShell\pms-128.png"
+; The TAP copies Explorer loaded, one name each (lib.rs). One Explorer still has loaded stays until it restarts.
+Type: files; Name: "{localappdata}\PimpMyShell\tap\pms_tap*.dll"
+Type: dirifempty; Name: "{localappdata}\PimpMyShell\tap"
 Type: files; Name: "{localappdata}\PimpMyShell\twatch.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\settings-page.txt"
 Type: files; Name: "{localappdata}\PimpMyShell\tree.txt"
@@ -297,10 +324,11 @@ begin
   end;
   EndOurs('pmsd.exe');
   EndOurs('pms-pimpbox.exe');
-  // What it was called before, for an update from one of those.
+  // The console's game; and what the console was called before 0.1.7, for an update from one of those.
   EndOurs('pms-poom.exe');
   EndOurs('pms-doom.exe');
   EndOurs('pms-twatch.exe');
+  EndOurs('pms-fetch.exe');
   if EndOurs('pms-gui.exe') then
     SettingsWereOpen := True;
   Sleep(300);

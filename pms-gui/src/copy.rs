@@ -5,340 +5,361 @@
 //! A setting is known by its id, `table.key` as the config file has it (`meter.unit`, `hotmic.color`), or `key` for
 //! a top-level one; a few say different things for different meter styles (`meter.names.disks`).
 
+use pms::lang::settings::{self as s, Id};
+
 /// The title and description of setting `id`. An id with nothing written here shows itself.
 pub fn setting(id: &str) -> (&str, &str) {
+    // The light look's are the dark look's, in a table of their own.
+    if let Some(rest) = id.strip_prefix("look.light.") {
+        return setting(match rest {
+            "tint" => "look.tint",
+            "grain" => "look.grain",
+            "gaps" => "look.gaps",
+            _ => id,
+        });
+    }
     match id {
         // General
-        "theme" => ("Theme", "Choose dark or light for the taskbar's look, or follow your Windows mode"),
-        "meter_height" => ("Meter height", "How much of the taskbar's height pies, graphs, and gauges use"),
-        "bar_height" => ("Bar height", "How much of the taskbar's height meters made of bars use"),
-        "interval_ms" => ("Update interval", "How often meters refresh, unless a meter has its own interval"),
-        "software_gpus" => ("Include software graphics adapters", "Count Microsoft Basic Render Driver, which runs on the CPU, in GPU meters"),
-        "rest_when_covered" => (
-            "Rest while the taskbar's covered",
-            "When a window fills the screen your taskbar's on (a game, a video, a presentation), nobody can see your TVs, so they stop drawing and the PIMPBOX rests. Twatch TVs with their sound off stop too; ones with sound go on playing it. All of it's back the moment the taskbar is",
-        ),
-        "rest_for_games" => (
-            "Rest while you play",
-            "When a game fills your screen and keeps your graphics card busy, your TVs show GAME ON and stop drawing, Twatch TVs make way, and the PIMPBOX stops, unless you've played it since it started. All come back about 20 seconds after the game",
-        ),
-        "max_fps" => ("Limit animation frame rate", "Cap ongoing animations, such as Hot Mic's and the notification rings. When it's off, they run at your display's refresh rate"),
-        "battery_fps" => ("Frame rate on battery", "A lower cap while your PC runs on battery. 0 means no cap"),
-        "value_font" => ("Meter font", "A fixed-width font keeps digits from shifting. Leave it empty to use Cascadia Mono, or Consolas"),
-        "update_check" => (
-            "Check for updates automatically",
-            "We check GitHub a while after PimpMyShell starts (1 to 30 minutes), then every day or two. New versions download in the background, and you choose when to install them",
-        ),
-        "update_channel" => ("Update channel", "Stable gets a version once it has proven itself. Latest gets every release as soon as it's published"),
+        "language" => (s::LANGUAGE.t(), s::LANGUAGE_HELP.t()),
+        "theme" => (s::THEME.t(), s::THEME_HELP.t()),
+        "meter_height" => (s::METER_HEIGHT.t(), s::METER_HEIGHT_HELP.t()),
+        "bar_height" => (s::BAR_HEIGHT.t(), s::BAR_HEIGHT_HELP.t()),
+        "interval_ms" => (s::INTERVAL_MS.t(), s::INTERVAL_MS_HELP.t()),
+        "software_gpus" => (s::SOFTWARE_GPUS.t(), s::SOFTWARE_GPUS_HELP.t()),
+        "rest_when_covered" => (s::REST_WHEN_COVERED.t(), s::REST_WHEN_COVERED_HELP.t()),
+        "rest_for_games" => (s::REST_FOR_GAMES.t(), s::REST_FOR_GAMES_HELP.t()),
+        "max_fps" => (s::MAX_FPS.t(), s::MAX_FPS_HELP.t()),
+        "battery_fps" => (s::BATTERY_FPS.t(), s::BATTERY_FPS_HELP.t()),
+        "value_font" => (s::VALUE_FONT.t(), s::VALUE_FONT_HELP.t()),
+        "update_check" => (s::UPDATE_CHECK.t(), s::UPDATE_CHECK_HELP.t()),
+        "update_channel" => (s::UPDATE_CHANNEL.t(), s::UPDATE_CHANNEL_HELP.t()),
+        "update_warn" => (s::UPDATE_WARN.t(), s::UPDATE_WARN_HELP.t()),
 
-        "notify_explorer" => ("Tell me when Explorer could use a restart", "Windows can't unload what we've added to Explorer, so updates add up. When it's holding a lot, you get a notification. Explorer only restarts if you ask"),
+        "notify_explorer" => (s::NOTIFY_EXPLORER.t(), s::NOTIFY_EXPLORER_HELP.t()),
 
         // TV and Twatch TV
-        "shuffle_seconds" => ("Time between shuffles", "How long a shuffling TV stays on a channel. This is for all your TVs, and their remotes can change it too"),
-        "shuffle_jitter" => ("Jitter", "Each shuffling TV changes channel a little late, by up to a quarter of the time above. When this is off, they all change together"),
-        "console_video" => ("Video mode", "How big a picture the console puts out, which is what its window shows, as many times over as fits your screen. Nearly everything of its day used 480p. It changes at once, if the console's on"),
-        "console_autostart" => ("Start the PIMPBOX when a TV tunes in", "Any TV landing on channel 6, even by shuffling, switches the console on. When this is off, channel 6 shows no signal until you switch it on"),
-        "tv_intro" => ("Channel surf when a TV starts up", "When PimpMyShell starts, or you add a TV, it flips up through its channels before it settles. When this is off, it comes on at the channel it was left on"),
-        "tv_intro_from" => ("Surf from", "The channel the run starts on"),
-        "tv_intro_to" => ("Surf to", "Where the run ends, and the TV stays. On 6 with a game, the PIMPBOX starts"),
-        "twatch.media_controls" => ("Show in Windows' media controls", "Where Windows shows what's playing: the volume flyout, the lock screen, and your keyboard's media keys. It's never by default, so a TwaTV doesn't take over your media keys"),
-        "twatch.pictures" => ("Pictures instead of video", "A still of the channel every minute, for hardly any CPU or network. It doesn't need Streamlink. On battery you get these anyway"),
-        "twatch.volume" => ("Volume", "How loud every TwaTV is, when its sound is on. Any set's remote can change it too"),
-        "twatch.metered_pictures" => ("Pictures on a metered connection", "Video takes about 1 to 1.5 Mbps a set at 480p. While Windows says your connection is metered, like a phone hotspot, sets show a picture a minute instead"),
-        "twatch.notify_live" => ("Tell me when a favorite goes live", "A notification, whichever TwaTV it ends up on. Select it to go to the channel"),
-        "twatch.top_quality" => ("Highest quality", "It goes lower by itself while your PC is busy or the network can't keep up, and a small light on the set says so. The remote says why"),
-        "twatch.more_sets" => ("Add TwaTVs by themselves", "While more favorites are live than you have TwaTVs, more appear, and they go away again when those streams end. Off, a purple plus by your TwaTVs offers one instead"),
-        "twatch.higher_favorite" => ("When a higher favorite goes live", "What every set does, unless its remote is set to This stream or This channel. Whatever it does, its remote tells you"),
-        "twatch.check_seconds" => ("How often to check each favorite", "Every favorite is looked at about this often, whatever its place in the list: in a random order, spread out, never two at once. Each look is one small request for a picture, with no account. On battery, it's twice as long"),
-        "twatch.check_extra_seconds" => ("Plus a random wait of", "Added to each favorite's wait, a new amount every time, so that looks don't come like clockwork"),
+        "shuffle_seconds" => (s::SHUFFLE_SECONDS.t(), s::SHUFFLE_SECONDS_HELP.t()),
+        "shuffle_jitter" => (s::SHUFFLE_JITTER.t(), s::SHUFFLE_JITTER_HELP.t()),
+        "console_video" => (s::CONSOLE_VIDEO.t(), s::CONSOLE_VIDEO_HELP.t()),
+        "console_autostart" => (s::CONSOLE_AUTOSTART.t(), s::CONSOLE_AUTOSTART_HELP.t()),
+        "console_demos" => (s::CONSOLE_DEMOS.t(), s::CONSOLE_DEMOS_HELP.t()),
+        "demos.when" => (s::DEMOS_WHEN.t(), s::DEMOS_WHEN_HELP.t()),
+        "demos.every_hours" => (s::DEMOS_EVERY_HOURS.t(), s::DEMOS_EVERY_HOURS_HELP.t()),
+        "demos.at_once" => (s::DEMOS_AT_ONCE.t(), s::DEMOS_AT_ONCE_HELP.t()),
+        "demos.gap_seconds" => (s::DEMOS_GAP_SECONDS.t(), s::DEMOS_GAP_SECONDS_HELP.t()),
+        "demos.most" => (s::DEMOS_MOST.t(), s::DEMOS_MOST_HELP.t()),
+        "demos.list_days" => (s::DEMOS_LIST_DAYS.t(), s::DEMOS_LIST_DAYS_HELP.t()),
+        "demos.fired_at_least" => (s::DEMOS_FIRED_AT_LEAST.t(), s::DEMOS_FIRED_AT_LEAST_HELP.t()),
+        "tv_intro" => (s::TV_INTRO.t(), s::TV_INTRO_HELP.t()),
+        "tv_intro_from" => (s::TV_INTRO_FROM.t(), s::TV_INTRO_FROM_HELP.t()),
+        "tv_intro_to" => (s::TV_INTRO_TO.t(), s::TV_INTRO_TO_HELP.t()),
+        "iss.online" => (s::ISS_ONLINE.t(), s::ISS_ONLINE_HELP.t()),
+        "iss.notify_flush" => (s::ISS_NOTIFY_FLUSH.t(), s::ISS_NOTIFY_FLUSH_HELP.t()),
+        "iss.bumps" => (s::ISS_BUMPS.t(), s::ISS_BUMPS_HELP.t()),
+        "twatch.media_controls" => (s::TWATCH_MEDIA_CONTROLS.t(), s::TWATCH_MEDIA_CONTROLS_HELP.t()),
+        "twatch.pictures" => (s::TWATCH_PICTURES.t(), s::TWATCH_PICTURES_HELP.t()),
+        "twatch.volume" => (s::TWATCH_VOLUME.t(), s::TWATCH_VOLUME_HELP.t()),
+        "twatch.metered_pictures" => (s::TWATCH_METERED_PICTURES.t(), s::TWATCH_METERED_PICTURES_HELP.t()),
+        "twatch.notify_live" => (s::TWATCH_NOTIFY_LIVE.t(), s::TWATCH_NOTIFY_LIVE_HELP.t()),
+        "twatch.top_quality" => (s::TWATCH_TOP_QUALITY.t(), s::TWATCH_TOP_QUALITY_HELP.t()),
+        "twatch.frame_rate" => (s::TWATCH_FRAME_RATE.t(), s::TWATCH_FRAME_RATE_HELP.t()),
+        "twatch.more_sets" => (s::TWATCH_MORE_SETS.t(), s::TWATCH_MORE_SETS_HELP.t()),
+        "twatch.more_sets_on" => (s::TWATCH_MORE_SETS_ON.t(), s::TWATCH_MORE_SETS_ON_HELP.t()),
+        "twatch.higher_favorite" => (s::TWATCH_HIGHER_FAVORITE.t(), s::TWATCH_HIGHER_FAVORITE_HELP.t()),
+        "twatch.check_seconds" => (s::TWATCH_CHECK_SECONDS.t(), s::TWATCH_CHECK_SECONDS_HELP.t()),
+        "twatch.check_extra_seconds" => (s::TWATCH_CHECK_EXTRA_SECONDS.t(), s::TWATCH_CHECK_EXTRA_SECONDS_HELP.t()),
 
         // Meters
-        "meter.label" => ("Name", "Shown next to the meter and in its tooltip"),
-        "meter.group" => ("Group", "Meters in different groups are separated by a divider"),
-        "meter.sideways" => ("Name on its side", "Turned to read downwards, it takes up less room across. On by default for disk and network meters"),
-        "meter.snug" => ("Attach to the previous meter", "No divider or space between this meter and the one before it"),
-        "meter.caption" => ("Show name on the taskbar", "The name always appears in the tooltip"),
-        "meter.style" => ("Style", "How the meter is drawn"),
-        "meter.expr" => ("Expression", "A formula over counter names and built-in values, using + - * / ( ) min max abs. Pies and bars take one per slice or bar"),
-        "meter.names" => ("Names", "One per slice or bar, shown in the tooltip"),
-        "meter.names.disks" => ("Bar names", "What tooltips call each disk's two bars: write, then read"),
-        "meter.names.nics" => ("Bar names", "What tooltips call each network adapter's two bars: upload, then download"),
-        "meter.colors" => ("Colors", "One per slice or bar"),
-        "meter.colors.cores" => ("Colors", "User time, then kernel time"),
-        "meter.colors.disks" => ("Colors", "Write, then read"),
-        "meter.colors.nics" => ("Colors", "Upload, then download"),
-        "meter.color" => ("Color", "The meter's color"),
-        "meter.max" => ("Full scale", "The value that fills the meter: a number or an expression. Choose None to scale automatically (a pie uses the sum of its slices)"),
-        "meter.unit" => ("Unit", "%, bytes, bytes/s, or bits/s (sizes and rates scale to K, M, and G), or any other suffix"),
-        "meter.decimals" => ("Decimal places", "Digits after the decimal point"),
-        "meter.interval_ms" => ("Update interval", "How often this meter refreshes. By default, it uses the general update interval"),
-        "meter.value" => ("Show value", "The value always appears in the tooltip"),
-        "meter.tooltip" => ("Show tooltip", "Details appear when you point to the meter"),
-        "meter.glow" => (
-            "Glow",
-            "Load glows with how busy each bar is now. Heat builds while a bar stays busy (full after about 8 seconds at 100%) and fades about 30 seconds after it stops",
-        ),
-        "meter.kernel" => ("Kernel time", "Where kernel time sits in each thread's bar: below user time, or above it"),
-        "meter.bar_width" => ("Bar width", "Each bar's width before bars narrow to fit. When it's off, bars fit automatically"),
-        "meter.vendors" => ("Label by manufacturer", "Label each GPU by its manufacturer, and color its bars to match"),
-        "meter.vendor_label" => ("Manufacturer labels", "Short labels (NV, RAD) or stock tickers (NVDA, AMD)"),
-        "meter.hold_seconds" => ("Hide idle GPUs after", "The GPU that was busy most recently stays visible. 0 keeps every GPU visible"),
-        "meter.hold_seconds.disks" => ("Hide idle disks after", "The disk Windows is on stays visible. 0 keeps every disk visible"),
-        "meter.hold_seconds.nics" => ("Hide idle adapters after", "The adapter your internet connection uses stays visible. 0 keeps every adapter visible"),
-        "meter.engines_fall_off" => ("Hide idle engines", "Hide individual idle engines too, not just whole GPUs"),
-        "meter.per_gpu" => (
-            "One pie per GPU",
-            "A pie for each graphics adapter with at least 1 GB of dedicated memory, in its manufacturer's color. We fill in the expression, full scale, and color",
-        ),
-        "meter.label_inside" => ("Name inside the pie", "Put the name inside the pie: never, only when space is short, or always"),
-        "meter.slice_glow" => ("Glowing slice", "The name of a slice that glows, as it's written under Names. Leave it empty for none"),
-        "meter.slice_glow_extend" => ("Slice stands out", "How far the slice can stick out past the pie while its amount is changing. At rest it doesn't"),
-        "meter.slice_glow_radius" => ("Glow radius", "How far the glow reaches"),
-        "meter.slice_glow_strength" => ("Glow strength", "How bright the glow is"),
-        "meter.slice_glow_color" => ("Glow color", "Empty uses the slice's own color"),
-        "meter.slice_glow_pulse_ms" => ("Glow pulse", "How long a slow pulse takes. 0 holds it steady"),
-        "meter.pressure" => ("Pressure point", "How full the first slice gets before the glow around the pie grows stronger"),
-        "meter.time_axis" => ("Time scale", "Logarithmic gives recent values the most room. Linear spaces every value evenly"),
-        "meter.history_seconds" => ("History length", "How far back the graph goes"),
-        "meter.show_above" => ("Show only above", "Hide the meter until its value reaches this number or expression"),
-        "meter.show_when" => (
-            "Show only when",
-            "Hide the meter until another value reaches a threshold, and hide it again once that value drops back. For example, show the pagefile only when memory runs low",
-        ),
+        "meter.label" => (s::METER_LABEL.t(), s::METER_LABEL_HELP.t()),
+        "meter.group" => (s::METER_GROUP.t(), s::METER_GROUP_HELP.t()),
+        "meter.sideways" => (s::METER_SIDEWAYS.t(), s::METER_SIDEWAYS_HELP.t()),
+        "meter.snug" => (s::METER_SNUG.t(), s::METER_SNUG_HELP.t()),
+        "meter.caption" => (s::METER_CAPTION.t(), s::METER_CAPTION_HELP.t()),
+        "meter.style" => (s::METER_STYLE.t(), s::METER_STYLE_HELP.t()),
+        "meter.expr" => (s::METER_EXPR.t(), s::METER_EXPR_HELP.t()),
+        "meter.names" => (s::METER_NAMES.t(), s::METER_NAMES_HELP.t()),
+        "meter.names.disks" => (s::METER_NAMES_DISKS.t(), s::METER_NAMES_DISKS_HELP.t()),
+        "meter.names.nics" => (s::METER_NAMES_NICS.t(), s::METER_NAMES_NICS_HELP.t()),
+        "meter.colors" => (s::METER_COLORS.t(), s::METER_COLORS_HELP.t()),
+        "meter.colors.cores" => (s::METER_COLORS_CORES.t(), s::METER_COLORS_CORES_HELP.t()),
+        "meter.colors.disks" => (s::METER_COLORS_DISKS.t(), s::METER_COLORS_DISKS_HELP.t()),
+        "meter.colors.nics" => (s::METER_COLORS_NICS.t(), s::METER_COLORS_NICS_HELP.t()),
+        "meter.color" => (s::METER_COLOR.t(), s::METER_COLOR_HELP.t()),
+        "meter.max" => (s::METER_MAX.t(), s::METER_MAX_HELP.t()),
+        "meter.unit" => (s::METER_UNIT.t(), s::METER_UNIT_HELP.t()),
+        "meter.decimals" => (s::METER_DECIMALS.t(), s::METER_DECIMALS_HELP.t()),
+        "meter.interval_ms" => (s::METER_INTERVAL_MS.t(), s::METER_INTERVAL_MS_HELP.t()),
+        "meter.value" => (s::METER_VALUE.t(), s::METER_VALUE_HELP.t()),
+        "meter.tooltip" => (s::METER_TOOLTIP.t(), s::METER_TOOLTIP_HELP.t()),
+        "meter.glow" => (s::METER_GLOW.t(), s::METER_GLOW_HELP.t()),
+        "meter.kernel" => (s::METER_KERNEL.t(), s::METER_KERNEL_HELP.t()),
+        "meter.bar_width" => (s::METER_BAR_WIDTH.t(), s::METER_BAR_WIDTH_HELP.t()),
+        "meter.vendors" => (s::METER_VENDORS.t(), s::METER_VENDORS_HELP.t()),
+        "meter.vendor_label" => (s::METER_VENDOR_LABEL.t(), s::METER_VENDOR_LABEL_HELP.t()),
+        "meter.hold_seconds" => (s::METER_HOLD_SECONDS.t(), s::METER_HOLD_SECONDS_HELP.t()),
+        "meter.hold_seconds.disks" => (s::METER_HOLD_SECONDS_DISKS.t(), s::METER_HOLD_SECONDS_DISKS_HELP.t()),
+        "meter.hold_seconds.nics" => (s::METER_HOLD_SECONDS_NICS.t(), s::METER_HOLD_SECONDS_NICS_HELP.t()),
+        "meter.engines_fall_off" => (s::METER_ENGINES_FALL_OFF.t(), s::METER_ENGINES_FALL_OFF_HELP.t()),
+        "meter.per_gpu" => (s::METER_PER_GPU.t(), s::METER_PER_GPU_HELP.t()),
+        "meter.label_inside" => (s::METER_LABEL_INSIDE.t(), s::METER_LABEL_INSIDE_HELP.t()),
+        "meter.slice_glow" => (s::METER_SLICE_GLOW.t(), s::METER_SLICE_GLOW_HELP.t()),
+        "meter.slice_glow_extend" => (s::METER_SLICE_GLOW_EXTEND.t(), s::METER_SLICE_GLOW_EXTEND_HELP.t()),
+        "meter.slice_glow_radius" => (s::METER_SLICE_GLOW_RADIUS.t(), s::METER_SLICE_GLOW_RADIUS_HELP.t()),
+        "meter.slice_glow_strength" => (s::METER_SLICE_GLOW_STRENGTH.t(), s::METER_SLICE_GLOW_STRENGTH_HELP.t()),
+        "meter.slice_glow_color" => (s::METER_SLICE_GLOW_COLOR.t(), s::METER_SLICE_GLOW_COLOR_HELP.t()),
+        "meter.slice_glow_pulse_ms" => (s::METER_SLICE_GLOW_PULSE_MS.t(), s::METER_SLICE_GLOW_PULSE_MS_HELP.t()),
+        "meter.pressure" => (s::METER_PRESSURE.t(), s::METER_PRESSURE_HELP.t()),
+        "meter.time_axis" => (s::METER_TIME_AXIS.t(), s::METER_TIME_AXIS_HELP.t()),
+        "meter.history_seconds" => (s::METER_HISTORY_SECONDS.t(), s::METER_HISTORY_SECONDS_HELP.t()),
+        "meter.show_above" => (s::METER_SHOW_ABOVE.t(), s::METER_SHOW_ABOVE_HELP.t()),
+        "meter.show_when" => (s::METER_SHOW_WHEN.t(), s::METER_SHOW_WHEN_HELP.t()),
 
         // Counters
-        "counter.name" => ("Name", "What expressions call this counter"),
-        "counter.path" => ("Path", "\\Object(instance)\\Counter, with * for every instance"),
-        "counter.agg" => ("Combine", "How instances (*) combine. GPU engine matches Task Manager's GPU %"),
-        "counter.default" => ("Fallback", "A value to use when the counter can't be read"),
+        "counter.name" => (s::COUNTER_NAME.t(), s::COUNTER_NAME_HELP.t()),
+        "counter.path" => (s::COUNTER_PATH.t(), s::COUNTER_PATH_HELP.t()),
+        "counter.agg" => (s::COUNTER_AGG.t(), s::COUNTER_AGG_HELP.t()),
+        "counter.default" => (s::COUNTER_DEFAULT.t(), s::COUNTER_DEFAULT_HELP.t()),
 
         // Taskbar look
-        "look.tint" => ("Tint", "Laid over the blurred desktop. Its transparency sets how much shows through"),
-        "look.grain" => ("Grain", "Noise over the tint"),
-        "look.gaps" => ("Fill between buttons", "Color the empty space between taskbar buttons"),
-        "start_glow.color" => ("Color", "The glow's color"),
-        "start_glow.hover" => ("Brightness on hover", "When you point to the Start button"),
-        "start_glow.press" => ("Brightness when pressed", "While you press the Start button"),
-        "start_glow.open" => ("Brightness while Start is open", "Also when you open Start with the Windows key"),
-        "start_glow.hover_ms" => ("Fade time", "How long the glow takes to fade in and out"),
-        "start_glow.press_ms" => ("Fade time when pressed", "Usually quicker"),
-        "start_glow.hover_radius" => ("Size on hover", "How far the glow reaches, in pixels"),
-        "start_glow.press_radius" => ("Size when pressed", "How far the glow reaches, in pixels"),
-        "app_glow.hover" => ("Brightness on hover", "When you point to an app button"),
-        "app_glow.press" => ("Brightness when pressed", "While you press an app button"),
-        "app_glow.hover_ms" => ("Fade time", "How long the glow takes to fade in and out"),
-        "app_glow.press_ms" => ("Fade time when pressed", "Usually quicker"),
-        "app_glow.hover_radius" => ("Size on hover", "How far the glow reaches, in pixels"),
-        "app_glow.press_radius" => ("Size when pressed", "How far the glow reaches, in pixels"),
+        "look.tint" => (s::LOOK_TINT.t(), s::LOOK_TINT_HELP.t()),
+        "look.grain" => (s::LOOK_GRAIN.t(), s::LOOK_GRAIN_HELP.t()),
+        "look.gaps" => (s::LOOK_GAPS.t(), s::LOOK_GAPS_HELP.t()),
+        "start_glow.color" => (s::START_GLOW_COLOR.t(), s::START_GLOW_COLOR_HELP.t()),
+        "start_glow.hover" => (s::START_GLOW_HOVER.t(), s::START_GLOW_HOVER_HELP.t()),
+        "start_glow.press" => (s::START_GLOW_PRESS.t(), s::START_GLOW_PRESS_HELP.t()),
+        "start_glow.open" => (s::START_GLOW_OPEN.t(), s::START_GLOW_OPEN_HELP.t()),
+        "start_glow.hover_ms" => (s::START_GLOW_HOVER_MS.t(), s::START_GLOW_HOVER_MS_HELP.t()),
+        "start_glow.press_ms" => (s::START_GLOW_PRESS_MS.t(), s::START_GLOW_PRESS_MS_HELP.t()),
+        "start_glow.hover_radius" => (s::START_GLOW_HOVER_RADIUS.t(), s::START_GLOW_HOVER_RADIUS_HELP.t()),
+        "start_glow.press_radius" => (s::START_GLOW_PRESS_RADIUS.t(), s::START_GLOW_PRESS_RADIUS_HELP.t()),
+        "app_glow.hover" => (s::APP_GLOW_HOVER.t(), s::APP_GLOW_HOVER_HELP.t()),
+        "app_glow.press" => (s::APP_GLOW_PRESS.t(), s::APP_GLOW_PRESS_HELP.t()),
+        "app_glow.hover_ms" => (s::APP_GLOW_HOVER_MS.t(), s::APP_GLOW_HOVER_MS_HELP.t()),
+        "app_glow.press_ms" => (s::APP_GLOW_PRESS_MS.t(), s::APP_GLOW_PRESS_MS_HELP.t()),
+        "app_glow.hover_radius" => (s::APP_GLOW_HOVER_RADIUS.t(), s::APP_GLOW_HOVER_RADIUS_HELP.t()),
+        "app_glow.press_radius" => (s::APP_GLOW_PRESS_RADIUS.t(), s::APP_GLOW_PRESS_RADIUS_HELP.t()),
 
         // Hot Mic
-        "hotmic.color" => ("Alert color", "The color of the alert"),
-        "hotmic.period_ms" => ("Pulse length", "One pulse of the alert. 0 keeps it steady"),
-        "hotmic.low" => ("Lowest opacity", "How faint the pulse gets"),
-        "hotmic.high" => ("Highest opacity", "How strong the pulse gets"),
-        "hotmic.broad_ms" => ("Full taskbar alert", "How long the whole taskbar alerts before the alert settles around its label"),
-        "hotmic.ignore" => ("Excluded apps", "Apps that never trigger the alert. Enter part of an app's name or path"),
-        "hotmic.position" => ("Where its label goes", "The label naming the apps: first, before your meters and TVs, or last, beside the tray. The Widgets page has it in its place too"),
+        "hotmic.color" => (s::HOTMIC_COLOR.t(), s::HOTMIC_COLOR_HELP.t()),
+        "hotmic.period_ms" => (s::HOTMIC_PERIOD_MS.t(), s::HOTMIC_PERIOD_MS_HELP.t()),
+        "hotmic.low" => (s::HOTMIC_LOW.t(), s::HOTMIC_LOW_HELP.t()),
+        "hotmic.high" => (s::HOTMIC_HIGH.t(), s::HOTMIC_HIGH_HELP.t()),
+        "hotmic.broad_ms" => (s::HOTMIC_BROAD_MS.t(), s::HOTMIC_BROAD_MS_HELP.t()),
+        "hotmic.ignore" => (s::HOTMIC_IGNORE.t(), s::HOTMIC_IGNORE_HELP.t()),
+        "hotmic.position" => (s::HOTMIC_POSITION.t(), s::HOTMIC_POSITION_HELP.t()),
+
+        // Sandbox
+        // Each by its program's file name, as Windows shows the process: not something that's translated.
+        "sandbox.fetch" => ("pms-fetch.exe", s::SANDBOX_FETCH_HELP.t()),
+        "sandbox.twatch" => ("pms-twatch.exe", s::SANDBOX_TWATCH_HELP.t()),
+        "sandbox.streamlink" => ("python.exe", s::SANDBOX_STREAMLINK_HELP.t()),
+        "sandbox.poom" => ("pms-poom.exe", s::SANDBOX_POOM_HELP.t()),
+        "efficiency.daemon" => (s::EFFICIENCY_DAEMON.t(), s::EFFICIENCY_DAEMON_HELP.t()),
+        "efficiency.twatch" => (s::EFFICIENCY_TWATCH.t(), s::EFFICIENCY_TWATCH_HELP.t()),
+        "efficiency.helpers" => (s::EFFICIENCY_HELPERS.t(), s::EFFICIENCY_HELPERS_HELP.t()),
+        "efficiency.pimpbox" => (s::EFFICIENCY_PIMPBOX.t(), s::EFFICIENCY_PIMPBOX_HELP.t()),
 
         // Notifications
-        "toasts.duration_ms" => (
-            "Display time",
-            "How long a notification stays in front, or at most 4 seconds if more are waiting. Those that ask for longer get at least 25 seconds. Alarms, calls, and reminders stay until you respond",
-        ),
-        "toasts.confirm_clicks" => ("Ask before opening", "When you select a notification, show what it's about to open and let you say no. A window has room for every detail"),
-        "toasts.position" => ("Where they appear", "Where cards stop. Left of the clock, they cover the tray. Left of your first TV, or of the Hot Mic label, that and everything to its right stays in sight; when it isn't showing, cards stop at the tray. On a full taskbar they cover the whole tray"),
-        "toasts.style" => ("Card style", "Standard matches Windows. Pimped turns cards gold, with a sheen that sweeps across them"),
-        "toasts.ignore" => ("Excluded apps", "Apps that keep their standard pop-ups. Enter part of an app's name or ID"),
+        "toasts.duration_ms" => (s::TOASTS_DURATION_MS.t(), s::TOASTS_DURATION_MS_HELP.t()),
+        "toasts.confirm_clicks" => (s::TOASTS_CONFIRM_CLICKS.t(), s::TOASTS_CONFIRM_CLICKS_HELP.t()),
+        "toasts.position" => (s::TOASTS_POSITION.t(), s::TOASTS_POSITION_HELP.t()),
+        "toasts.style" => (s::TOASTS_STYLE.t(), s::TOASTS_STYLE_HELP.t()),
+        "toasts.ignore" => (s::TOASTS_IGNORE.t(), s::TOASTS_IGNORE_HELP.t()),
 
         _ => (id, ""),
     }
 }
 
-/// The key the config file has for setting `id`: its last part (`meter.names.disks` is `names`).
-pub fn key(id: &str) -> &str {
+/// Where setting `id` is in pms.toml, written as the file has it, so that it can be found there: `language` at the top,
+/// `[twatch] volume` in a table, `[[meter]] names` in each meter (`meter.names.disks` is a kind of `names`), `[backdrop] tint`
+/// or `[backdrop.light] tint` for the looks, `[counters] path` inside a counter's own `{ ... }`.
+pub fn key(id: &str) -> String {
     let mut parts = id.split('.');
     let first = parts.next().unwrap_or(id);
-    parts.next().unwrap_or(first)
+    let Some(second) = parts.next() else { return first.to_string() };
+    match first {
+        "meter" => format!("[[meter]] {second}"),
+        "counter" if second == "name" => "[counters]".to_string(),
+        "counter" => format!("[counters] {second}"),
+        "look" if second == "light" => format!("[backdrop.light] {}", parts.next().unwrap_or_default()),
+        "look" => format!("[backdrop] {second}"),
+        table => format!("[{table}] {second}"),
+    }
 }
 
 /// Why the classic window is showing, where nobody asked for it.
-pub const CLASSIC_NO_RUNTIME: &str = "You're seeing the classic settings window because this PC doesn't have the Windows App Runtime 2.4 or later, which the new window needs. It's a Microsoft component that PimpMyShell doesn't install for you. Every setting works the same here.";
-pub const CLASSIC_FAILED: &str = "You're seeing the classic settings window because the new window couldn't start on this PC. Every setting works the same here.";
-pub const RUNTIME_DOWNLOAD: (&str, &str) = ("Get the Windows App Runtime", "https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads");
-
-/// The first run's page on each of the extras.
-pub const WELCOME_TV: (&str, &str) = ("Your taskbar got cable", "There's a little TV down there now. Go on, point at it.");
-pub const WELCOME_TV_POINTS: [(&str, &str, &str); 3] = [
-    ("\u{E8B2}", "The remote's in the tooltip", "Channels, shuffle, power, and another TV if one isn't enough. They can all watch something different"),
-    ("\u{E7F4}", "Six channels of nonsense", "A test card, a crab that never hits the corner, static, the PimpCast, a console, and a very angry man from 1986"),
-    ("\u{E7E8}", "Off means out of your way", "Switch one off and a few seconds later it's just a small button. Click it to bring the set back"),
-];
-pub const WELCOME_TV_ON: (&str, &str) = ("Keep a TV on my taskbar", "You can add more, or take them all away, in Settings, under TV. Its games are under PIMPBOX");
-/// What's new, for somebody who had PimpMyShell before it had these.
-pub const WHATS_NEW: (&str, &str) = ("Your taskbar got toys", "Since you last looked: a TV with six channels, a console on channel 6, and Twitch on a little flat-screen. Three quick stops, and each is yours to keep or skip.");
-pub const WELCOME_PIMPBOX: (&str, &str) = ("Pimps on Mars.", "Try it on Channel 6. Play games like Doom, Freedoom, etc. Click on the TV to pop a window on your desktop. Alt+Tab when the boss walks by (Alt+F4 works too. Game state isn't nuked.)");
-pub const WELCOME_TWATCH: (&str, &str) = ("Twatch TV", "Twitch, on a little flat-screen, live. Name your favorite channels and the best one that's on just plays. No account, no sign-in, nothing to click.");
-pub const WELCOME_TWATCH_POINTS: [(&str, &str, &str); 3] = [
-    ("\u{E734}", "Best first", "Your favorites go in order. When a better one goes live, it takes over. Switch on more sets, and up to three come out by themselves when a few are on"),
-    ("\u{E945}", "Easy on your PC", "480p by default, and lower by itself when your PC or the network is struggling"),
-    ("\u{E83F}", "Easy on your battery", "Off the charger it shows a new picture every minute instead, and video comes back when you plug in"),
-];
-pub const WELCOME_TWATCH_ON: (&str, &str) = ("Put a Twatch TV on my taskbar", "Then add your channels and get Streamlink in Settings, under Twatch TV");
-/// The same, when there are no channels yet: Settings opens there at the end.
-pub const WELCOME_TWATCH_NEXT: &str = "When you're done here, Settings opens on Twatch TV, to add your channels and get Streamlink for video";
-/// And while it's switched off.
-pub const WELCOME_TWATCH_OFF: &str = "Switch it on, and Settings opens on Twatch TV when you're done, to add your channels and get Streamlink for video";
+pub const CLASSIC_NO_RUNTIME: Id = s::CLASSIC_NO_RUNTIME;
+pub const CLASSIC_FAILED: Id = s::CLASSIC_FAILED;
+pub const RUNTIME_DOWNLOAD: (Id, &str) = (s::RUNTIME_DOWNLOAD, "https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads");
 
 /// Lines of the settings file that aren't settings, which are left out so that the rest loads.
-pub const IGNORED_LINES: &str = "Everything else loaded. A setting that couldn't be used is back to its default, a line that isn't a setting is left out, and each is marked in red where it belongs. Saving a change here leaves them out of the file. To keep one, fix it in the file and save it.";
+pub const IGNORED_LINES: Id = s::IGNORED_LINES;
 
 /// Why the favorites and the network settings have files of their own.
-pub const PRIVATE_FILES: &str = "Your favorites and network settings are kept out of the settings file, so you can share that file for help without them.";
+pub const PRIVATE_FILES: Id = s::PRIVATE_FILES;
 
 /// What's in the logs, and what isn't (logfile.rs, the daemon's lines on toasts, system.rs's report): its title, what's left out,
 /// and what each file can say about you. Kept to what the code logs: a new kind of line that says something about somebody goes here.
-pub const LOG_PRIVACY: (&str, &str) = (
-    "What your logs can say about you",
-    "Your Windows user name, what your notifications say, your proxy and your list of favorites are left out. The rest is there to help fix things, and people often share logs: read one before you do.",
-);
-pub const LOG_CONTENTS: &[(&str, &[&str])] = &[
-    (
-        "daemon.log",
-        &[
-            "When you used your PC: every line has the date and time, in UTC, so not where you are",
-            "The names of apps that notify you, and of apps that use your microphone",
-            "Twitch channels from your favorites, when something about one comes up",
-            "Which game the PIMPBOX played",
-            "When a game was in front of everything, though not which one",
-            "File and folder paths, with your user name taken out",
-            "Your version of Windows, and other software that's loaded into Explorer or changes the taskbar",
-            "Error messages from Windows, and from Streamlink",
-            "Whether you use a proxy, though never its address",
-        ],
-    ),
-    ("tap.log", &["When you used your PC: every line has the date and time, in UTC", "Your TVs' names, and errors from inside the taskbar"]),
-    (
-        "A saved report, besides the end of both logs",
-        &["Your settings file, with your meters and the apps you've excluded from Hot Mic and Notification Toast", "How your taskbar is laid out: what's in it, without any window's title"],
-    ),
+pub const LOG_PRIVACY: (Id, Id) = (s::LOG_PRIVACY, s::LOG_PRIVACY_ABOUT);
+pub const LOG_CONTENTS: &[(Id, &[Id])] = &[
+    (s::LOG_DAEMON, &[s::LOG_DAEMON_1, s::LOG_DAEMON_2, s::LOG_DAEMON_3, s::LOG_DAEMON_4, s::LOG_DAEMON_5, s::LOG_DAEMON_6, s::LOG_DAEMON_7, s::LOG_DAEMON_8, s::LOG_DAEMON_9]),
+    (s::LOG_TAP, &[s::LOG_TAP_1, s::LOG_TAP_2]),
+    (s::LOG_REPORT, &[s::LOG_REPORT_1, s::LOG_REPORT_2]),
 ];
 
 /// LOG_CONTENTS, as bulleted lines.
 pub fn log_contents() -> String {
-    LOG_CONTENTS.iter().map(|(file, lines)| format!("{file}\n{}", lines.iter().map(|l| format!("  •  {l}")).collect::<Vec<_>>().join("\n"))).collect::<Vec<_>>().join("\n\n")
+    LOG_CONTENTS.iter().map(|(file, lines)| format!("{}\n{}", file.t(), lines.iter().map(|l| format!("  •  {}", l.t())).collect::<Vec<_>>().join("\n"))).collect::<Vec<_>>().join("\n\n")
 }
 
 /// The small print for what floats behind the settings window (dollars.rs).
 pub const LEGAL: &str = include_str!("legal.txt");
 
+/// The speed demos known for the game in `iwad`, in map order, then by category.
+pub fn demos_known(iwad: &std::path::Path) -> Vec<pms::demos::Demo> {
+    let mut known = pms::demos::known(iwad);
+    known.sort_by(|a, b| (&a.level, &a.category).cmp(&(&b.level, &b.category)));
+    known
+}
+
+/// How far finding and checking demos has got, and how many are shown, of those that play, with `fired_at_least`.
+pub fn demos_so_far(known: &[pms::demos::Demo], fired_at_least: u32) -> String {
+    let checked = known.iter().filter(|d| d.checked).count();
+    let plays = known.iter().filter(|d| d.plays).count();
+    let shown = known.iter().filter(|d| pms::demos::shown(d, fired_at_least)).count();
+    let waiting = known.len() - checked;
+    if known.is_empty() {
+        s::PIMPBOX_DEMOS_LOOKING.t().to_string()
+    } else {
+        s::PIMPBOX_DEMOS_SO_FAR.with(&[("plays", &plays), ("checked", &checked), ("waiting", &waiting), ("shown", &shown)])
+    }
+}
+
+/// A demo, as its map, category and time: E1M2 · UV Speed · 0:21.94.
+pub fn demo_title(d: &pms::demos::Demo) -> String {
+    format!("{} · {} · {}", d.level, d.category, d.time)
+}
+
+/// Who played it, and with what, and how much shooting there is in it.
+pub fn demo_about(d: &pms::demos::Demo) -> String {
+    s::PIMPBOX_DEMO_BY.with(&[("players", &d.players.join(", ")), ("engine", &d.engine), ("fired", &d.fired)])
+}
+
+/// Every program that does each use of the network, by its file name, and what it does of it: for the Network page, so that
+/// what goes online is never only "PimpMyShell". A new use, or a new program doing one, goes here as well as in net::USES.
+pub fn programs(what: pms::net::Use) -> &'static [(&'static str, Id)] {
+    use pms::net::Use;
+    match what {
+        Use::Live => &[("pms-fetch.exe", s::NET_LIVE_FETCH)],
+        Use::Streams | Use::Video => &[("python.exe", s::NET_STREAMS_STREAMLINK), ("pms-fetch.exe", s::NET_STREAMS_FETCH), ("pms-twatch.exe", s::NET_STREAMS_TWATCH), ("pms-fetch.exe", s::NET_RELAY)],
+        Use::Updates => &[("pms-fetch.exe", s::NET_UPDATES_FETCH)],
+        Use::Downloads => &[("pms-fetch.exe", s::NET_DOWNLOADS_FETCH)],
+        Use::Iss => &[("pms-fetch.exe", s::NET_ISS_FETCH)],
+    }
+}
+
 /// Choices: each value as the file has it, and what the window calls it.
-pub const THEMES: &[(&str, &str)] = &[("auto", "Use my Windows mode"), ("dark", "Dark"), ("light", "Light")];
-pub const HEIGHTS: &[(&str, &str)] = &[("compact", "Compact (75%)"), ("tall", "Tall (88%)"), ("full", "Full")];
-pub const CHANNELS: &[(&str, &str)] = &[("stable", "Stable"), ("latest", "Latest")];
-pub const CLEAR_SHADERS: (&str, &str) = ("Compiled shaders", "The PIMPBOX compiles its boot animation for your graphics card once, and keeps the result. Clearing it makes it compile again the next time it comes on, which takes a moment");
-pub const CLEAR_SHADERS_ASK: &str = "This switches the PIMPBOX off, which ends the game it's playing: anything you haven't saved is lost. Its compiled shaders are then deleted. The next time it comes on it compiles them again, showing a small wheel while it does.";
-pub const CONSOLE_VIDEO: &[(&str, &str)] = &[("480p", "480p (640 by 480)"), ("720p", "720p (1280 by 720)"), ("1080i", "1080i (1920 by 1080)")];
-pub const TOAST_STYLES: &[(&str, &str)] = &[("standard", "Standard"), ("pimped", "Pimped")];
-pub const TOAST_POSITIONS: &[(&str, &str)] = &[("clock", "Left of the clock"), ("tray", "Left of the system tray"), ("tv", "Left of your first TV"), ("mic", "Left of the Hot Mic label")];
-pub const CONFIRMS: &[(&str, &str)] = &[("card", "In the notification"), ("window", "In a window"), ("off", "Don't ask")];
-pub const MIC_POSITIONS: &[(&str, &str)] = &[("tray", "Last, beside the tray"), ("start", "First, before your meters and TVs")];
-pub const STYLES: &[(&str, &str)] = &[
-    ("history", "History graph"),
-    ("bar", "Bar"),
-    ("pie", "Pie"),
-    ("bars", "Bars"),
-    ("cores", "CPU threads"),
-    ("engines", "GPU engines"),
-    ("disks", "Disks"),
-    ("nics", "Network adapters"),
+pub const THEMES: &[(&str, Id)] = &[("auto", s::THEMES_AUTO), ("dark", s::THEMES_DARK), ("light", s::THEMES_LIGHT)];
+pub const HEIGHTS: &[(&str, Id)] = &[("compact", s::HEIGHTS_COMPACT), ("tall", s::HEIGHTS_TALL), ("full", s::HEIGHTS_FULL)];
+pub const CHANNELS: &[(&str, Id)] = &[("stable", s::CHANNELS_STABLE), ("latest", s::CHANNELS_LATEST)];
+pub const CLEAR_SHADERS: (Id, Id) = (s::CLEAR_SHADERS, s::CLEAR_SHADERS_ABOUT);
+pub const CLEAR_SHADERS_ASK: Id = s::CLEAR_SHADERS_ASK;
+pub const DEMOS_WHEN: &[(&str, Id)] = &[("always", s::DEMOS_WHEN_ALWAYS), ("console", s::DEMOS_WHEN_CONSOLE)];
+pub const CONSOLE_VIDEO: &[(&str, Id)] = &[("480p", s::CONSOLE_VIDEO_480P), ("720p", s::CONSOLE_VIDEO_720P), ("1080i", s::CONSOLE_VIDEO_1080I)];
+pub const TOAST_STYLES: &[(&str, Id)] = &[("standard", s::TOAST_STYLES_STANDARD), ("pimped", s::TOAST_STYLES_PIMPED)];
+pub const TOAST_POSITIONS: &[(&str, Id)] = &[("clock", s::TOAST_POSITIONS_CLOCK), ("tray", s::TOAST_POSITIONS_TRAY), ("tv", s::TOAST_POSITIONS_TV), ("mic", s::TOAST_POSITIONS_MIC)];
+pub const CONFIRMS: &[(&str, Id)] = &[("card", s::CONFIRMS_CARD), ("window", s::CONFIRMS_WINDOW), ("off", s::CONFIRMS_OFF)];
+pub const MIC_POSITIONS: &[(&str, Id)] = &[("tray", s::MIC_POSITIONS_TRAY), ("start", s::MIC_POSITIONS_START)];
+pub const STYLES: &[(&str, Id)] = &[
+    ("history", s::STYLES_HISTORY),
+    ("bar", s::STYLES_BAR),
+    ("pie", s::STYLES_PIE),
+    ("bars", s::STYLES_BARS),
+    ("cores", s::STYLES_CORES),
+    ("engines", s::STYLES_ENGINES),
+    ("disks", s::STYLES_DISKS),
+    ("nics", s::STYLES_NICS),
 ];
-pub const UNITS: &[(&str, &str)] = &[("", "None"), ("%", "%"), ("bytes", "Bytes"), ("bytes/s", "Bytes/s"), ("bits/s", "Bits/s")];
-pub const GLOWS: &[(&str, &str)] = &[("level", "Load"), ("heat", "Heat"), ("off", "Off")];
-pub const KERNELS: &[(&str, &str)] = &[("bottom", "Below user time"), ("top", "Above user time")];
-pub const VENDOR_LABELS: &[(&str, &str)] = &[("short", "Short (NV, RAD)"), ("ticker", "Tickers (NVDA, AMD)")];
-pub const INSIDE: &[(&str, &str)] = &[("never", "Never"), ("auto", "When space is short"), ("always", "Always")];
-pub const TIME_AXES: &[(&str, &str)] = &[("log", "Logarithmic"), ("linear", "Linear")];
-pub const AGGS: &[(&str, &str)] = &[("sum", "Sum"), ("max", "Maximum"), ("min", "Minimum"), ("avg", "Average"), ("engine", "GPU engine")];
+pub const UNITS: &[(&str, Id)] = &[("", s::UNITS_NONE), ("%", s::UNITS_PERCENT), ("bytes", s::UNITS_BYTES), ("bytes/s", s::UNITS_BYTES_S), ("bits/s", s::UNITS_BITS_S)];
+pub const GLOWS: &[(&str, Id)] = &[("level", s::GLOWS_LEVEL), ("heat", s::GLOWS_HEAT), ("off", s::GLOWS_OFF)];
+pub const KERNELS: &[(&str, Id)] = &[("bottom", s::KERNELS_BOTTOM), ("top", s::KERNELS_TOP)];
+pub const VENDOR_LABELS: &[(&str, Id)] = &[("short", s::VENDOR_LABELS_SHORT), ("ticker", s::VENDOR_LABELS_TICKER)];
+pub const INSIDE: &[(&str, Id)] = &[("never", s::INSIDE_NEVER), ("auto", s::INSIDE_AUTO), ("always", s::INSIDE_ALWAYS)];
+pub const TIME_AXES: &[(&str, Id)] = &[("log", s::TIME_AXES_LOG), ("linear", s::TIME_AXES_LINEAR)];
+pub const AGGS: &[(&str, Id)] = &[("sum", s::AGGS_SUM), ("max", s::AGGS_MAX), ("min", s::AGGS_MIN), ("avg", s::AGGS_AVG), ("engine", s::AGGS_ENGINE)];
 
 /// Pages: title, and what's on them.
-pub const GENERAL: (&str, &str) = ("General", "");
-pub const METERS: (&str, &str) = ("Meters", "Your meters, in their order on the taskbar, left to right. Select one to change it, and move it with the arrows. Where they go among your TVs is on the Widgets page.");
+pub const GENERAL: (Id, Id) = (s::GENERAL, s::GENERAL_ABOUT);
+pub const METERS: (Id, Id) = (s::METERS, s::METERS_ABOUT);
 /// When PimpMyShell gets out of the way, and what it does by itself.
-pub const POWER: (&str, &str) = ("Power & performance", "When PimpMyShell gets out of the way: when nobody can see it, for your games, on battery, and for your memory and your data.");
-pub const POWER_BY_ITSELF: &str = "Some of it happens by itself. On battery, a TV you leave alone sleeps, and Twatch TVs show pictures. When memory or video memory runs short, Twatch TVs make way, and so does the PIMPBOX, unless you've been playing it. When the PC is busy, TVs draw at half speed.";
+pub const POWER: (Id, Id) = (s::POWER, s::POWER_ABOUT);
+pub const POWER_BY_ITSELF: Id = s::POWER_BY_ITSELF;
 /// Under Twatch TV's settings: where its pictures went.
-pub const TWATCH_POWER: &str = "Pictures instead of video, to save memory or data, are under Power & performance.";
+pub const TWATCH_POWER: Id = s::TWATCH_POWER;
 /// The logs' page.
-pub const LOGS: (&str, &str) = ("Logs", "What PimpMyShell writes down as it goes, to help fix things when they go wrong.");
+pub const LOGS: (Id, Id) = (s::LOGS, s::LOGS_ABOUT);
 /// The page of what's along the taskbar, and its notes.
-pub const WIDGETS: (&str, &str) = ("Widgets", "What's along the taskbar beside the system tray, in its order: your meters, together; each TV and Twatch TV; and the Hot Mic label, at one end or the other. When space runs short they squeeze up, then the ones nearest the tray hide first (never the Hot Mic label).");
-pub const WIDGET_MIC_FIRST: &str = "Its label, while an app uses your mic: first, before your meters and TVs";
-pub const WIDGET_MIC_LAST: &str = "Its label, while an app uses your mic: last, beside the tray";
-pub const WIDGETS_NONE: &str = "Nothing's on the taskbar yet: add meters, a TV or a Twatch TV on their pages.";
-pub const WIDGETS_NO_MIC: &str = "Hot Mic is off. Switched on, under Hot Mic, its label goes at one end of these.";
+pub const WIDGETS: (Id, Id) = (s::WIDGETS, s::WIDGETS_ABOUT);
+pub const WIDGET_MIC_FIRST: Id = s::WIDGET_MIC_FIRST;
+pub const WIDGET_MIC_LAST: Id = s::WIDGET_MIC_LAST;
+pub const WIDGETS_NONE: Id = s::WIDGETS_NONE;
+pub const WIDGETS_NO_MIC: Id = s::WIDGETS_NO_MIC;
 /// A program of PimpMyShell's (`file`) isn't where the rest are.
 pub fn part_missing(file: &str) -> String {
     let dir = pms::parts::path(file).and_then(|p| p.parent().map(pms::shown)).unwrap_or_default();
-    format!(
-        "It should be with the rest of PimpMyShell, in {dir}, but it isn't, so {}. An antivirus program or a cleanup tool may have taken it away. Installing PimpMyShell again puts it back, and keeps your settings.",
-        pms::parts::without(file)
-    )
+    s::PART_MISSING.with(&[("dir", &dir), ("so", &pms::parts::without(file))])
 }
 /// Under the list of what's in the taskbar.
-pub const ORDER_NOTE: &str = "Twatch TVs that come and go by themselves follow the last one, and so do their buttons. Notification cards slide in over the tray's end: where they stop is under Notification Toast.";
-pub const COUNTERS: (&str, &str) = (
-    "Performance counters",
-    "The Windows performance counters your meters read, by their English paths. Use their names in meter expressions, along with ram_total, vram_total, swap_total, swap_used, and cpu_count. To find paths, run typeperf -q.",
-);
-pub const LOOK: (&str, &str) = ("Taskbar look", "Replace the taskbar's standard acrylic with your own background, with a look for dark mode and one for light mode.");
-pub const TV: (&str, &str) = ("TV", "A little TV in your taskbar. Point at it for its remote: channels, shuffle, power, and another TV if one isn't enough. Channel 6 is the PIMPBOX, your console: its games are under PIMPBOX.");
-pub const TV_HELP: &str = "On the TV: click the picture to stop shuffling. On channel 6, click again to play. On battery, a TV you leave alone sleeps.";
-pub const PIMPBOX: (&str, &str) = ("PIMPBOX", "A console on channel 6 of your TVs. Give it a game, and any TV tuned to 6 plays it. It plays Doom's games with POOM (room).");
-pub const PIMPBOX_HELP: &str = "On a TV on channel 6, click the picture to play: a window opens on your desktop. Esc opens the game's menu. Alt+Tab, or clicking away, lets go of the mouse. Closing the window pauses the game. Changing the channel doesn't turn the console off: it has its own power button on the TV's remote. Asking for channel 6 with no game brings you here.";
+pub const ORDER_NOTE: Id = s::ORDER_NOTE;
+pub const COUNTERS: (Id, Id) = (s::COUNTERS, s::COUNTERS_ABOUT);
+pub const LOOK: (Id, Id) = (s::LOOK, s::LOOK_ABOUT);
+pub const TV: (Id, Id) = (s::TV, s::TV_ABOUT);
+pub const TV_HELP: Id = s::TV_HELP;
+pub const PIMPBOX: (Id, Id) = (s::PIMPBOX, s::PIMPBOX_ABOUT);
+pub const NUMBER_ONE: (Id, Id) = (s::NUMBER_ONE, s::NUMBER_ONE_ABOUT);
+pub const PIMPBOX_HELP: Id = s::PIMPBOX_HELP;
 /// Where the order of what's in the taskbar is changed, for the pages of what's in it.
-pub const ORDER_HINT: &str = "To move it along the taskbar, use the arrows on the Widgets page.";
-pub const TWATCH: (&str, &str) = ("Twatch TV", "A flat-screen set that plays your favorite Twitch channels while they're live, as live video in your taskbar. Point at it for its remote, and click the picture to open the channel. On battery it shows pictures instead, and goes back to video when you plug in. Live video needs Streamlink, just below.");
-pub const TWATCH_FAVORITES: &str = "Your favorite channels, best first. Nothing else about you or your account is used: there's no sign-in.";
-pub const TWATCH_AS_TEXT: &str = "One channel per line, best first. Names, @names and twitch.tv links all work. Nothing changes until you save.";
-pub const TWATCH_HIGHER: [(&str, &str); 2] = [("switch", "Switch to it"), ("stay", "Stay on what's playing")];
-pub const TWATCH_CHECKS: [(&str, &str); 6] = [("60", "Every minute"), ("120", "Every 2 minutes"), ("300", "Every 5 minutes"), ("600", "Every 10 minutes"), ("900", "Every 15 minutes"), ("1800", "Every 30 minutes")];
-pub const TWATCH_CHECK_EXTRAS: [(&str, &str); 5] = [("0", "None"), ("60", "Up to a minute"), ("120", "Up to 2 minutes"), ("300", "Up to 5 minutes"), ("600", "Up to 10 minutes")];
-pub const TWATCH_QUALITIES: [(&str, &str); 5] = [("1080p60", "1080p, 60 frames a second"), ("720p60", "720p, 60 frames a second"), ("720p", "720p, 30 frames a second"), ("480p", "480p, 30 frames a second"), ("360p", "360p")];
-pub const TWATCH_MORE_SETS: [(&str, &str); 3] = [("0", "Off"), ("1", "Up to one more"), ("2", "Up to two more")];
+pub const ORDER_HINT: Id = s::ORDER_HINT;
+pub const TWATCH: (Id, Id) = (s::TWATCH, s::TWATCH_ABOUT);
+pub const TWATCH_FAVORITES: Id = s::TWATCH_FAVORITES;
+/// And how the list is put in order, where it can be dragged.
+pub const TWATCH_DRAG: Id = s::TWATCH_DRAG;
+pub const TWATCH_AS_TEXT: Id = s::TWATCH_AS_TEXT;
+pub const TWATCH_HIGHER: [(&str, Id); 2] = [("switch", s::TWATCH_HIGHER_SWITCH), ("stay", s::TWATCH_HIGHER_STAY)];
+pub const TWATCH_CHECKS: [(&str, Id); 6] = [("60", s::TWATCH_CHECKS_60), ("120", s::TWATCH_CHECKS_120), ("300", s::TWATCH_CHECKS_300), ("600", s::TWATCH_CHECKS_600), ("900", s::TWATCH_CHECKS_900), ("1800", s::TWATCH_CHECKS_1800)];
+pub const TWATCH_CHECK_EXTRAS: [(&str, Id); 5] = [("0", s::TWATCH_CHECK_EXTRAS_0), ("60", s::TWATCH_CHECK_EXTRAS_60), ("120", s::TWATCH_CHECK_EXTRAS_120), ("300", s::TWATCH_CHECK_EXTRAS_300), ("600", s::TWATCH_CHECK_EXTRAS_600)];
+pub const TWATCH_QUALITIES: [(&str, Id); 5] = [("1080p60", s::TWATCH_QUALITIES_1080P60), ("720p60", s::TWATCH_QUALITIES_720P60), ("720p", s::TWATCH_QUALITIES_720P), ("480p", s::TWATCH_QUALITIES_480P), ("360p", s::TWATCH_QUALITIES_360P)];
+pub const TWATCH_FRAME_RATES: [(&str, Id); 3] = [("0", s::TWATCH_FRAME_RATES_0), ("30", s::TWATCH_FRAME_RATES_30), ("15", s::TWATCH_FRAME_RATES_15)];
+/// When the PIMPBOX is in efficiency mode.
+pub const EFFICIENCY_PIMPBOX: [(&str, Id); 3] = [("closed", s::EFFICIENCY_PIMPBOX_CLOSED), ("always", s::EFFICIENCY_PIMPBOX_ALWAYS), ("never", s::EFFICIENCY_PIMPBOX_NEVER)];
 /// The TV's channels, as the settings name them.
-pub const TV_CHANNELS: [(&str, &str); 6] = [("1295", "1295: Captain Midnight"), ("2", "2: Test card"), ("3", "3: The crab"), ("4", "4: Static"), ("5", "5: PimpCast"), ("6", "6: PIMPBOX")];
-pub const TWATCH_MEDIA_CONTROLS: [(&str, &str); 3] = [("never", "Never"), ("unmuted", "While its sound is on"), ("playing", "Whenever it's playing video")];
+pub const TV_CHANNELS: [(&str, Id); 7] = [("1295", s::TV_CHANNELS_1295), ("2", s::TV_CHANNELS_2), ("3", s::TV_CHANNELS_3), ("4", s::TV_CHANNELS_4), ("5", s::TV_CHANNELS_5), ("37", s::TV_CHANNELS_37), ("304", s::TV_CHANNELS_304)];
+/// How often PTV's bumps come (pms::iss::BUMPS).
+pub const ISS_BUMPS: [(&str, Id); 3] = [("often", s::ISS_BUMPS_OFTEN), ("hourly", s::ISS_BUMPS_HOURLY), ("off", s::ISS_BUMPS_OFF)];
+/// The heading over Number One's settings, on the TV page.
+pub const TV_NUMBER_ONE: Id = s::TV_NUMBER_ONE;
+pub const TWATCH_MEDIA_CONTROLS: [(&str, Id); 3] = [("never", s::TWATCH_MEDIA_CONTROLS_NEVER), ("unmuted", s::TWATCH_MEDIA_CONTROLS_UNMUTED), ("playing", s::TWATCH_MEDIA_CONTROLS_PLAYING)];
 /// Above the Twatch TV page while there are favorites, video is wanted, and Streamlink isn't here.
-pub const TWATCH_NO_STREAMLINK: (&str, &str) = ("Live video needs Streamlink", "You have favorites, but without Streamlink your TwaTVs can't play them. Download it below, or choose Always under Pictures instead of video, further down, for a still every minute.");
-pub const TWATCH_PICTURES: [(&str, &str); 4] = [("never", "Never"), ("initial", "Until you click a TwaTV"), ("low_memory", "When RAM or VRAM is low"), ("always", "Always")];
-pub const RESET_ALL: (&str, &str) = ("Reset settings", "Everything back to how it came. Your Twatch TV favorites, network settings, games and answer about updates stay");
-pub const RESET_ALL_ASK: &str = "Every setting goes back to how it came, Twatch TV's included. Your Twatch TV favorites, your network settings, your games and your answer about updates stay. What your settings are now is kept beside them, as pms.toml.before-reset.";
-pub const TWATCH_NETWORK: &str = "What Twatch TV asks of the internet, and how to send it through a proxy, is under Network.";
-pub const TWATCH_NOTICE: &str = "Twitch is a trademark of Twitch Interactive, Inc. PimpMyShell isn't affiliated with Twitch. Streamlink is a separate program under the BSD 2-Clause License, built by GitHub's runners from its own source.";
-pub const TV_NOTICE: &str = "DOOM is a registered trademark of id Software LLC, a ZeniMax Media company. PimpMyShell isn't affiliated with or endorsed by id Software, ZeniMax, Bethesda or Microsoft. The PIMPBOX, pms-pimpbox.exe, plays them with POOM (room), a Doom engine, and is under the GNU GPL version 2, with no warranty; its source is in PimpMyShell's repository on GitHub. The rest of PimpMyShell is under the MIT License, and each game keeps its own license.";
-pub const NETWORK: (&str, &str) = ("Network", "Everything PimpMyShell uses the internet for, and a proxy to send any of it through. There's no account, no analytics and no ads: nothing about you or your PC is sent anywhere.");
-pub const PROXY: (&str, &str) = (
-    "SOCKS5 proxy",
-    "socks5h:// looks names up through the proxy too; socks5:// looks them up on this PC. Add user:password@ before the host if it needs them. Leave it empty for none",
-);
-pub const PROXY_ISOLATE: (&str, &str) = (
-    "A random user name and password for each",
-    "For Tor's stream isolation: each of the uses below goes with a user name and password of its own, made up the first time it's needed and kept until PimpMyShell exits, so Tor puts them on circuits of their own. They take the place of any in the address",
-);
+pub const TWATCH_NO_STREAMLINK: (Id, Id) = (s::TWATCH_NO_STREAMLINK, s::TWATCH_NO_STREAMLINK_ABOUT);
+pub const TWATCH_PICTURES: [(&str, Id); 4] = [("never", s::TWATCH_PICTURES_NEVER), ("initial", s::TWATCH_PICTURES_INITIAL), ("low_memory", s::TWATCH_PICTURES_LOW_MEMORY), ("always", s::TWATCH_PICTURES_ALWAYS)];
+pub const RESET_ALL: (Id, Id) = (s::RESET_ALL, s::RESET_ALL_ABOUT);
+pub const RESET_ALL_ASK: Id = s::RESET_ALL_ASK;
+pub const TWATCH_NETWORK: Id = s::TWATCH_NETWORK;
+pub const TWATCH_NOTICE: Id = s::TWATCH_NOTICE;
+pub const NETWORK: (Id, Id) = (s::NETWORK, s::NETWORK_ABOUT);
+pub const PROXY: (Id, Id) = (s::PROXY, s::PROXY_ABOUT);
+pub const PROXY_ISOLATE: (Id, Id) = (s::PROXY_ISOLATE, s::PROXY_ISOLATE_ABOUT);
 /// What a proxy here can't promise, and what can.
-pub const PROXY_LIMITS: &str = "We test all of this as we build it, but nothing is airtight, least of all the software PimpMyShell gets from elsewhere for you, like Streamlink: it does its own networking, and changes with its own releases.\n\nIf it matters that nothing gets out except through your proxy, have Windows make sure. Windows Firewall, or another filter built on the Windows Filtering Platform, can keep these from going anywhere but your proxy:\n\npmsd.exe, pms-gui.exe, pms-twatch.exe and streamlink.exe";
+pub const PROXY_LIMITS: Id = s::PROXY_LIMITS;
 /// The network settings' file won't load.
-pub const NETWORK_UNREAD: &str = "PimpMyShell can't tell whether you wanted a proxy, so nothing goes online until pms-network.toml is fixed: no checking who's live, no Twatch TV video, no update checks and no downloads. Fix the file and save it, or apply a proxy here to replace it. To go without a proxy, delete the file.";
+pub const NETWORK_UNREAD: Id = s::NETWORK_UNREAD;
 
 /// A proxy is set, and nothing goes through it.
-pub const PROXY_UNUSED: (&str, &str) = ("Nothing goes through your proxy", "Everything still goes straight to where it's going. Switch on what should use the proxy below, or select Turn on all.");
-pub const PROXY_STRICT: &str = "What's switched on here never goes without the proxy: if the proxy can't be reached, it fails until it can. What's switched off goes straight to where it's going.";
-pub const NETWORK_ELSE: &str = "That's all of it. Windows does what it does by itself, and the notifications PimpMyShell shows come from your apps, not from the internet. Streamlink and Twatch TV's player, pms-twatch.exe, are the only other programs PimpMyShell starts that use the network, and both are covered above.";
-pub const HOTMIC: (&str, &str) = (
-    "Hot Mic",
-    "Know when an app is using your microphone. The whole taskbar alerts first, then the alert settles around a label naming the apps, beside the system tray, or before your meters and TVs. An app that stops stays listed for 10 seconds.",
-);
-pub const TOASTS: (&str, &str) = ("Notification Toast", "Show notifications in the taskbar instead of as pop-ups. Their buttons still work, and they stay in notification center.");
+pub const PROXY_UNUSED: (Id, Id) = (s::PROXY_UNUSED, s::PROXY_UNUSED_ABOUT);
+pub const PROXY_STRICT: Id = s::PROXY_STRICT;
+pub const NETWORK_ELSE: Id = s::NETWORK_ELSE;
+pub const HOTMIC: (Id, Id) = (s::HOTMIC, s::HOTMIC_ABOUT);
+pub const TOASTS: (Id, Id) = (s::TOASTS, s::TOASTS_ABOUT);
 
 #[cfg(test)]
 mod tests {
@@ -372,8 +393,13 @@ mod tests {
     #[test]
     fn keys_and_style() {
         assert_eq!(key("interval_ms"), "interval_ms");
-        assert_eq!(key("meter.names.disks"), "names");
-        assert_eq!(key("start_glow.hover_ms"), "hover_ms");
+        assert_eq!(key("meter.names.disks"), "[[meter]] names");
+        assert_eq!(key("start_glow.hover_ms"), "[start_glow] hover_ms");
+        assert_eq!(key("iss.online"), "[iss] online");
+        assert_eq!(key("look.tint"), "[backdrop] tint");
+        assert_eq!(key("look.light.grain"), "[backdrop.light] grain");
+        assert_eq!(key("counter.agg"), "[counters] agg");
+        assert_eq!(setting("look.light.tint"), setting("look.tint"));
         // Titles are sentence case without a period; descriptions don't end in one either (they're fragments, or
         // end with a fragment).
         for id in ["theme", "update_check", "meter.show_when", "hotmic.broad_ms", "toasts.ignore", "look.tint"] {

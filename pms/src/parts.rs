@@ -6,8 +6,10 @@ use std::sync::Mutex;
 
 /// Twatch TV's player.
 pub const TWATCH: &str = "pms-twatch.exe";
-/// The console on channel 6.
+/// The console on channel 304.
 pub const PIMPBOX: &str = "pms-pimpbox.exe";
+/// The game in it, which the console starts.
+pub const POOM: &str = "pms-poom.exe";
 
 /// Where `file` should be: beside this exe.
 pub fn path(file: &str) -> Option<PathBuf> {
@@ -41,12 +43,14 @@ pub fn newly_missing() -> Vec<&'static str> {
     }).collect()
 }
 
-/// What goes wrong without `file`, for saying so.
+/// What goes wrong without `file`, for saying so: what reads after "so".
 pub fn without(file: &str) -> &'static str {
+    use crate::lang::parts as t;
     match file {
-        TWATCH => "your Twatch TVs can't play live video",
-        PIMPBOX => "the console on channel 6 can't start",
-        _ => "part of PimpMyShell can't work",
+        TWATCH => t::WITHOUT_TWATCH.t(),
+        PIMPBOX => t::WITHOUT_PIMPBOX.t(),
+        POOM => t::WITHOUT_POOM.t(),
+        _ => t::WITHOUT_ANY.t(),
     }
 }
 

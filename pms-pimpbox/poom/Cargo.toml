@@ -1,0 +1,29 @@
+# POOM, the game the console plays: Doom's games on `room`, as a program of its own (pms-poom.exe) that the console starts.
+# Apart from the console so that it holds nothing of windows or drawing, and can be started without them (win32k off) when
+# it's sandboxed. Its library is what goes between the two (`link`), which the console takes too.
+[package]
+name = "pms-poom"
+version = "0.1.8"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "POOM: the game in the PIMPBOX, on room, the Doom engine"
+publish = false
+
+[lib]
+name = "poom"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pms-poom"
+path = "src/main.rs"
+
+[dependencies]
+# Without sound (it's silent anyway, -nosound): the sound device would bring COM, and with it user32, which a process without
+# win32k can't start with.
+room = { path = "../engine", default-features = false }
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory", "Win32_System_Threading"] }
+
+[lints.rust]
+# Set by `cargo xtask pgo-instrument`: an instrumented build, which writes its profile before going with the console.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(pms_pgo)"] }

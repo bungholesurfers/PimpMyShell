@@ -280,11 +280,16 @@ pub unsafe extern "C" fn P_CheckAmmo(player: *mut PlayerT) -> c_int {
 ///
 /// `player` must be a valid, non-null pointer to an initialised `PlayerT`
 /// whose `mo` field points to a valid `mobj_t`.
+/// PimpMyShell: how many times a weapon's been fired, by anyone, since the program started (P_FireWeapon, for each firing a
+/// held trigger repeats too): for telling a speed demo with some shooting in it from one without (pms-poom --check).
+pub static mut weapon_firings: u32 = 0;
+
 #[no_mangle]
 pub unsafe extern "C" fn P_FireWeapon(player: *mut PlayerT) {
     if P_CheckAmmo(player) == 0 {
         return;
     }
+    weapon_firings = weapon_firings.wrapping_add(1);
 
     P_SetMobjState((*player).mo as *mut mobj_t, S_PLAY_ATK1);
     let newstate = weaponinfo[(*player).readyweapon as usize].atkstate;

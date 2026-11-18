@@ -13,6 +13,9 @@
 //!   toast_lab everything        all, then shell
 //!   toast_lab --gap 4 all       a pause between kinds (seconds), to watch each one; without it they
 //!                               all arrive at once, stacking up
+//!   toast_lab --gap 0.3 flood 400
+//!                               a flood: 400 plain ones, each its own, like a chat app's backlog
+//!   toast_lab clear             takes the lab's notifications out of the notification center
 //!
 //! Activations (clicks, buttons) start this exe as the COM server, which appends them to
 //! %TEMP%\pms-toast-lab\activations.log.
@@ -357,6 +360,28 @@ fn main() -> windows_core::Result<()> {
         }
         Some("unregister") => {
             unregister();
+            Ok(())
+        }
+        Some("clear") => {
+            ToastNotificationManager::History()?.ClearWithId(&HSTRING::from(aumid()))?;
+            println!("cleared {}'s notifications", aumid());
+            Ok(())
+        }
+        Some(_) if args.iter().any(|a| a == "flood") => {
+            let gap = args.iter().position(|a| a == "--gap").and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.3);
+            let n = args.iter().position(|a| a == "flood").and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<u32>().ok()).unwrap_or(100);
+            let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(aumid()))?;
+            for i in 1..=n {
+                let doc = XmlDocument::new()?;
+                doc.LoadXml(&HSTRING::from(format!(
+                    r#"<toast launch="kind=flood"><visual><binding template="ToastGeneric"><text>Message {i}</text><text>A flood, {i} of {n}: each one its own, like a chat app's backlog.</text></binding></visual></toast>"#
+                )))?;
+                notifier.Show(&ToastNotification::CreateToastNotification(&doc)?)?;
+                if i % 50 == 0 {
+                    println!("{} sent {i} of {n}", now());
+                }
+                std::thread::sleep(Duration::from_secs_f64(gap));
+            }
             Ok(())
         }
         Some(_) => {

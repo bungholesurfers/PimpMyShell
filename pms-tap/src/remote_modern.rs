@@ -1,18 +1,20 @@
 //! A Twatch TV's remote: the same idea as remote.rs, for a newer set. What's on and how well, what the set will do next and how it
 //! decides that, power, sound, channel up and down, the highest quality, and the favorites to go straight to. All of what it shows
 //! comes from the screen's `info`, which the set keeps up to date. For a button beside the sets, it's only the logo and what the
-//! button's for.
+//! button's for; and for the A, how many TwaTVs may come by themselves, with keys for more and fewer, and a switch for whether
+//! they do, every word of it from the A's `info` too.
 
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use pms_screen::Button;
-use pms_xaml::{Border, CornerRadius, FontFamily, HorizontalAlignment, Orientation, PointerEventHandler, Popup, SolidColorBrush, StackPanel, TappedEventHandler, TextBlock, TextTrimming, TextWrapping, Thickness, UIElement, VerticalAlignment, Visibility, XamlRoot};
+use pms_xaml::{Border, CornerRadius, DoubleTappedEventHandler, HorizontalAlignment, Orientation, PointerEventHandler, Popup, SolidColorBrush, StackPanel, TappedEventHandler, TextBlock, TextTrimming, TextWrapping, Thickness, UIElement, VerticalAlignment, Visibility, XamlRoot};
 use windows::UI::Color;
 use windows_core::{HSTRING, Interface};
 
 use crate::commands::R;
+use crate::said::{Said, t};
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color { A: 0xFF, R: r, G: g, B: b }
@@ -34,8 +36,13 @@ const WARN: Color = rgb(0x3A, 0x2C, 0x12);
 const WARN_EDGE: Color = rgb(0x8A, 0x63, 0x1E);
 const WARN_TEXT: Color = rgb(0xFF, 0xD6, 0x8A);
 const NOT_LIVE: Color = rgb(0x4A, 0x4E, 0x58);
+/// The light a set shows while its quality's lowered (pms's twatch/look.rs), for the words that say why.
+const LOWERED: Color = rgb(0xFF, 0xB0, 0x20);
 const CLEAR: Color = Color { A: 0, R: 0, G: 0, B: 0 };
-const WIDTH: f64 = 256.0;
+const WIDTH: f64 = 257.0;
+/// What's inside its edge (1) and padding (12) on each side, which the widest rows fill exactly: four 54-wide keys with three
+/// gaps of 5, and a name, its value and two small keys (120 + 50 + 28 + 5 + 28). A row any wider is cut off at the right.
+const INSIDE: f64 = WIDTH - 2.0 * (1.0 + 12.0);
 /// How many favorites it lists.
 const ROWS: usize = 12;
 const REFRESH: Duration = Duration::from_millis(1500);
@@ -53,19 +60,8 @@ const PLUS: &str = "\u{E710}";
 const MINUS: &str = "\u{E738}";
 
 /// What each of the three ways does, said under them: for the one that's chosen, or the one the pointer's on.
-const WAYS: [&str; 3] = [
-    "The best favorite that's live, switching when a better one goes live",
-    "Stays on what's playing until the stream ends, whoever else goes live",
-    "Only this channel. While it's offline, the set waits for it",
-];
-/// What the keys do, said where the ways are explained while the pointer's on one.
-const POWER_SAYS: &str = "Turns this TwaTV off, or back on";
-const SOUND_SAYS: &str = "This TwaTV's sound, on or off";
-const UP_SAYS: &str = "The next favorite that's live. It stays on them until their stream ends";
-const DOWN_SAYS: &str = "The live favorite before this one. It stays on them until their stream ends";
-/// The key that takes this set off the taskbar: it asks first, for a few seconds.
-const NUKE: &str = "Remove this TwaTV";
-const SURE: &str = "Select again to remove it";
+const WAYS: [t::Id; 3] = [t::FOLLOW_SAYS, t::STAY_SAYS, t::ONLY_SAYS];
+/// The key that takes this set off the taskbar (`t::NUKE`): it asks first (`t::SURE`), for a few seconds.
 const STAYS_SURE: Duration = Duration::from_secs(3);
 
 struct Remote {
@@ -78,6 +74,8 @@ struct Remote {
     light: Border,
     title: TextBlock,
     about: TextBlock,
+    /// Why the quality's lowered, if it is.
+    lowered: TextBlock,
     /// Where the picture comes from, and what's missing, if anything is.
     via: TextBlock,
     warn: Border,
@@ -99,6 +97,19 @@ struct Remote {
     heading_row: StackPanel,
     first: Border,
     rows: Vec<(Border, Border, TextBlock)>,
+    /// The A's: how many TwaTVs may come by themselves, the keys for fewer and more, and the switch for whether they do (what it's
+    /// called, the track and its knob, and the word for on or off).
+    sets: StackPanel,
+    sets_name: TextBlock,
+    /// The words built in, said again when the language changes.
+    said: Said,
+    sets_value: TextBlock,
+    fewer: Border,
+    more: Border,
+    switch_name: TextBlock,
+    track: Border,
+    knob: Border,
+    switch_state: TextBlock,
     source: String,
     /// Where it was put, to put it there again when it changes height: the root, and the cell's left, top and width.
     placed: Option<(XamlRoot, f64, f64, f64)>,
@@ -114,9 +125,12 @@ thread_local! {
     static CHOSEN: Cell<usize> = const { Cell::new(0) };
     static POINTED: Cell<Option<usize>> = const { Cell::new(None) };
     /// What the key the pointer's on does, said in the ways' place meanwhile.
-    static EXPLAINING: Cell<Option<&'static str>> = const { Cell::new(None) };
+    static EXPLAINING: Cell<Option<t::Id>> = const { Cell::new(None) };
     /// The remove key has been pressed once, and is asking.
     static ARMED: Cell<bool> = const { Cell::new(false) };
+    /// The A's switch is on, as the A last said, and whether the pointer's on it.
+    static SETS_ON: Cell<bool> = const { Cell::new(false) };
+    static ON_SWITCH: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Which time the remove key has asked: an older wait lets it be.
@@ -149,7 +163,7 @@ fn label(text: &str, size: f64, color: Color, font: &str) -> R<TextBlock> {
     let t = TextBlock::new().map_err(w)?;
     t.SetText(&HSTRING::from(text)).map_err(w)?;
     t.SetFontSize(size).map_err(w)?;
-    t.SetFontFamily(&FontFamily::CreateInstanceWithName(&HSTRING::from(font)).map_err(w)?).map_err(w)?;
+    t.SetFontFamily(&crate::stage::font(font)?).map_err(w)?;
     t.SetForeground(&brush(color)?).map_err(w)?;
     t.SetTextTrimming(TextTrimming::CharacterEllipsis).map_err(w)?;
     Ok(t)
@@ -170,7 +184,7 @@ fn light(size: f64) -> R<Border> {
 }
 
 fn across(items: &[UIElement]) -> R<StackPanel> {
-    let row = StackPanel::new().map_err(w)?;
+    let row = crate::stage::stack_panel()?;
     row.SetOrientation(Orientation::Horizontal).map_err(w)?;
     for item in items {
         row.Children().map_err(w)?.Append(item).map_err(w)?;
@@ -178,12 +192,34 @@ fn across(items: &[UIElement]) -> R<StackPanel> {
     Ok(row)
 }
 
-/// Runs `then` on the UI thread a moment after a press, when the set has acted on it.
+/// Shows what the set says a moment after a press, when it has acted on it; and again a little later, for one that took longer.
 fn soon() {
     std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_millis(120));
-        crate::meters::on_ui(refresh);
+        for wait in [120, 300] {
+            std::thread::sleep(Duration::from_millis(wait));
+            crate::meters::on_ui(refresh);
+        }
     });
+}
+
+/// Says `button` was pressed, to the set the remote's for.
+fn press(button: Button) {
+    if let Some(source) = source() {
+        crate::screen::press(&source, button);
+    }
+    soon();
+}
+
+/// A second tap quick on the first is a double tap to XAML, and no tap at all: on key `k`, where every press counts, it's
+/// `tapped` again.
+fn every_tap_counts(k: &Border, tapped: impl Fn() + Send + 'static) -> R<()> {
+    ui(k)?
+        .DoubleTapped(&DoubleTappedEventHandler::new(move |_, _| crate::guard(|| {
+            tapped();
+            Ok(())
+        })))
+        .map_err(w)?;
+    Ok(())
 }
 
 fn source() -> Option<String> {
@@ -196,13 +232,8 @@ fn key(glyph: &TextBlock, press: Button) -> R<Border> {
 }
 
 /// A key showing `glyph`, in `colors`: as it is, pointed at, and pressed.
-fn colored_key(glyph: &TextBlock, press: Button, colors: [Color; 3]) -> R<Border> {
-    tap_key(glyph, colors, move || {
-        if let Some(source) = source() {
-            crate::screen::press(&source, press);
-        }
-        soon();
-    })
+fn colored_key(glyph: &TextBlock, button: Button, colors: [Color; 3]) -> R<Border> {
+    tap_key(glyph, colors, move || press(button))
 }
 
 /// The same, doing `tapped` when it's tapped.
@@ -220,12 +251,12 @@ fn tap_key(glyph: &TextBlock, colors: [Color; 3], tapped: impl Fn() + Send + 'st
     let el = ui(&b)?;
     for (color, event) in [(over, 0), (rest, 1), (down, 2), (over, 3)] {
         let face = b.clone();
-        let handler = PointerEventHandler::new(move |_, _| {
+        let handler = PointerEventHandler::new(move |_, _| crate::guard(|| {
             if let Ok(fill) = brush(color) {
                 let _ = face.SetBackground(&fill);
             }
             Ok(())
-        });
+        }));
         match event {
             0 => el.PointerEntered(&handler),
             1 => el.PointerExited(&handler),
@@ -234,10 +265,10 @@ fn tap_key(glyph: &TextBlock, colors: [Color; 3], tapped: impl Fn() + Send + 'st
         }
         .map_err(w)?;
     }
-    el.Tapped(&TappedEventHandler::new(move |_, _| {
+    el.Tapped(&TappedEventHandler::new(move |_, _| crate::guard(|| {
         tapped();
         Ok(())
-    }))
+    })))
     .map_err(w)?;
     Ok(b)
 }
@@ -247,26 +278,26 @@ fn hints(k: &Border, i: usize, hint: &TextBlock) -> R<()> {
     let el = ui(k)?;
     for entering in [true, false] {
         let hint = hint.clone();
-        let handler = PointerEventHandler::new(move |_, _| {
+        let handler = PointerEventHandler::new(move |_, _| crate::guard(|| {
             POINTED.set(entering.then_some(i));
-            let _ = hint.SetText(&HSTRING::from(WAYS[if entering { i } else { CHOSEN.get() }]));
+            let _ = hint.SetText(&HSTRING::from(WAYS[if entering { i } else { CHOSEN.get() }].t()));
             Ok(())
-        });
+        }));
         if entering { el.PointerEntered(&handler) } else { el.PointerExited(&handler) }.map_err(w)?;
     }
     Ok(())
 }
 
 /// While the pointer's on key `k`, `hint` says what it does (`says`); after, what the chosen way does.
-fn explains(k: &Border, says: &'static str, hint: &TextBlock) -> R<()> {
+fn explains(k: &Border, says: t::Id, hint: &TextBlock) -> R<()> {
     let el = ui(k)?;
     for entering in [true, false] {
         let hint = hint.clone();
-        let handler = PointerEventHandler::new(move |_, _| {
+        let handler = PointerEventHandler::new(move |_, _| crate::guard(|| {
             EXPLAINING.set(entering.then_some(says));
             let _ = hint.SetText(&HSTRING::from(hint_text()));
             Ok(())
-        });
+        }));
         if entering { el.PointerEntered(&handler) } else { el.PointerExited(&handler) }.map_err(w)?;
     }
     Ok(())
@@ -274,7 +305,7 @@ fn explains(k: &Border, says: &'static str, hint: &TextBlock) -> R<()> {
 
 /// What the hint under the ways says: what the key the pointer's on does, or the way it's on, or the way that's chosen.
 fn hint_text() -> &'static str {
-    EXPLAINING.get().unwrap_or(WAYS[POINTED.get().unwrap_or(CHOSEN.get())])
+    EXPLAINING.get().unwrap_or(WAYS[POINTED.get().unwrap_or(CHOSEN.get())]).t()
 }
 
 /// The remove key: the first press only asks, and stops asking after a few seconds.
@@ -283,7 +314,7 @@ fn nuke_pressed() {
         let mine = ASKING.fetch_add(1, Ordering::Relaxed) + 1;
         REMOTE.with_borrow(|r| {
             if let Some(r) = r {
-                let _ = r.nuke.SetText(&HSTRING::from(SURE));
+                let _ = r.nuke.SetText(&HSTRING::from(t::SURE.t()));
             }
         });
         std::thread::spawn(move || {
@@ -308,14 +339,16 @@ fn calm_down() {
     ASKING.fetch_add(1, Ordering::Relaxed);
     REMOTE.with_borrow(|r| {
         if let Some(r) = r {
-            let _ = r.nuke.SetText(&HSTRING::from(NUKE));
+            let _ = r.nuke.SetText(&HSTRING::from(t::NUKE.t()));
         }
     });
 }
 
 /// One of the three ways a set can go.
-fn way(name: &str, press: Button, width: f64, last: bool) -> R<Border> {
-    let k = key(&words(name, 11.0, TEXT)?, press)?;
+fn way(said: &mut Said, name: t::Id, press: Button, width: f64, last: bool) -> R<Border> {
+    let words = words("", 11.0, TEXT)?;
+    said.keep(&words, name)?;
+    let k = key(&words, press)?;
     k.SetWidth(width).map_err(w)?;
     k.SetHeight(28.0).map_err(w)?;
     if last {
@@ -345,7 +378,7 @@ fn logo() -> R<UIElement> {
 }
 
 fn panel(parts: &[UIElement]) -> R<StackPanel> {
-    let p = StackPanel::new().map_err(w)?;
+    let p = crate::stage::stack_panel()?;
     for part in parts {
         p.Children().map_err(w)?.Append(part).map_err(w)?;
     }
@@ -356,7 +389,103 @@ fn icon(glyph: &str) -> R<TextBlock> {
     label(glyph, 14.0, TEXT, "Segoe Fluent Icons, Segoe MDL2 Assets")
 }
 
+/// The A's switch, as Windows' own are: on, filled in the accent with the knob to the right; off, an outline with the knob to the
+/// left. Lighter while the pointer's on it.
+fn paint_switch(track: &Border, knob: &Border) -> R<()> {
+    let (on, over) = (SETS_ON.get(), ON_SWITCH.get());
+    track.SetBackground(&brush(match (on, over) {
+        (true, false) => ACCENT,
+        (true, true) => ACCENT_OVER,
+        (false, false) => CLEAR,
+        (false, true) => KEY_OVER,
+    })?)
+    .map_err(w)?;
+    track.SetBorderBrush(&brush(if on { ACCENT } else if over { TEXT } else { QUIET })?).map_err(w)?;
+    knob.SetBackground(&brush(if on { BODY } else if over { TEXT } else { QUIET })?).map_err(w)?;
+    knob.SetHorizontalAlignment(if on { HorizontalAlignment::Right } else { HorizontalAlignment::Left }).map_err(w)
+}
+
+/// The A's own: how many TwaTVs may come by themselves, with keys for fewer and more, and under it the switch for whether they do,
+/// which is the same as selecting the A. Their words are the A's to say, in `show_status`.
+fn sets_part() -> R<(StackPanel, [TextBlock; 4], [Border; 4])> {
+    let name = words("", 11.0, QUIET)?;
+    name.SetWidth(120.0).map_err(w)?;
+    name.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
+    let value = words("", 12.0, TEXT)?;
+    value.SetWidth(50.0).map_err(w)?;
+    value.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
+    let (fewer, more) = (stepper(MINUS, Button::FewerSets)?, stepper(PLUS, Button::MoreSets)?);
+    more.SetMargin(thickness(0.0, 0.0, 0.0, 0.0)).map_err(w)?;
+    every_tap_counts(&fewer, || press(Button::FewerSets))?;
+    every_tap_counts(&more, || press(Button::MoreSets))?;
+    let how_many = across(&[ui(&name)?, ui(&value)?, ui(&fewer)?, ui(&more)?])?;
+
+    let switch_name = words("", 11.0, QUIET)?;
+    switch_name.SetWidth(120.0).map_err(w)?;
+    switch_name.SetTextWrapping(TextWrapping::Wrap).map_err(w)?;
+    switch_name.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
+    let knob = Border::new().map_err(w)?;
+    knob.SetWidth(12.0).map_err(w)?;
+    knob.SetHeight(12.0).map_err(w)?;
+    knob.SetCornerRadius(corners(6.0)).map_err(w)?;
+    knob.SetMargin(thickness(3.0, 0.0, 3.0, 0.0)).map_err(w)?;
+    knob.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
+    let track = Border::new().map_err(w)?;
+    track.SetWidth(40.0).map_err(w)?;
+    track.SetHeight(20.0).map_err(w)?;
+    track.SetCornerRadius(corners(10.0)).map_err(w)?;
+    track.SetBorderThickness(thickness(1.0, 1.0, 1.0, 1.0)).map_err(w)?;
+    track.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
+    track.SetChild(&ui(&knob)?).map_err(w)?;
+    let state = words("", 12.0, TEXT)?;
+    state.SetMargin(thickness(8.0, 0.0, 0.0, 0.0)).map_err(w)?;
+    state.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
+    // All of the line is the switch, as a checkbox's words are; a clear background, so that it takes the pointer between them too.
+    let switch = Border::new().map_err(w)?;
+    switch.SetBackground(&brush(CLEAR)?).map_err(w)?;
+    switch.SetMinHeight(28.0).map_err(w)?;
+    switch.SetMargin(thickness(0.0, 6.0, 0.0, 0.0)).map_err(w)?;
+    switch.SetChild(&ui(&across(&[ui(&switch_name)?, ui(&track)?, ui(&state)?])?)?).map_err(w)?;
+    paint_switch(&track, &knob)?;
+    let el = ui(&switch)?;
+    for entering in [true, false] {
+        let (track, knob) = (track.clone(), knob.clone());
+        let handler = PointerEventHandler::new(move |_, _| crate::guard(|| {
+            ON_SWITCH.set(entering);
+            let _ = paint_switch(&track, &knob);
+            Ok(())
+        }));
+        if entering { el.PointerEntered(&handler) } else { el.PointerExited(&handler) }.map_err(w)?;
+    }
+    // A click on the A itself, which switches them.
+    let switched = || {
+        if let Some(source) = source() {
+            crate::screen::click(&source);
+        }
+        soon();
+    };
+    el.Tapped(&TappedEventHandler::new(move |_, _| crate::guard(|| {
+        switched();
+        Ok(())
+    })))
+    .map_err(w)?;
+    every_tap_counts(&switch, switched)?;
+
+    let part = panel(&[ui(&how_many)?, ui(&switch)?])?;
+    part.SetMargin(thickness(0.0, 10.0, 0.0, 0.0)).map_err(w)?;
+    part.SetVisibility(Visibility::Collapsed).map_err(w)?;
+    Ok((part, [name, value, switch_name, state], [fewer, more, track, knob]))
+}
+
+/// Words that say `text`, kept in `said`.
+fn kept(said: &mut Said, text: t::Id, size: f64, color: Color) -> R<TextBlock> {
+    let block = words("", size, color)?;
+    said.keep(&block, text)?;
+    Ok(block)
+}
+
 fn build(root: &XamlRoot) -> R<Remote> {
+    let mut said = Said::default();
     let state = words("", 11.0, QUIET)?;
     let dot = light(8.0)?;
     let top = across(&[ui(&dot)?, ui(&state)?])?;
@@ -370,13 +499,16 @@ fn build(root: &XamlRoot) -> R<Remote> {
     let about = words("", 11.0, QUIET)?;
     about.SetTextWrapping(TextWrapping::Wrap).map_err(w)?;
     about.SetMargin(thickness(0.0, 3.0, 0.0, 0.0)).map_err(w)?;
+    let lowered = words("", 11.0, LOWERED)?;
+    lowered.SetTextWrapping(TextWrapping::Wrap).map_err(w)?;
+    lowered.SetMargin(thickness(0.0, 2.0, 0.0, 0.0)).map_err(w)?;
     let via = words("", 11.0, QUIET)?;
     via.SetTextWrapping(TextWrapping::Wrap).map_err(w)?;
     via.SetMargin(thickness(0.0, 2.0, 0.0, 0.0)).map_err(w)?;
     // Live video wanted and no Streamlink: what's wrong, and the way to the settings that fix it.
     let warn_words = words("", 12.0, WARN_TEXT)?;
     warn_words.SetTextWrapping(TextWrapping::Wrap).map_err(w)?;
-    let fix_words = words("Get Streamlink in Settings", 12.0, BODY)?;
+    let fix_words = kept(&mut said, t::GET_STREAMLINK, 12.0, BODY)?;
     fix_words.SetFontWeight(windows::UI::Text::FontWeight { Weight: 600 }).map_err(w)?;
     let fix = colored_key(&fix_words, Button::AddFavorite, [ACCENT, ACCENT_OVER, ACCENT_DOWN])?;
     fix.SetWidth(f64::NAN).map_err(w)?;
@@ -409,25 +541,25 @@ fn build(root: &XamlRoot) -> R<Remote> {
     let keys = across(&[ui(&power)?, ui(&mute)?, ui(&up)?, ui(&down)?])?;
     keys.SetMargin(thickness(0.0, 10.0, 0.0, 0.0)).map_err(w)?;
 
-    let (follow, stay, only) = (way("Favorites", Button::Follow, 66.0, false)?, way("This stream", Button::Stay, 74.0, false)?, way("This channel", Button::Only, 82.0, true)?);
+    let (follow, stay, only) = (way(&mut said, t::FOLLOW, Button::Follow, 66.0, false)?, way(&mut said, t::STAY, Button::Stay, 74.0, false)?, way(&mut said, t::ONLY, Button::Only, INSIDE - 66.0 - 74.0 - 2.0 * 5.0, true)?);
     let ways = across(&[ui(&follow)?, ui(&stay)?, ui(&only)?])?;
     ways.SetMargin(thickness(0.0, 2.0, 0.0, 0.0)).map_err(w)?;
     // Read across, it's a sentence: this TwaTV plays favorites, this stream, or this channel. Under it, what that means.
-    let plays = words("This TwaTV plays", 11.0, QUIET)?;
+    let plays = kept(&mut said, t::PLAYS, 11.0, QUIET)?;
     plays.SetMargin(thickness(0.0, 10.0, 0.0, 0.0)).map_err(w)?;
-    let way_hint = words(WAYS[0], 11.0, QUIET)?;
+    let way_hint = words(WAYS[0].t(), 11.0, QUIET)?;
     way_hint.SetTextWrapping(TextWrapping::Wrap).map_err(w)?;
     way_hint.SetMargin(thickness(0.0, 4.0, 0.0, 0.0)).map_err(w)?;
     for (i, k) in [&follow, &stay, &only].into_iter().enumerate() {
         hints(k, i, &way_hint)?;
     }
-    for (k, says) in [(&power, POWER_SAYS), (&mute, SOUND_SAYS), (&up, UP_SAYS), (&down, DOWN_SAYS)] {
+    for (k, says) in [(&power, t::POWER_SAYS), (&mute, t::SOUND_SAYS), (&up, t::UP_SAYS), (&down, t::DOWN_SAYS)] {
         explains(k, says, &way_hint)?;
     }
 
-    let every = words("All TwaTVs", 11.0, QUIET)?;
+    let every = kept(&mut said, t::ALL_TWATVS, 11.0, QUIET)?;
     every.SetMargin(thickness(0.0, 10.0, 0.0, 2.0)).map_err(w)?;
-    let name = words("Top quality", 11.0, QUIET)?;
+    let name = kept(&mut said, t::TOP_QUALITY, 11.0, QUIET)?;
     name.SetWidth(120.0).map_err(w)?;
     name.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
     let top_value = words("", 12.0, TEXT)?;
@@ -438,7 +570,7 @@ fn build(root: &XamlRoot) -> R<Remote> {
     let quality = across(&[ui(&name)?, ui(&top_value)?, ui(&lower)?, ui(&higher)?])?;
     quality.SetMargin(thickness(0.0, 2.0, 0.0, 0.0)).map_err(w)?;
 
-    let loud_name = words("Volume", 11.0, QUIET)?;
+    let loud_name = kept(&mut said, t::VOLUME, 11.0, QUIET)?;
     loud_name.SetWidth(120.0).map_err(w)?;
     loud_name.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
     let loud_value = words("", 12.0, TEXT)?;
@@ -449,28 +581,29 @@ fn build(root: &XamlRoot) -> R<Remote> {
     let loudness = across(&[ui(&loud_name)?, ui(&loud_value)?, ui(&quieter)?, ui(&louder)?])?;
     loudness.SetMargin(thickness(0.0, 4.0, 0.0, 0.0)).map_err(w)?;
 
-    let heading = words("Favorites", 11.0, QUIET)?;
-    heading.SetWidth(202.0).map_err(w)?;
+    let heading = words(t::FAVORITES.t(), 11.0, QUIET)?;
+    heading.SetWidth(INSIDE - 28.0).map_err(w)?;
+    heading.SetTextWrapping(TextWrapping::Wrap).map_err(w)?;
     heading.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
     let another = stepper(PLUS, Button::AddFavorite)?;
     another.SetMargin(thickness(0.0, 0.0, 0.0, 0.0)).map_err(w)?;
     let heading_row = across(&[ui(&heading)?, ui(&another)?])?;
     heading_row.SetMargin(thickness(0.0, 10.0, 0.0, 3.0)).map_err(w)?;
     // With no favorites, there's nothing for it to show: this is what it needs first, so it's the biggest thing there.
-    let first_words = words("+  Add a Twitch channel to watch", 12.0, BODY)?;
+    let first_words = kept(&mut said, t::FIRST_FAVORITE, 12.0, BODY)?;
     first_words.SetFontWeight(windows::UI::Text::FontWeight { Weight: 600 }).map_err(w)?;
     let first = colored_key(&first_words, Button::AddFavorite, [ACCENT, ACCENT_OVER, ACCENT_DOWN])?;
     first.SetWidth(f64::NAN).map_err(w)?;
     first.SetHorizontalAlignment(HorizontalAlignment::Stretch).map_err(w)?;
     first.SetHeight(36.0).map_err(w)?;
     first.SetMargin(thickness(0.0, 12.0, 0.0, 0.0)).map_err(w)?;
-    let nuke = words(NUKE, 11.0, QUIET)?;
+    let nuke = kept(&mut said, t::NUKE, 11.0, QUIET)?;
     let nuke_key = tap_key(&nuke, [KEY, KEY_OVER, KEY_DOWN], nuke_pressed)?;
     nuke_key.SetWidth(f64::NAN).map_err(w)?;
     nuke_key.SetHorizontalAlignment(HorizontalAlignment::Stretch).map_err(w)?;
     nuke_key.SetHeight(28.0).map_err(w)?;
     nuke_key.SetMargin(thickness(0.0, 10.0, 0.0, 0.0)).map_err(w)?;
-    let list = StackPanel::new().map_err(w)?;
+    let list = crate::stage::stack_panel()?;
     let mut rows = Vec::new();
     // One more row than there are favorites shown: the one that folds the offline away.
     for i in 0..=ROWS {
@@ -481,7 +614,7 @@ fn build(root: &XamlRoot) -> R<Remote> {
         line.SetBackground(&brush(CLEAR)?).map_err(w)?;
         line.SetChild(&ui(&across(&[ui(&dot)?, ui(&name)?])?)?).map_err(w)?;
         ui(&line)?
-            .Tapped(&TappedEventHandler::new(move |_, _| {
+            .Tapped(&TappedEventHandler::new(move |_, _| crate::guard(|| {
                 match ROWS_DO.with_borrow(|rows| rows.get(i).copied()) {
                     Some(Some(pick)) => {
                         if let Some(source) = source() {
@@ -496,15 +629,16 @@ fn build(root: &XamlRoot) -> R<Remote> {
                     None => {}
                 }
                 Ok(())
-            }))
+            })))
             .map_err(w)?;
         list.Children().map_err(w)?.Append(&ui(&line)?).map_err(w)?;
         rows.push((line, dot, name));
     }
 
-    let head = panel(&[ui(&top)?, ui(&handle)?, ui(&title)?, ui(&about)?, ui(&via)?, ui(&warn)?])?;
+    let head = panel(&[ui(&top)?, ui(&handle)?, ui(&title)?, ui(&about)?, ui(&lowered)?, ui(&via)?, ui(&warn)?])?;
     let controls = panel(&[ui(&keys)?, ui(&plays)?, ui(&ways)?, ui(&way_hint)?, ui(&every)?, ui(&quality)?, ui(&loudness)?, ui(&first)?, ui(&heading_row)?, ui(&list)?, ui(&nuke_key)?])?;
-    let body = panel(&[logo()?, ui(&head)?, ui(&plan)?, ui(&controls)?])?;
+    let (sets, [sets_name, sets_value, switch_name, switch_state], [fewer, more, track, knob]) = sets_part()?;
+    let body = panel(&[logo()?, ui(&head)?, ui(&plan)?, ui(&sets)?, ui(&controls)?])?;
     let whole = Border::new().map_err(w)?;
     whole.SetBackground(&brush(BODY)?).map_err(w)?;
     whole.SetBorderBrush(&brush(EDGE)?).map_err(w)?;
@@ -520,7 +654,7 @@ fn build(root: &XamlRoot) -> R<Remote> {
     popup.SetChild(&el).map_err(w)?;
     popup.SetShouldConstrainToRootBounds(false).map_err(w)?;
     popup.SetXamlRoot(root).map_err(w)?;
-    Ok(Remote { popup, head, controls, handle, state, light: dot, title, about, via, warn, warn_words, plan, power, follow, stay, only, way_hint, nuke, top: top_value, volume: loud_value, sound, heading, heading_row, first, rows, source: String::new(), placed: None })
+    Ok(Remote { popup, head, controls, handle, state, light: dot, title, about, lowered, via, warn, warn_words, plan, power, follow, stay, only, way_hint, nuke, top: top_value, volume: loud_value, sound, heading, heading_row, first, rows, sets, sets_name, said, sets_value, fewer, more, switch_name, track, knob, switch_state, source: String::new(), placed: None })
 }
 
 /// What a set says about itself.
@@ -530,6 +664,8 @@ struct Info {
     title: String,
     category: String,
     quality: String,
+    /// Why the quality's lowered, if it is.
+    low: String,
     state: String,
     plan: String,
     /// Where the picture comes from, and what's missing.
@@ -541,6 +677,12 @@ struct Info {
     /// How many seconds ago it last looked at who's live.
     seen: Option<u64>,
     favorites: Vec<(String, bool)>,
+    /// The A's: how many TwaTVs may come by themselves, whether they do, and the fewest and most there can be; and what it calls
+    /// the number and the switch, and on and off.
+    sets: Option<(u32, bool, u32, u32)>,
+    sets_words: [String; 4],
+    /// It's showing a channel live, as its light says.
+    live: bool,
 }
 
 fn read(info: &str) -> Info {
@@ -550,13 +692,20 @@ fn read(info: &str) -> Info {
             ["now", handle, title, category, quality, state] => {
                 (out.handle, out.title, out.category, out.quality, out.state) = (handle.to_string(), title.to_string(), category.to_string(), quality.to_string(), state.to_string());
             }
-            ["how", plan] => out.plan = plan.to_string(),
+            // A line separator is where a new line starts: the info's lines can't hold one.
+            ["how", plan] => out.plan = plan.replace('\u{2028}', "\n"),
+            ["low", why] => out.low = why.to_string(),
             ["via", via] => out.via = via.to_string(),
             ["warn", warn] => out.warn = warn.to_string(),
             ["top", top] => out.top = top.to_string(),
             ["vol", volume] => out.volume = volume.to_string(),
             ["seen", ago] => out.seen = ago.parse().ok(),
+            ["live", live] => out.live = *live == "1",
             ["fav", handle, live] => out.favorites.push((handle.to_string(), *live != "0")),
+            ["sets", more, on, fewest, most] => {
+                out.sets = more.parse().ok().zip(fewest.parse().ok()).zip(most.parse().ok()).map(|((more, fewest), most)| (more, *on != "0", fewest, most));
+            }
+            ["sets_words", how_many, switch, yes, no] => out.sets_words = [how_many, switch, yes, no].map(|t| t.to_string()),
             _ => {}
         }
     }
@@ -572,29 +721,48 @@ fn say(t: &TextBlock, text: &str) -> R<()> {
 /// The heading over the favorites, with how fresh they are.
 fn heading_text(seen: Option<u64>) -> String {
     match seen {
-        Some(ago) if ago < 5 => "Favorites, checked just now".into(),
-        Some(ago) if ago < 90 => format!("Favorites, checked {ago} s ago"),
-        Some(ago) => format!("Favorites, checked {} min ago", ago / 60),
-        None => "Favorites".into(),
+        Some(ago) if ago < 5 => t::CHECKED_NOW.t().into(),
+        Some(ago) if ago < 90 => t::CHECKED_SECONDS.with(&[("n", &ago)]),
+        Some(ago) => t::CHECKED_MINUTES.with(&[("n", &(ago / 60))]),
+        None => t::FAVORITES.t().into(),
     }
 }
 
 fn show_status(r: &Remote) -> R<()> {
     let Some(screen) = crate::screen::status(&r.source) else { return Ok(()) };
+    // A key asking whether it's sure goes on asking, in the new words: what it asks doesn't go back to what it was.
+    if r.said.follow()? && ARMED.get() {
+        r.nuke.SetText(&HSTRING::from(t::SURE.t())).map_err(w)?;
+    }
     let info = read(&crate::screen::info(&r.source).unwrap_or_default());
     let shown = |on: bool| if on { Visibility::Visible } else { Visibility::Collapsed };
     r.head.SetVisibility(shown(!screen.note)).map_err(w)?;
     r.controls.SetVisibility(shown(!screen.note)).map_err(w)?;
+    let sets = info.sets.filter(|_| screen.note);
+    r.sets.SetVisibility(shown(sets.is_some())).map_err(w)?;
+    if let Some((more, on, fewest, most)) = sets {
+        let [how_many, switch, yes, no] = &info.sets_words;
+        r.sets_name.SetText(&HSTRING::from(how_many.as_str())).map_err(w)?;
+        r.sets_value.SetText(&HSTRING::from(more.to_string())).map_err(w)?;
+        // A key that can go no further is dimmed; pressing it does nothing.
+        ui(&r.fewer)?.SetOpacity(if more > fewest { 1.0 } else { 0.4 }).map_err(w)?;
+        ui(&r.more)?.SetOpacity(if more < most { 1.0 } else { 0.4 }).map_err(w)?;
+        r.switch_name.SetText(&HSTRING::from(switch.as_str())).map_err(w)?;
+        r.switch_state.SetText(&HSTRING::from(if on { yes.as_str() } else { no.as_str() })).map_err(w)?;
+        SETS_ON.set(on);
+        paint_switch(&r.track, &r.knob)?;
+    }
     if screen.note {
         return say(&r.plan, &info.plan);
     }
-    let live = info.state == "Live";
+    let live = info.live;
     r.light.SetBackground(&brush(if live { LIVE } else { NOT_LIVE })?).map_err(w)?;
     say(&r.state, &info.state)?;
     say(&r.handle, &info.handle)?;
     say(&r.title, &info.title)?;
     let about: Vec<&str> = [info.category.as_str(), info.quality.as_str()].into_iter().filter(|t| !t.is_empty()).collect();
     say(&r.about, &about.join("  ·  "))?;
+    say(&r.lowered, &info.low)?;
     say(&r.via, &info.via)?;
     say(&r.warn_words, &info.warn)?;
     r.warn.SetVisibility(if info.warn.is_empty() { Visibility::Collapsed } else { Visibility::Visible }).map_err(w)?;
@@ -647,7 +815,7 @@ fn listed(favorites: &[(String, bool)], unfolded: bool, room: usize) -> Vec<Row>
     let mut rows: Vec<Row> = favorites.iter().enumerate().filter(|(_, f)| f.1).map(fav).take(room).collect();
     let offline: Vec<Row> = favorites.iter().enumerate().filter(|(_, f)| !f.1).map(fav).collect();
     if !offline.is_empty() && rows.len() < room {
-        let words = if unfolded { "Hide offline".to_string() } else { format!("{} offline", offline.len()) };
+        let words = if unfolded { t::HIDE_OFFLINE.t().to_string() } else { t::OFFLINE.with(&[("n", &offline.len())]) };
         rows.push(Row { words, live: false, pick: None });
         if unfolded {
             let left = room - (rows.len() - 1);
@@ -698,6 +866,7 @@ pub(crate) fn show(root: &XamlRoot, source: &str, left: f64, top: f64, width: f6
         Ok(open)
     })?;
     if !was_open {
+        crate::remote::float_popups();
         crate::remote::watch_pointer();
         // What's on and who's live change while it's up.
         let mine = OPENED.fetch_add(1, Ordering::Relaxed) + 1;
@@ -716,6 +885,7 @@ pub(crate) fn close() {
     UNFOLDED.set(false);
     POINTED.set(None);
     EXPLAINING.set(None);
+    ON_SWITCH.set(false);
     if ARMED.get() {
         calm_down();
     }
@@ -740,7 +910,8 @@ mod tests {
 
     #[test]
     fn what_a_set_says_is_read() {
-        let info = read("now\tcrab\tpinching things\tJust Chatting\t720p60\tLive\nhow\tSwitches if lobster goes live\ntop\t480p\nseen\t40\nfav\tcrab\t1\nfav\tlobster\t0\n");
+        let info = read("now\tcrab\tpinching things\tJust Chatting\t720p60\tLive\nlive\t1\nhow\tSwitches if lobster goes live\ntop\t480p\nseen\t40\nfav\tcrab\t1\nfav\tlobster\t0\n");
+        assert!(info.live, "the light's own line, whatever the words say");
         assert_eq!(info.top, "480p");
         assert_eq!(info.plan, "Switches if lobster goes live");
         assert_eq!(info.seen, Some(40));
@@ -752,6 +923,16 @@ mod tests {
         let missing = read("via\t\nwarn\tLive video needs Streamlink, which isn't installed\n");
         assert_eq!((missing.via.as_str(), missing.warn.as_str()), ("", "Live video needs Streamlink, which isn't installed"));
         assert_eq!(read("via\tLive video through Streamlink 8.6.3-1\nwarn\t\n").via, "Live video through Streamlink 8.6.3-1");
+    }
+
+    #[test]
+    fn what_the_a_says_is_read() {
+        let info = read("how\tUp to 3 more come\nsets\t3\t1\t1\t9\nsets_words\tHow many\tCome by themselves\tOn\tOff\n");
+        assert_eq!((info.plan.as_str(), info.sets), ("Up to 3 more come", Some((3, true, 1, 9))));
+        assert_eq!(info.sets_words, ["How many", "Come by themselves", "On", "Off"].map(String::from));
+        assert_eq!(read("sets\t3\t0\t1\t9\n").sets, Some((3, false, 1, 9)));
+        assert_eq!(read("sets\tlots\t1\t1\t9\n").sets, None, "a number that isn't one is no number");
+        assert_eq!(read("how\tSelect to add a TwaTV for good\n").sets, None, "the plus beside the sets has none of it");
     }
 
     #[test]
@@ -769,9 +950,9 @@ mod tests {
 
     #[test]
     fn the_heading_says_how_fresh_it_is() {
-        assert_eq!(heading_text(None), "Favorites");
-        assert_eq!(heading_text(Some(2)), "Favorites, checked just now");
-        assert_eq!(heading_text(Some(40)), "Favorites, checked 40 s ago");
-        assert_eq!(heading_text(Some(200)), "Favorites, checked 3 min ago");
+        assert_eq!(heading_text(None), "Live Twatchlist channels");
+        assert_eq!(heading_text(Some(2)), "Live Twatchlist channels, checked just now");
+        assert_eq!(heading_text(Some(40)), "Live Twatchlist channels, checked 40 s ago");
+        assert_eq!(heading_text(Some(200)), "Live Twatchlist channels, checked 3 min ago");
     }
 }

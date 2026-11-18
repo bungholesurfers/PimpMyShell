@@ -1,20 +1,27 @@
 # GPL, unlike the rest of PimpMyShell: this is a program of its own, on an engine under the GPL (see COPYING). It's a
 # workspace of its own too, so nothing in PimpMyShell's links it: all the two share is frames in shared memory (pms-screen).
 [workspace]
-members = [".", "engine", "boot"]
+members = [".", "engine", "boot", "poom"]
+# What a build here builds: the console and its game, two programs.
+default-members = [".", "poom"]
 resolver = "3"
 
 [package]
 name = "pms-pimpbox"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 license = "GPL-2.0-only"
-description = "PIMPBOX: a console on a screen in the taskbar, and the PIMPBOX (room), the Doom engine it plays games with"
+description = "PIMPBOX: a console on a screen in the taskbar, which plays games with POOM (pms-poom, on room, the Doom engine)"
 publish = false
 
 [dependencies]
-room = { path = "engine" }
+# The game, pms-poom.exe: what goes between the two. Not the engine, which is the game's alone.
+pms-poom = { path = "poom" }
 pms-screen = { path = "../pms-screen" }
+# What it says, in the language PimpMyShell speaks (MIT, the texts in lang/): only the little it says itself.
+pms-lang = { path = "../pms-lang" }
+# How the game is started: a helper in a job of its own, which may start nothing.
+pms-spawn = { path = "../pms-spawn" }
 # The boot animation: MIT, and a program of its own.
 pimpbox-boot = { path = "boot", features = ["system-fonts"] }
 windows-core = "0.62.2"
@@ -30,6 +37,10 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[build-dependencies]
+# The icon (drawn in build.rs from the boot animation's mark) and version information, put in as PimpMyShell's programs have theirs.
+pms-res = { path = "../pms-res" }
 
 [profile.release]
 debug = true

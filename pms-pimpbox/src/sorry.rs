@@ -15,8 +15,6 @@ const GOES: f32 = 0.45;
 /// How long it's there in all.
 pub const TAKES: f32 = COMES + STAYS + GOES;
 
-const TITLE: &str = "Something happened";
-const BODY: &str = "Something happened";
 /// The band's color, and its words'.
 const BAND: [f32; 3] = [70.0, 23.0, 180.0];
 const WORDS: [f32; 3] = [255.0, 255.0, 255.0];
@@ -46,7 +44,8 @@ impl Sorry {
         }
         if self.lettered.as_ref().is_none_or(|(tall, ..)| *tall != h) {
             let (big, small) = ((h as f32 * 0.085) as i32, (h as f32 * 0.042) as i32);
-            self.lettered = Some((h, pimpbox_boot::fonts::lettering(TITLE, "Segoe UI Light", 300, false, big), pimpbox_boot::fonts::lettering(BODY, "Segoe UI", 400, false, small)));
+            let (title, body) = (pms_lang::pimpbox::SORRY_TITLE.t(), pms_lang::pimpbox::SORRY_BODY.t());
+            self.lettered = Some((h, pimpbox_boot::fonts::lettering(title, "Segoe UI Light", 300, false, big), pimpbox_boot::fonts::lettering(body, "Segoe UI", 400, false, small)));
         }
         let leaving = ((since - COMES - STAYS) / GOES).clamp(0.0, 1.0);
         // The band: there quickly, and the last thing to go.

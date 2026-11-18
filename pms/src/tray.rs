@@ -27,6 +27,7 @@ use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_core::{HSTRING, PCWSTR, w};
 
+use crate::lang::tray as t;
 use crate::log;
 
 /// What the daemon is asked to do.
@@ -165,7 +166,7 @@ impl Tray {
 /// nothing's kept, nothing's checked, and it's asked again at the next start, as its note says. Where there's no task dialog, a
 /// Yes/No message box (which can't be closed without an answer).
 pub fn update_question(latest: bool) -> Option<bool> {
-    if let Some(pressed) = modern_ask("Check for updates automatically?", CONSENT_INTRO, None, &["Check automatically", "Don't check"], None, &[], &consent_details(latest), CONSENT_NOTE) {
+    if let Some(pressed) = modern_ask(t::CONSENT_HEADING.t(), t::CONSENT_INTRO.t(), None, &[t::CONSENT_YES.t(), t::CONSENT_NO.t()], None, &[], &consent_details(latest), t::CONSENT_NOTE.t()) {
         return match pressed {
             1 => Some(true),
             2 => Some(false),
@@ -173,13 +174,13 @@ pub fn update_question(latest: bool) -> Option<bool> {
         };
     }
     let content = consent_text(latest);
-    match task_dialog("Check for updates automatically?", &content, &[(NO_CHECKS, "Don't check")], true, IDOK.0, true) {
+    match task_dialog(t::CONSENT_HEADING.t(), &content, &[(NO_CHECKS, t::CONSENT_NO.t())], true, IDOK.0, true) {
         Ok(pressed) if pressed == IDOK.0 => Some(true),
         Ok(pressed) if pressed == NO_CHECKS => Some(false),
         Ok(_) => None,
         Err(e) => {
             log(format!("tray: no task dialog ({e}); a message box instead"));
-            Some(message_box(&format!("{}\n\nCheck for updates by itself?", consent_text(latest)), true))
+            Some(message_box(&format!("{}\n\n{}", consent_text(latest), t::CONSENT_ASK.t()), true))
         }
     }
 }
@@ -204,26 +205,29 @@ fn modern_ask(heading: &str, text: &str, link: Option<&str>, buttons: &[&str], c
     if !exe.is_file() {
         return None;
     }
-    let mut ask = std::process::Command::new(exe);
-    ask.args(["--ask", "--heading", heading, "--text", text]);
+    // What it asks goes down its stdin: what a notification said, and the paths and arguments it would open, aren't for its
+    // command line, where any program can read them.
+    let mut args: Vec<String> = ["--heading", heading, "--text", text].map(String::from).to_vec();
     if let Some(link) = link {
-        ask.args(["--link", link]);
+        args.extend(["--link".into(), link.into()]);
     }
     for b in buttons {
-        ask.args(["--button", b]);
+        args.extend(["--button".into(), b.to_string()]);
     }
     if let Some((label, note)) = check {
-        ask.args(["--check", label, "--check-note", note]);
+        args.extend(["--check".into(), label.into(), "--check-note".into(), note.into()]);
     }
     for (label, value) in rows {
-        ask.args(["--row", label, value]);
+        args.extend(["--row".into(), label.clone(), value.clone()]);
     }
     for (label, value) in details {
-        ask.args(["--detail", label, value]);
+        args.extend(["--detail".into(), label.clone(), value.clone()]);
     }
     if !note.is_empty() {
-        ask.args(["--note", note]);
+        args.extend(["--note".into(), note.into()]);
     }
+    let mut ask = std::process::Command::new(exe);
+    ask.arg("--ask").stdin(std::process::Stdio::piped());
     // Its window comes up in front: the daemon may give it the foreground (it can't take it itself).
     let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
     let mut child = match ask.spawn() {
@@ -233,6 +237,12 @@ fn modern_ask(heading: &str, text: &str, link: Option<&str>, buttons: &[&str], c
             return None;
         }
     };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        if let Err(e) = stdin.write_all(crate::question_lines(&args).as_bytes()) {
+            log(format!("tray: pms-gui --ask: {e}"));
+        }
+    }
     // Waiting, this thread goes on handling its windows' messages, as a message box's would: the tray's thread asks
     // too (Install), and its icon must stay alive meanwhile.
     use std::os::windows::io::AsRawHandle;
@@ -294,46 +304,32 @@ pub struct ClickAnswer {
 /// asks, without the checkbox.
 pub fn ask_click(about: &str, question: &str, rows: &[(String, String)]) -> ClickAnswer {
     let from = about;
-    match modern_with(question, from, None, &["YES", "NO"], Some(("SHUT UP, COMPUTER", "PIMP HAND!")), rows) {
+    match modern_with(question, from, None, &[t::CLICK_YES.t(), t::CLICK_NO.t()], Some((t::CLICK_QUIET.t(), t::CLICK_QUIET_NOTE.t())), rows) {
         Some(answer) => ClickAnswer { yes: answer % CHECKED == 1, quiet: answer >= CHECKED },
         None => {
             let details: Vec<String> = rows.iter().map(|(label, value)| format!("{label}:\n{value}")).collect();
-            ClickAnswer { yes: explain(question, &format!("{from}\n\n{}", details.join("\n\n")), &["YES"]).is_some(), quiet: false }
+            ClickAnswer { yes: explain(question, &format!("{from}\n\n{}", details.join("\n\n")), &[t::CLICK_YES.t()]).is_some(), quiet: false }
         }
     }
 }
 
-/// What the question about software update says; `url` is the first request's (a link, in a task dialog).
-/// The update question in its window: what it does, the addresses it uses together, and when nothing happens.
-const CONSENT_INTRO: &str = "PimpMyShell can check GitHub for new versions shortly after it starts, then every day or two. New versions download in \
-     the background, and you choose when to install them.\n\n\
-     We don't send any information about you or your PC, and we only install versions signed with PimpMyShell's release key.";
-const CONSENT_NOTE: &str = "We won't check until you choose. Close this, and we'll ask again next time. You can change it anytime in Settings > General.";
-
+/// The update question in its window (`CONSENT_INTRO`, `CONSENT_NOTE`): what it does, the addresses it uses together, and when
+/// nothing happens.
 fn consent_details(latest: bool) -> Vec<(String, String)> {
     let (stable, releases, files) = (crate::update::STABLE_URL, crate::update::RELEASES_PAGE, crate::update::RELEASE_FILES);
-    let yours = |on: bool| if on { " (yours)" } else { "" };
+    let channel = |id: crate::lang::tray::Id, yours: bool| if yours { t::CONSENT_YOURS.with(&[("channel", &id.t())]) } else { id.t().to_string() };
     vec![
-        (format!("Checks, on the stable channel{}", yours(!latest)), stable.to_string()),
-        (format!("Checks, on the latest channel{}", yours(latest)), releases.to_string()),
-        ("Downloads".to_string(), files.to_string()),
+        (channel(t::CONSENT_STABLE, !latest), stable.to_string()),
+        (channel(t::CONSENT_LATEST, latest), releases.to_string()),
+        (t::CONSENT_DOWNLOADS.t().to_string(), files.to_string()),
     ]
 }
 
 /// The same, in words only, for where there's no window to group them in.
 fn consent_text(latest: bool) -> String {
     let (stable, releases, files) = (crate::update::STABLE_URL, crate::update::RELEASES_PAGE, crate::update::RELEASE_FILES);
-    let on = if latest { "latest" } else { "stable" };
-    format!(
-        "PimpMyShell can check GitHub for new versions shortly after it starts, then every day or two. New versions \
-         download in the background, and you choose when to install them. We only install versions signed with \
-         PimpMyShell's release key.\n\n\
-         A check reads one address, depending on your update channel. You're on {on}:\n\
-         Stable: {stable}\n\
-         Latest: {releases}\n\n\
-         A new version's files then come from {files}. We don't send any information about you or your PC.\n\n\
-         We won't check until you choose. You can change this anytime in Settings > General."
-    )
+    let on = if latest { t::CONSENT_ON_LATEST.t() } else { t::CONSENT_ON_STABLE.t() };
+    t::CONSENT_TEXT.with(&[("on", &on), ("stable", &stable), ("latest", &releases), ("files", &files)])
 }
 
 /// The question's button that says no.
@@ -344,7 +340,7 @@ const NO_CHECKS: i32 = 100;
 /// message box, which offers the first.
 pub fn explain(instruction: &str, content: &str, choices: &[&str]) -> Option<usize> {
     let mut buttons = choices.to_vec();
-    buttons.push("Close");
+    buttons.push(t::CLOSE.t());
     if let Some(pressed) = modern(instruction, content, None, &buttons) {
         return (pressed as usize).checked_sub(1).filter(|&i| i < choices.len());
     }
@@ -387,7 +383,7 @@ fn read_in_notepad(heading: &str, content: &str) -> Option<String> {
     let file = std::env::temp_dir().join("PimpMyShell, to read.txt");
     std::fs::write(&file, format!("{heading}\r\n\r\n{}", content.replace('\n', "\r\n"))).ok()?;
     std::process::Command::new("notepad.exe").arg(&file).spawn().ok()?;
-    Some("It's open in Notepad, where you can read all of it. Read it there, then choose here.".into())
+    Some(t::IN_NOTEPAD.t().into())
 }
 
 /// A message box in front of everything: Yes/No (true for yes), or just OK.
@@ -476,15 +472,12 @@ unsafe extern "system" fn on_top(
 
 /// Asks whether to install the downloaded `version` now: the menu's Install item.
 fn confirm_install(hwnd: HWND, version: &str) -> bool {
-    let text = format!(
-        "You have PimpMyShell {}. Version {version} is downloaded and verified.\n\n\
-         While it installs, your taskbar returns to normal for a moment. Then PimpMyShell starts again.",
-        crate::version::CURRENT
-    );
-    if let Some(pressed) = modern(&format!("Install PimpMyShell {version}?"), &text, None, &["Install", "Not now"]) {
+    let text = t::INSTALL_TEXT.with(&[("have", &crate::version::CURRENT), ("version", &version)]);
+    let heading = t::INSTALL_HEADING.with(&[("version", &version)]);
+    if let Some(pressed) = modern(&heading, &text, None, &[t::INSTALL.t(), t::NOT_NOW.t()]) {
         return pressed == 1;
     }
-    let text = format!("Install PimpMyShell {version}?\n\n{text}");
+    let text = format!("{heading}\n\n{text}");
     let answer = unsafe { MessageBoxW(Some(hwnd), &HSTRING::from(text), w!("PimpMyShell"), MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND) };
     answer == IDYES
 }
@@ -560,8 +553,8 @@ fn wide<const N: usize>(s: &str) -> [u16; N] {
 fn tooltip() -> String {
     let s = shared().state.lock().unwrap();
     match (&s.benched, s.paused) {
-        (Some(_), _) => "PimpMyShell (stopped)".into(),
-        (None, true) => "PimpMyShell (paused)".into(),
+        (Some(_), _) => t::TIP_STOPPED.t().into(),
+        (None, true) => t::TIP_PAUSED.t().into(),
         (None, false) => "PimpMyShell".into(),
     }
 }
@@ -663,8 +656,8 @@ fn menu(hwnd: HWND) {
     let autostart = crate::daemon::autostart(&["status".into()]).is_ok_and(|s| s.starts_with("at logon"));
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else { return };
     let status = match (&state.benched, state.paused) {
-        (Some(why), _) => format!("Stopped: {why}"),
-        (None, true) => "Paused".into(),
+        (Some(why), _) => t::STOPPED.with(&[("why", why)]),
+        (None, true) => t::PAUSED.t().into(),
         (None, false) => format!("PimpMyShell {}", crate::version::CURRENT),
     };
     let item = |flags: MENU_ITEM_FLAGS, id: usize, text: &str| {
@@ -674,22 +667,22 @@ fn menu(hwnd: HWND) {
     let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
     item(MF_STRING | MF_GRAYED, 0, &status);
     item(MF_SEPARATOR, 0, "");
-    item(MF_STRING, ID_SETTINGS, "Settings");
+    item(MF_STRING, ID_SETTINGS, t::SETTINGS.t());
     if state.benched.is_some() {
-        item(MF_STRING, ID_RETRY, "Try again");
+        item(MF_STRING, ID_RETRY, t::RETRY.t());
     } else {
-        item(MF_STRING | check(state.paused), ID_PAUSE, "Pause");
+        item(MF_STRING | check(state.paused), ID_PAUSE, t::PAUSE.t());
     }
-    item(MF_STRING | check(autostart), ID_AUTOSTART, "Start when I sign in");
+    item(MF_STRING | check(autostart), ID_AUTOSTART, t::AUTOSTART.t());
     match &state.update {
-        Some(Offer { version, ready: true }) => item(MF_STRING, ID_UPDATE, &format!("Install PimpMyShell {version}…")),
-        Some(Offer { version, ready: false }) => item(MF_STRING, ID_UPDATE, &format!("PimpMyShell {version} is available…")),
-        None => item(MF_STRING, ID_CHECK, "Check for updates"),
+        Some(Offer { version, ready: true }) => item(MF_STRING, ID_UPDATE, &t::INSTALL_ITEM.with(&[("version", version)])),
+        Some(Offer { version, ready: false }) => item(MF_STRING, ID_UPDATE, &t::AVAILABLE_ITEM.with(&[("version", version)])),
+        None => item(MF_STRING, ID_CHECK, t::CHECK.t()),
     }
-    item(MF_STRING, ID_LOG, "Open log");
-    item(MF_STRING, ID_REPORT, "Save a report");
+    item(MF_STRING, ID_LOG, t::LOG.t());
+    item(MF_STRING, ID_REPORT, t::REPORT.t());
     item(MF_SEPARATOR, 0, "");
-    item(MF_STRING, ID_EXIT, "Exit");
+    item(MF_STRING, ID_EXIT, t::EXIT.t());
     let _ = unsafe { SetMenuDefaultItem(menu, ID_SETTINGS as u32, 0) };
     let mut at = POINT::default();
     let _ = unsafe { GetCursorPos(&mut at) };

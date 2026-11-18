@@ -25,7 +25,7 @@
 use std::cell::RefCell;
 use std::time::Instant;
 
-use pms_xaml::{ElementCompositionPreview, FrameworkElement, Grid, UIElement};
+use pms_xaml::{ElementCompositionPreview, FrameworkElement, UIElement};
 use windows::Foundation::{Rect, TimeSpan};
 use windows::UI::Color;
 use windows::UI::Composition::*;
@@ -152,8 +152,19 @@ fn frame(host: &UIElement) -> R<(Vector2, Rect)> {
 }
 
 fn broad(ctx: &Ctx, color: Color, period_ms: i64, low: f32, high: f32) -> R<String> {
+    // The one put away when the last call ended, if it's in this color; else a new one (and that one goes for good).
     if !is_on() {
-        let host: UIElement = Grid::new().and_then(|g| g.cast()).map_err(w)?;
+        match PARKED.with_borrow_mut(Option::take) {
+            Some(a) if a.color == color => {
+                a.host.SetVisibility(pms_xaml::Visibility::Visible).map_err(w)?;
+                ALERT.with_borrow_mut(|s| *s = Some(a));
+            }
+            Some(a) => stage::remove(ctx, &a.host)?,
+            None => {}
+        }
+    }
+    if !is_on() {
+        let host: UIElement = crate::stage::grid()?.cast().map_err(w)?;
         stage::insert(ctx, Slot::Alert, &host)?;
         match build(&host, color) {
             Ok(a) => ALERT.with_borrow_mut(|s| *s = Some(a)),
@@ -210,7 +221,7 @@ fn build(host: &UIElement, color: Color) -> R<Alert> {
 
     // The tide: the alert's color rising from the bottom edge as high as the mic is loud (the
     // daemon sends it in decibels, so near-silence still shows a little). Sized in apply(); its height is Scale.Y = p.Tide.
-    let tide = compositor.CreateSpriteVisual().map_err(w)?;
+    let tide = stage::sprite(&compositor)?;
     let gradient = compositor.CreateLinearGradientBrush().map_err(w)?;
     gradient.SetStartPoint(Vector2 { X: 0.0, Y: 1.0 }).map_err(w)?;
     gradient.SetEndPoint(Vector2 { X: 0.0, Y: 0.0 }).map_err(w)?;
@@ -229,7 +240,7 @@ fn build(host: &UIElement, color: Color) -> R<Alert> {
     rise.SetReferenceParameter(&HSTRING::from("p"), &level).map_err(w)?;
     tide.StartAnimation(&HSTRING::from("Scale"), &rise).map_err(w)?;
 
-    let root = compositor.CreateContainerVisual().map_err(w)?;
+    let root = stage::container(&compositor)?;
     root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 }).map_err(w)?;
     for v in [shapes.cast::<Visual>().map_err(w)?, tide.cast().map_err(w)?, flicker.cast().map_err(w)?, ring_layer.cast().map_err(w)?] {
         root.Children().map_err(w)?.InsertAtTop(&v).map_err(w)?;
@@ -486,10 +497,59 @@ pub fn follow() {
     });
 }
 
-pub(crate) fn off(ctx: &Ctx) -> R<String> {
+thread_local! {
+    /// The alert while no app has the mic: built once, put away hidden, and shown again when one does (in the same color).
+    /// Taken apart and built again for every call, as it once was, it left all its composition objects in Explorer's memory
+    /// for good each time (a visual once on screen is never freed, stage.rs): ~17 KB a call (2026-11-17).
+    static PARKED: RefCell<Option<Alert>> = const { RefCell::new(None) };
+}
+
+/// No app has the mic: the alert's put away (`park`), for the next one.
+pub(crate) fn off(_ctx: &Ctx) -> R<String> {
     let Some(a) = ALERT.with_borrow_mut(Option::take) else { return Ok("alert already off".into()) };
-    stage::remove(ctx, &a.host)?;
+    park(a)?;
     Ok("alert off".into())
+}
+
+/// Hides `a` and keeps it, as it would be new: nothing of it running, nor holding on to the mic label's visuals.
+fn park(mut a: Alert) -> R<()> {
+    let stop = |o: &CompositionObject, prop: &str| {
+        let _ = o.StopAnimation(&HSTRING::from(prop));
+    };
+    let wash: CompositionObject = a.wash.cast().map_err(w)?;
+    for prop in ["Offset", "Size", "CornerRadius"] {
+        stop(&wash, prop);
+    }
+    for center in a.near.centers()?.into_iter().chain(a.far.centers()?) {
+        stop(&center, "Center");
+    }
+    stop(&a.level.cast().map_err(w)?, "T");
+    stop(&a.wash_brush.cast().map_err(w)?, "Color");
+    a.near.retire(&a.compositor)?;
+    a.far.retire(&a.compositor)?;
+    a.level.InsertScalar(&HSTRING::from("Level"), 0.0).map_err(w)?;
+    a.level.InsertScalar(&HSTRING::from("Tide"), 0.0).map_err(w)?;
+    a.host.SetVisibility(pms_xaml::Visibility::Collapsed).map_err(w)?;
+    (a.local, a.focus_local, a.anchored, a.muted) = (false, false, false, false);
+    (a.focus, a.last, a.morph_until) = ((Vector2::default(), 0.0), (Vector2::default(), Vector2::default()), Instant::now());
+    // One put away before (in another color) goes for good.
+    if let Some(old) = PARKED.with_borrow_mut(|p| p.replace(a))
+        && let Some(ctx) = crate::CTX.get()
+    {
+        let _ = stage::remove(ctx, &old.host);
+    }
+    Ok(())
+}
+
+/// Takes the alert away for good, shown or put away (`reset`, `detach`).
+pub(crate) fn tear_down(ctx: &Ctx) -> R<String> {
+    let shown = ALERT.with_borrow_mut(Option::take);
+    let parked = PARKED.with_borrow_mut(Option::take);
+    let any = shown.is_some() || parked.is_some();
+    for a in shown.into_iter().chain(parked) {
+        stage::remove(ctx, &a.host)?;
+    }
+    Ok(if any { "alert off".into() } else { "alert already off".into() })
 }
 
 fn lighten(c: u8) -> u8 {

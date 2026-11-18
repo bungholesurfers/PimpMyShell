@@ -296,9 +296,8 @@ pub unsafe extern "C" fn Z_Malloc(size: c_int, tag: c_int, user: *mut c_void) ->
 /// whose tag falls in `[lowtag, hightag]`. Called during level shutdown
 /// to mass-release `PU_LEVEL` allocations.
 ///
-/// The Rust port adds a 2000-block walk cap and stderr trace
-/// (`[Z_FreeTags] ...`) not present in the C original; useful for
-/// catching list corruption when porting bugs creep in.
+/// Every block, as the C original walks them. (The port stopped after 2000 and said so on stderr: a level with more,
+/// as Freedoom's have, kept the rest, so that each level change leaked what was past them until the zone ran out.)
 ///
 /// # Safety
 /// - `mainzone` must be initialised. All blocks in the active list must
@@ -309,25 +308,17 @@ pub unsafe extern "C" fn Z_FreeTags(lowtag: c_int, hightag: c_int) {
     let zone = mainzone;
     let sentinel = std::ptr::addr_of_mut!((*zone).blocklist);
     let mut block = (*zone).blocklist.next;
-    let mut freed = 0;
-    let mut walked = 0;
 
-    while block != sentinel && walked < 2000 {
-        walked += 1;
+    while block != sentinel {
         let next = (*block).next;
 
         if (*block).tag != PU_FREE && (*block).tag >= lowtag && (*block).tag <= hightag {
             let block_ptr = block as *mut u8;
             Z_Free(block_ptr.add(std::mem::size_of::<memblock_t>()) as *mut c_void);
-            freed += 1;
         }
 
         block = next;
     }
-    eprintln!(
-        "[Z_FreeTags] lowtag={} hightag={} walked={} freed={}",
-        lowtag, hightag, walked, freed
-    );
 }
 
 /// `void Z_DumpHeap(int lowtag, int hightag)` — diagnostic dump of the
@@ -443,8 +434,9 @@ pub unsafe extern "C" fn Z_CheckHeap() {
 /// Check heap integrity without aborting. Returns true if valid.
 ///
 /// Rust-only addition (no C counterpart): used by `Z_CheckHeapAfter`
-/// and `Z_CheckHeap` for non-fatal diagnostics. Caps the walk at 2000
-/// blocks to avoid hanging on a cyclic free-list bug.
+/// and `Z_CheckHeap` for non-fatal diagnostics. Caps the walk at as many
+/// blocks as the zone could hold, to avoid hanging on a cyclic list: more
+/// than that can only be a loop. (It was 2000, which a big level has.)
 ///
 /// # Safety
 /// - Reads `mainzone` and its linked block list; the caller must ensure
@@ -460,8 +452,10 @@ pub unsafe extern "C" fn Z_CheckHeapQuiet() -> bool {
     let mut block = (*zone).blocklist.next;
     let mut valid = true;
     let mut count = 0;
+    // No block is smaller than its header: more blocks than that fit in the zone is a loop.
+    let most = (*zone).size as usize / std::mem::size_of::<memblock_t>();
 
-    while block != sentinel && count < 2000 {
+    while block != sentinel && count < most {
         let size = (*block).size;
         if size <= 0 || size > 10_000_000 {
             eprintln!(
@@ -512,7 +506,7 @@ pub unsafe extern "C" fn Z_CheckHeapQuiet() -> bool {
         block = (*block).next;
         count += 1;
     }
-    if count >= 2000 {
+    if count >= most {
         eprintln!("Z_CheckHeapQuiet: too many blocks, possible loop!");
         valid = false;
     }

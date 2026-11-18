@@ -7,7 +7,12 @@
 //!   pms demo <gpu>[+<gpu>..]     the meters with GPUs this PC doesn't have (intel, radeon, nvidia, snapdragon)
 //!   pms daemon [file]            keep the taskbar configured per pms.toml (foreground)
 //!   pms daemon stop              stop a running daemon (restores the stock taskbar)
+//!   pms sandbox off              take every helper's sandbox down, and give PimpMyShell's folder back as it was (the
+//!                                uninstaller runs this)
 //!   pms gui [file]               settings window (edits the config live)
+//!   pms bump [<name>|next] [<tv>]
+//!                                one of Number One's bumps on TV channel 37, now: ident-tumble, homage-orbit and so on (or
+//!                                just tumble, orbit), or the next of them all; on the TV called <tv>, or every TV
 //!   pms autostart on [file]|off|status
 //!                                     run the windowless daemon (pmsd.exe) at logon
 
@@ -20,9 +25,14 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const NO_TAP: &str = "no TAP listening; run `pms inject` (or `pms daemon`)";
 
+/// What to say when the TAP couldn't be asked: that there's none, unless it's that something else has its pipe.
+fn no_tap(e: String) -> String {
+    if pms::not_ours(&e) { e } else { format!("{NO_TAP} ({e})") }
+}
+
 /// One connection per line, so the REPL never blocks the daemon out of the single-instance pipe.
 fn repl() -> Result<()> {
-    send("ping").map_err(|e| format!("{NO_TAP} ({e})"))?;
+    send("ping").map_err(no_tap)?;
     let stdin = std::io::stdin();
     loop {
         print!("pms> ");
@@ -46,7 +56,7 @@ fn repl() -> Result<()> {
 fn watch_layout() -> Result<()> {
     let mut last = String::new();
     loop {
-        let snap = send("layout").map_err(|e| format!("{NO_TAP} ({e})"))?;
+        let snap = send("layout").map_err(no_tap)?;
         if snap != last {
             println!("{}", snap.trim_end());
             println!();
@@ -100,7 +110,9 @@ fn run() -> Result<()> {
         Some("meters") if args.len() == 2 && std::path::Path::new(&args[1]).is_file() => pms::meters::run(&args[1]).map_err(|e| pms::problem::Problem::of(std::path::Path::new(&args[1]), &e).words().into()),
         Some("restart-explorer") => pms::explorer::ask().map_err(Into::into),
         Some("daemon") if arg(1) == Some("stop") => daemon::stop().map(|s| println!("{s}")).map_err(Into::into),
+        Some("sandbox") if arg(1) == Some("off") => pms::sandbox::take_all_down().map(|()| println!("every sandbox is taken down")).map_err(Into::into),
         Some("demo") => demo(arg(1)),
+        Some("bump") => pms::iss::bump_now(arg(1), arg(2)).map(|s| println!("{s}")).map_err(Into::into),
         Some("daemon") => {
             daemon::migrate();
             let path = config::given(arg(1).map(Into::into));
@@ -120,7 +132,7 @@ fn run() -> Result<()> {
         }
         Some(_) => {
             let line = args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ");
-            println!("{}", send(&line).map_err(|e| format!("{NO_TAP} ({e})"))?.trim_end());
+            println!("{}", send(&line).map_err(no_tap)?.trim_end());
             Ok(())
         }
     }

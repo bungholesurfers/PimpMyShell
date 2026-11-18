@@ -1,0 +1,12 @@
+[package]
+name = "pms-lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "What PimpMyShell says, in every language it speaks: compiled in, and found by its place in a table"
+publish = false
+build = "build.rs"
+
+# Nothing here on purpose, not even for the build script: every program of PimpMyShell's carries this, the part inside
+# Explorer too, and it's built before all of them.
+[dependencies]

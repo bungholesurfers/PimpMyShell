@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use pms_xaml::{
-    ButtonBase, DependencyObject, DependencyProperty, DependencyPropertyChangedCallback, ElementCompositionPreview, FrameworkElement, Grid, RenderTargetBitmap,
+    ButtonBase, DependencyObject, DependencyProperty, DependencyPropertyChangedCallback, ElementCompositionPreview, FrameworkElement, RenderTargetBitmap,
     ToggleButton, UIElement,
 };
 use windows::Storage::Streams::DataReader;
@@ -155,11 +155,11 @@ fn hosts(ctx: &Ctx) -> R<()> {
     if GLOWS.with_borrow(Option::is_some) {
         return Ok(());
     }
-    let host: UIElement = Grid::new().and_then(|g| g.cast()).map_err(w)?;
+    let host: UIElement = crate::stage::grid()?.cast().map_err(w)?;
     host.SetIsHitTestVisible(false).map_err(w)?;
     stage::insert(ctx, Slot::Alert, &host)?;
     let compositor = ElementCompositionPreview::GetElementVisual(&host).map_err(w)?.Compositor().map_err(w)?;
-    let root = compositor.CreateContainerVisual().map_err(w)?;
+    let root = stage::container(&compositor)?;
     ElementCompositionPreview::SetElementChildVisual(&host, &root).map_err(w)?;
     GLOWS.with_borrow_mut(|g| *g = Some(Glows { host, root, compositor, start: None, apps: None, app: HashMap::new(), failed: Default::default() }));
     Ok(())
@@ -174,7 +174,9 @@ fn watch(ctx: &Ctx, key: Key, handle: InstanceHandle, feel: Feel, color: Option<
     };
     let (compositor, root) = GLOWS.with_borrow(|g| g.as_ref().map(|g| (g.compositor.clone(), g.root.clone()))).ok_or("no glow host")?;
     let brush = compositor.CreateRadialGradientBrush().map_err(w)?;
-    let sprite = compositor.CreateSpriteVisual().map_err(w)?;
+    // One used before, if there's one: an app's button comes and goes with its windows, and a sprite once on screen is never
+    // freed (stage.rs).
+    let sprite = stage::sprite(&compositor)?;
     sprite.SetBrush(&brush).map_err(w)?;
     sprite.SetOpacity(0.0).map_err(w)?;
     // As wide as it ever gets; Scale shrinks it to the radius of the moment.
@@ -224,10 +226,10 @@ fn later(key: Key, ms: u64) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(ms));
         let Some(ctx) = crate::CTX.get() else { return };
-        let handler = windows::UI::Core::DispatchedHandler::new(move || {
+        let handler = windows::UI::Core::DispatchedHandler::new(move || crate::guard(|| {
             let _ = std::panic::catch_unwind(|| recolor(key));
             Ok(())
-        });
+        }));
         let _ = ctx.dispatcher.RunAsync(windows::UI::Core::CoreDispatcherPriority::Low, &handler);
     });
 }
@@ -274,7 +276,7 @@ fn listen_events(ctx: &Ctx, key: Key, handle: InstanceHandle, el: &UIElement) ->
         None => el.clone(),
     };
     let handler = move |ev: Ev| {
-        pms_xaml::PointerEventHandler::new(move |_, _| {
+        pms_xaml::PointerEventHandler::new(move |_, _| crate::guard(|| {
             let _ = std::panic::catch_unwind(|| {
                 with_glow(key, |g| {
                     if let Source::Events { over, pressed, .. } = &mut g.source {
@@ -295,7 +297,7 @@ fn listen_events(ctx: &Ctx, key: Key, handle: InstanceHandle, el: &UIElement) ->
                 update(key);
             });
             Ok(())
-        })
+        }))
     };
     let tokens = vec![
         (Ev::Entered, el.PointerEntered(&handler(Ev::Entered)).map_err(w)?),
@@ -414,10 +416,10 @@ fn take_color(key: Key, glow: &mut Glow) -> R<()> {
     let render = rtb.RenderAsync(&icon).map_err(w)?;
     glow.rendering = Some(rtb);
     render
-        .SetCompleted(&AsyncActionCompletedHandler::new(move |_, status| {
+        .SetCompleted(&AsyncActionCompletedHandler::new(move |_, status| crate::guard(|| {
             let _ = std::panic::catch_unwind(|| rendered(key, status));
             Ok(())
-        }))
+        })))
         .map_err(w)
 }
 
@@ -425,7 +427,7 @@ fn rendered(key: Key, status: AsyncStatus) {
     let rtb = with_glow(key, |g| g.rendering.clone()).flatten();
     let Some(rtb) = rtb.filter(|_| status == AsyncStatus::Completed) else { return };
     let r = rtb.GetPixelsAsync().and_then(|op| {
-        op.SetCompleted(&AsyncOperationCompletedHandler::new(move |op, status| {
+        op.SetCompleted(&AsyncOperationCompletedHandler::new(move |op, status| crate::guard(|| {
             let _ = std::panic::catch_unwind(|| {
                 let pixels = op.as_ref().filter(|_| status == AsyncStatus::Completed).and_then(|op| op.GetResults().ok());
                 let color = pixels.and_then(|buf: windows::Storage::Streams::IBuffer| {
@@ -446,7 +448,7 @@ fn rendered(key: Key, status: AsyncStatus) {
                 });
             });
             Ok(())
-        }))
+        })))
     });
     if let Err(e) = r {
         crate::log(format!("app glow color: {e}"));
@@ -564,9 +566,7 @@ fn drop_glow(mut glow: Glow) {
             }
         }
     }
-    if let Ok(parent) = glow.sprite.Parent() {
-        let _ = parent.Children().and_then(|c| c.Remove(&glow.sprite));
-    }
+    stage::spare(&glow.sprite);
 }
 
 fn stop_start() {

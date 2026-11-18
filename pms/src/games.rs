@@ -54,12 +54,20 @@ fn in_front() -> Option<(u32, bool)> {
 /// Whether the window in front fills the screen the taskbar's on, which hides the taskbar: nothing on it can be seen. Not a game
 /// necessarily (a video, a presentation): it's for what's drawn only to be seen, which can stop meanwhile. A few calls, cheap
 /// enough to ask every second.
+///
+/// Explorer's own windows never count: Task View (Win+Tab) fills the screen, but the taskbar stays in sight over it.
 pub fn taskbar_covered() -> bool {
     let window = unsafe { GetForegroundWindow() };
-    if window.is_invalid() || in_front().is_none_or(|(_, fills)| !fills) {
+    let Some((pid, fills)) = in_front().filter(|_| !window.is_invalid()) else { return false };
+    if !fills {
         return false;
     }
     let Ok(taskbar) = (unsafe { FindWindowW(windows_core::w!("Shell_TrayWnd"), None) }) else { return false };
+    let mut shell = 0;
+    unsafe { GetWindowThreadProcessId(taskbar, Some(&mut shell)) };
+    if pid == shell {
+        return false;
+    }
     unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) == MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST) }
 }
 

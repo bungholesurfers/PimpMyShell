@@ -1653,6 +1653,25 @@ pub extern "C" fn D_DoomMain() {
 
         // Note: G_CheckDemoStatus atexit registration is handled via the game flow.
 
+        // PimpMyShell: -demos <file>..., up to four demos the title loop plays in place of the game's own, as DEMO1, DEMO2 and
+        // on, whatever their files are called. Like -playdemo's, they change nothing of the game, so the shareware takes them.
+        let p = M_CheckParmWithArgs(c"-demos".as_ptr().cast_mut(), 1);
+        if p > 0 {
+            let (mut at, mut n) = (p + 1, 0);
+            while at < myargc && *(*myargv.add(at as usize)) != b'-' as c_char && n < 4 {
+                if D_AddFile(*myargv.add(at as usize)) {
+                    n += 1;
+                    let name = format!("DEMO{n}");
+                    let lump = &mut (*lumpinfo.add(numlumps as usize - 1)).name;
+                    lump.fill(0);
+                    for (to, from) in lump.iter_mut().zip(name.bytes()) {
+                        *to = from as c_char;
+                    }
+                }
+                at += 1;
+            }
+        }
+
         W_GenerateHashTable();
 
         // Set game description

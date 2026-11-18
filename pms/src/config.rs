@@ -148,6 +148,10 @@ pub struct Config {
     /// the backdrop's look and the color of our text.
     #[serde(default = "default_theme", skip_serializing_if = "is_auto")]
     pub theme: String,
+    /// What everything's said in: "auto" (default: Windows' own language where PimpMyShell speaks it, and English where it
+    /// doesn't), or one of the languages in `lang/` by its code, like "en_RN".
+    #[serde(default = "default_theme", skip_serializing_if = "is_auto")]
+    pub language: String,
     /// Frame-rate cap for the long-running animations (the hot-mic alert), always; unset or 0: none, the
     /// display's full rate.
     pub max_fps: Option<u32>,
@@ -172,11 +176,15 @@ pub struct Config {
     /// "1080i". A console that's on is told, and changes as it is.
     #[serde(default = "usual_video", skip_serializing_if = "is_usual_video")]
     pub console_video: String,
+    /// The console's title loop plays real speed demos from the Doom Speed Demo Archive (demos.rs), each checked here first, in
+    /// place of the game's own. Off unless you say so: it goes online.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub console_demos: bool,
     /// A TV starting up runs through its channels, from `tv_intro_from` to `tv_intro_to`, game or no game. Off, it comes on where
     /// it was left.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub tv_intro: bool,
-    /// The channel the run starts on (Captain Midnight's, 1295), and the one it ends on and stays (the console's, 6).
+    /// The channel the run starts on (Captain Midnight's, 1295), and the one it ends on and stays (the console's, 304).
     #[serde(default = "intro_from", skip_serializing_if = "is_intro_from")]
     pub tv_intro_from: u32,
     #[serde(default = "intro_to", skip_serializing_if = "is_intro_to")]
@@ -198,6 +206,10 @@ pub struct Config {
     /// or "latest", the newest release published.
     #[serde(default = "default_channel", skip_serializing_if = "is_stable")]
     pub update_channel: String,
+    /// Software update: a notification, once a run, when checks by themselves can't be made (the download helper's sandbox
+    /// can't be) or haven't worked for a week. On by default.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub update_warn: bool,
     #[serde(default)]
     pub counters: BTreeMap<String, CounterSpec>,
     #[serde(default, rename = "meter")]
@@ -214,6 +226,14 @@ pub struct Config {
     pub app_glow: Option<AppGlow>,
     /// What a Twatch TV (a `screen` meter with `set = "twatch"`) does. Absent: its defaults, with no favorites.
     pub twatch: Option<Twatch>,
+    /// Which helpers run sandboxed (pms::sandbox), each in an AppContainer of its own. Absent: all of them.
+    pub sandbox: Option<Sandboxes>,
+    /// Which of PimpMyShell's processes are in efficiency mode (pms::efficiency). Absent: all of them, as far as each goes.
+    pub efficiency: Option<Efficiency>,
+    /// How much the Doom Speed Demo Archive is asked of, and when, while `console_demos` is on (demos.rs). Absent: the defaults.
+    pub demos: Option<Demos>,
+    /// Channel 37, Number One: the ISS's urine tank (iss/). Absent: its defaults, which have it switched off.
+    pub iss: Option<Iss>,
     /// A proxy, and what goes through it (net.rs). It lives in a file of its own (`network_path`), as the favorites do, so that the
     /// settings file can be shared without it: read here from a file from before that, and not written here again. Absent: none.
     #[serde(default, skip_serializing)]
@@ -234,6 +254,8 @@ pub struct Network {
     pub proxy: String,
     /// Twatch TV's looks at who's live, and its pictures.
     pub live_checks: bool,
+    /// Number One's ISS telemetry.
+    pub iss: bool,
     /// Twitch's streams: Streamlink finding them, and the video itself. They go together: the address Streamlink gets names the
     /// IP address that asked for it, so the video going another way would tie the two together.
     pub streams: bool,
@@ -272,7 +294,7 @@ fn take_in_network(path: &Path, config: &mut Config) {
             // A file that won't read could have been a proxy: everything goes nowhere until it's fixed, rather than without one.
             Err(e) => {
                 crate::log(format!("{}: {}; nothing goes out over the network until it's fixed", file.display(), unquoted(&e.to_string())));
-                config.network = Some(Network { proxy: NETWORK_UNREAD.into(), live_checks: true, streams: true, updates: true, downloads: true, ..Default::default() });
+                config.network = Some(Network { proxy: NETWORK_UNREAD.into(), live_checks: true, iss: true, streams: true, updates: true, downloads: true, ..Default::default() });
             }
         },
         Err(_) => {
@@ -726,12 +748,16 @@ pub fn settings_page(id: &str) -> &'static str {
         ("counters", _) => "counters",
         ("backdrop" | "start_glow" | "app_glow", _) => "look",
         ("network", _) => "network",
-        ("", "console_autostart" | "console_video") => "pimpbox",
+        ("", "console_autostart" | "console_video" | "console_demos") => "pimpbox",
         ("", k) if k.starts_with("tv_intro") || k.starts_with("shuffle_") => "tv",
         ("", "meter") => "meters",
         ("", "counters") => "counters",
         ("", "backdrop" | "start_glow" | "app_glow") => "look",
         ("", "twatch") => "twatch",
+        ("sandbox", _) | ("", "sandbox") => "sandbox",
+        ("efficiency", _) | ("", "efficiency") => "power",
+        ("demos", _) | ("", "demos") => "pimpbox",
+        ("iss", _) | ("", "iss") => "iss",
         ("", "toasts") => "toasts",
         ("", "hotmic") => "hotmic",
         _ => "general",
@@ -780,6 +806,7 @@ fn not_usable(c: &Config) -> Option<String> {
     let channels: Vec<&str> = channels.iter().map(String::as_str).collect();
     let mut found = vec![
         choice("theme", &c.theme, &THEMES),
+        choice("language", &c.language, &std::iter::once(crate::lang::AUTO).chain(crate::lang::LANGUAGES.iter().map(|l| l.code)).collect::<Vec<_>>()),
         choice("meter_height", &c.meter_height, &HEIGHTS),
         choice("bar_height", &c.bar_height, &HEIGHTS),
         choice("update_channel", &c.update_channel, &UPDATE_CHANNELS),
@@ -792,12 +819,30 @@ fn not_usable(c: &Config) -> Option<String> {
         found.extend([
             choice("twatch.pictures", &t.pictures, &PICTURES),
             choice("twatch.top_quality", &t.top_quality, &crate::twatch::QUALITIES),
+            choice("twatch.frame_rate", &t.frame_rate.to_string(), &crate::twatch::FRAME_RATES),
             choice("twatch.higher_favorite", &t.higher_favorite, &HIGHER_FAVORITE),
             choice("twatch.media_controls", &t.media_controls, &MEDIA_CONTROLS),
             range("twatch.more_sets", t.more_sets, 0, crate::twatch::MOST_MORE_SETS),
             range("twatch.check_seconds", t.check_seconds, crate::twatch::FASTEST_CHECK, 3600),
             range("twatch.check_extra_seconds", t.check_extra_seconds, 0, 3600),
             range("twatch.volume", t.volume, 0, 100),
+        ]);
+    }
+    if let Some(e) = &c.efficiency {
+        found.push(choice("efficiency.pimpbox", &e.pimpbox, &PIMPBOX_EFFICIENT));
+    }
+    if let Some(i) = &c.iss {
+        found.push(choice("iss.bumps", &i.bumps, &crate::iss::BUMPS));
+    }
+    if let Some(d) = &c.demos {
+        found.extend([
+            choice("demos.when", &d.when, &DEMOS_WHEN),
+            range("demos.every_hours", d.every_hours, 1, 168),
+            range("demos.at_once", d.at_once, 1, 50),
+            range("demos.gap_seconds", d.gap_seconds, 1, 60),
+            range("demos.most", d.most, 1, 500),
+            range("demos.list_days", d.list_days, 1, 90),
+            range("demos.fired_at_least", d.fired_at_least, 0, 1000),
         ]);
     }
     if let Some(t) = &c.toasts {
@@ -833,6 +878,13 @@ fn brought_up_to_date(mut config: Config) -> Config {
     {
         t.pictures = "always".into();
     }
+    if let Some(i) = &mut config.iss {
+        i.every = None;
+    }
+    // The console was on channel 6, before Number One came, on 37, and it went to 304.
+    for channel in [&mut config.tv_intro_from, &mut config.tv_intro_to] {
+        *channel = crate::tv::renumbered(*channel);
+    }
     config
 }
 
@@ -848,12 +900,14 @@ fn as_table(config: &Config) -> Result<toml::Table, String> {
         }
     }
     let mut table = toml::Table::try_from(&plain).map_err(|e| e.to_string())?;
-    // Twatch TV's table has a default for every value: only what isn't that is yours.
-    let usual = toml::Table::try_from(Twatch::default()).map_err(|e| e.to_string())?;
-    if let Some(toml::Value::Table(mine)) = table.get_mut("twatch") {
-        mine.retain(|key, value| usual.get(key) != Some(value));
-        if mine.is_empty() {
-            table.remove("twatch");
+    // Twatch TV's table, the sandboxes' and efficiency mode's have a default for every value: only what isn't that is yours.
+    for (name, usual) in [("twatch", toml::Table::try_from(Twatch::default())), ("sandbox", toml::Table::try_from(Sandboxes::default())), ("efficiency", toml::Table::try_from(Efficiency::default())), ("iss", toml::Table::try_from(Iss::default()))] {
+        let usual = usual.map_err(|e| e.to_string())?;
+        if let Some(toml::Value::Table(mine)) = table.get_mut(name) {
+            mine.retain(|key, value| usual.get(key) != Some(value));
+            if mine.is_empty() {
+                table.remove(name);
+            }
         }
     }
     Ok(table)
@@ -1155,6 +1209,132 @@ impl Config {
     }
 }
 
+/// Which of PimpMyShell's processes ask Windows for efficiency mode (EcoQoS, pms::efficiency): the slowest clock speed that will
+/// do, and on a processor that has them, the efficient cores. Each is on unless you say; off, Windows decides, as for any
+/// program.
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
+#[serde(deny_unknown_fields, default)]
+pub struct Efficiency {
+    /// The daemon, pmsd.exe: the meters, the TVs, the cards and the Hot Mic alert.
+    pub daemon: bool,
+    /// Twatch TV's players, pms-twatch.exe.
+    pub twatch: bool,
+    /// What works out of sight for a moment at a time: pms-fetch.exe (pictures, playlists, updates, demos), Streamlink, and
+    /// the checks made of the PIMPBOX's games and demos.
+    pub helpers: bool,
+    /// The PIMPBOX and its game: "closed" (while its window on your desktop is closed, the default), "always" or "never".
+    pub pimpbox: String,
+}
+
+/// When the PIMPBOX is in efficiency mode.
+pub const PIMPBOX_EFFICIENT: [&str; 3] = ["closed", "always", "never"];
+
+impl Default for Efficiency {
+    fn default() -> Efficiency {
+        Efficiency { daemon: true, twatch: true, helpers: true, pimpbox: "closed".into() }
+    }
+}
+
+/// Which helpers run sandboxed: each in an AppContainer of its own (pms::sandbox), where it can reach none of your files and
+/// nothing on the network but what it's let have. Each is on unless you say.
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
+#[serde(deny_unknown_fields, default)]
+pub struct Sandboxes {
+    /// Twatch TV's player, pms-twatch.exe.
+    pub twatch: bool,
+    /// Streamlink.
+    pub streamlink: bool,
+    /// The game in the PIMPBOX (POOM).
+    pub poom: bool,
+    /// pms-fetch.exe: Twitch's pictures, and the stream's first playlist.
+    pub fetch: bool,
+}
+
+impl Default for Sandboxes {
+    fn default() -> Sandboxes {
+        Sandboxes { twatch: true, streamlink: true, poom: true, fetch: true }
+    }
+}
+
+impl Sandboxes {
+    /// Whether `helper` runs sandboxed.
+    pub fn on(&self, helper: crate::sandbox::Helper) -> bool {
+        use crate::sandbox::Helper;
+        match helper {
+            Helper::Twatch => self.twatch,
+            Helper::Streamlink => self.streamlink,
+            Helper::Poom => self.poom,
+            Helper::Fetch => self.fetch,
+        }
+    }
+}
+
+/// How much the Doom Speed Demo Archive is asked of, and when (demos.rs): it's somebody else's site, so not much, and not often.
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
+#[serde(deny_unknown_fields, default)]
+pub struct Demos {
+    /// When demos are fetched and checked: "always" (while PimpMyShell runs), or "console" (only while the console's on).
+    pub when: String,
+    /// Hours from one go to the next, 1 to 168.
+    pub every_hours: u32,
+    /// How many demos are fetched and checked in a go, 1 to 50.
+    pub at_once: u32,
+    /// Seconds from one download to the next, 1 to 60.
+    pub gap_seconds: u32,
+    /// How many demos are fetched for a game in all, 1 to 500: once that many have been, no more are.
+    pub most: u32,
+    /// Days from asking the archive what it has to asking again, 1 to 90.
+    pub list_days: u32,
+    /// How many times the player has to fire a weapon in a demo for it to be shown, 0 to 1000: a run that never engages
+    /// anything is a dull one to watch. 0, any that plays.
+    pub fired_at_least: u32,
+}
+
+impl Default for Demos {
+    fn default() -> Demos {
+        Demos { when: DEMOS_WHEN[0].into(), every_hours: 6, at_once: 10, gap_seconds: 5, most: 40, list_days: 7, fired_at_least: 10 }
+    }
+}
+
+/// Channel 37, Number One: the ISS's urine tank, from NASA's telemetry.
+#[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
+#[serde(deny_unknown_fields, default)]
+pub struct Iss {
+    /// It goes online for the telemetry (Settings > Network says where), in the background, as often as the tank wants (iss/plan.rs):
+    /// off unless you switch it on. Off, the channel says so.
+    pub online: bool,
+    /// How often it looked, from before that was the tank's to say. Read, and forgotten.
+    #[serde(default, skip_serializing)]
+    pub every: Option<String>,
+    /// A notification when the station empties its urine tank, once Number One's switched on. On unless you say (the user's call).
+    pub notify_flush: bool,
+    /// PTV's bumps, its idents and homages, on the channel: "often" (the usual: an ident on the quarter hour and a homage on the
+    /// hour, an ident when you're back, a homage when the station flushes, and the showroom when it's first tuned to), "hourly"
+    /// (the homage on the hour, and nothing else) or "off".
+    pub bumps: String,
+}
+
+impl Default for Iss {
+    fn default() -> Iss {
+        Iss { online: false, every: None, notify_flush: true, bumps: crate::iss::BUMPS[0].into() }
+    }
+}
+
+/// When demos are fetched and checked: the usual one first.
+pub const DEMOS_WHEN: [&str; 2] = ["always", "console"];
+
+impl Config {
+    /// What the settings say about speed demos' traffic: theirs, or the defaults.
+    pub fn demos(&self) -> Demos {
+        self.demos.clone().unwrap_or_default()
+    }
+
+    /// Whether `helper` runs sandboxed: as the settings say, and where they say nothing, it does.
+    pub fn sandboxed(&self, helper: crate::sandbox::Helper) -> bool {
+        self.sandbox.as_ref().map_or_else(|| Sandboxes::default().on(helper), |s| s.on(helper))
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Twatch {
@@ -1162,8 +1342,11 @@ pub struct Twatch {
     /// before that, and not written here again.
     #[serde(skip_serializing)]
     pub favorites: Vec<String>,
-    /// How many more sets may come out while more favorites are live, up to 2, and go away afterwards.
+    /// How many more sets may come out while more favorites are live, up to 9, and go away afterwards.
     pub more_sets: u32,
+    /// Whether they do (default true): false, none come, with `more_sets` kept for when they do again. The A beside the sets
+    /// switches it.
+    pub more_sets_on: bool,
     /// When a still picture now and then takes the place of live video: "never", "initial" (until a set is clicked), "low_memory"
     /// (default: while RAM or VRAM is short), or "always".
     pub pictures: String,
@@ -1174,6 +1357,9 @@ pub struct Twatch {
     pub notify_live: bool,
     /// The most it plays: "1080p60", "720p60", "720p", "480p" (default) or "360p". It goes lower by itself when it has to.
     pub top_quality: String,
+    /// At most how many frames a second each set shows: 0 (default) for every one the stream has, or 30 or 15. Each frame shown
+    /// costs the CPU the same whatever the set's size, and those left out cost nothing.
+    pub frame_rate: u32,
     /// What a set does when a favorite above the one it's showing goes live: "switch" to it (default), or "stay" until this one ends.
     pub higher_favorite: String,
     /// How often, in seconds, each favorite is looked at (default 600): in no order, spread out, whatever its place in the list.
@@ -1191,7 +1377,7 @@ pub struct Twatch {
 
 impl Default for Twatch {
     fn default() -> Self {
-        Twatch { favorites: Vec::new(), more_sets: 0, pictures: "low_memory".into(), thumbnails: None, notify_live: true, top_quality: "480p".into(), higher_favorite: "switch".into(), check_seconds: crate::twatch::live::USUAL_CHECK, check_extra_seconds: crate::twatch::live::USUAL_CHECK_EXTRA, volume: 100, metered_pictures: true, media_controls: "never".into() }
+        Twatch { favorites: Vec::new(), more_sets: 3, more_sets_on: true, pictures: "low_memory".into(), thumbnails: None, notify_live: true, top_quality: "480p".into(), frame_rate: 0, higher_favorite: "switch".into(), check_seconds: crate::twatch::live::USUAL_CHECK, check_extra_seconds: crate::twatch::live::USUAL_CHECK_EXTRA, volume: 100, metered_pictures: true, media_controls: "never".into() }
     }
 }
 
@@ -1208,9 +1394,10 @@ pub struct Toasts {
     /// Apps that keep their native banners, matched case-insensitively against the app name or
     /// AUMID, e.g. "Teams" for incoming calls.
     pub ignore: Vec<String>,
-    /// Where cards stop: left of "clock" (over the tray), "tray", "tv" (the first screen) or "mic" (its label, while it shows).
+    /// Where cards stop: left of the "tray" (the usual), the "clock" (over the tray), "tv" (the first screen) or "mic" (its label,
+    /// while it shows).
     /// What isn't showing counts as the tray.
-    #[serde(skip_serializing_if = "is_clock")]
+    #[serde(skip_serializing_if = "is_tray")]
     pub position: String,
     /// How cards look: "standard", or "pimped" (gold, with a sheen that sweeps across).
     #[serde(skip_serializing_if = "is_standard_card")]
@@ -1225,12 +1412,12 @@ fn is_card(how: &String) -> bool {
     how == "card"
 }
 
-fn is_clock(s: &str) -> bool {
-    s == "clock"
+fn is_tray(s: &str) -> bool {
+    s == "tray"
 }
 
 fn default_position() -> String {
-    "clock".to_string()
+    "tray".to_string()
 }
 
 fn is_standard_card(style: &String) -> bool {
@@ -1479,8 +1666,10 @@ mod tests {
         assert!(untouched(&config), "its defaults aren't written down");
         config.twatch = Some(Twatch { volume: 40, ..Twatch::default() });
         assert_eq!(to_toml(&config).unwrap(), format!("{HEADER}\n[twatch]\nvolume = 40\n"));
+        config.twatch = Some(Twatch { more_sets_on: false, ..Twatch::default() });
+        assert_eq!(to_toml(&config).unwrap(), format!("{HEADER}\n[twatch]\nmore_sets_on = false\n"), "sets that come by themselves switched off, and their number kept as it is");
         // A file holding every value, as 0.1.5's first builds wrote, is the same as one holding the change alone.
-        let full = format!("{HEADER}\n[twatch]\ncheck_seconds = 600\ncheck_extra_seconds = 300\nhigher_favorite = \"switch\"\nmetered_pictures = true\nmore_sets = 0\nnotify_live = true\npictures = \"low_memory\"\ntop_quality = \"480p\"\nvolume = 40\n");
+        let full = format!("{HEADER}\n[twatch]\ncheck_seconds = 600\ncheck_extra_seconds = 300\nhigher_favorite = \"switch\"\nmetered_pictures = true\nmore_sets = 3\nnotify_live = true\npictures = \"low_memory\"\ntop_quality = \"480p\"\nvolume = 40\n");
         assert_eq!(to_toml(&parse(&full).unwrap()).unwrap(), format!("{HEADER}\n[twatch]\nvolume = 40\n"));
     }
 
@@ -1563,7 +1752,7 @@ prxy = 1
         let start = parse(&format!("{HEADER}[hotmic]\nposition = \"start\"\n")).unwrap();
         assert_eq!((start.mic_position(), start.issues.len()), ("start", 0));
         assert_eq!(c.twatch.as_ref().map(|t| (t.top_quality.as_str(), t.volume)), Some(("480p", 40)));
-        assert_eq!(c.toasts.as_ref().map(|t| (t.position.as_str(), t.style.as_str())), Some(("clock", "pimped")));
+        assert_eq!(c.toasts.as_ref().map(|t| (t.position.as_str(), t.style.as_str())), Some(("tray", "pimped")));
         // Each is found in the file, and said plainly.
         let p = crate::problem::Problem::read(&text, c.issues.iter().find(|e| issue_setting(e) == "tv_intro_from").unwrap());
         assert_eq!(p.source.as_deref(), Some("tv_intro_from = 99"));
@@ -1658,5 +1847,39 @@ prxy = 1
         assert!(set_in_table(&path, "toasts", "enabled", "\"nah\"").is_err());
         assert!(std::fs::read_to_string(&path).unwrap() == off);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn the_console_was_on_6_and_is_on_304_now() {
+        for text in [format!("{HEADER}tv_intro_to = 6\ntv_intro_from = 6\n"), "tv_intro_to = 6\ntv_intro_from = 6\n".to_string()] {
+            let c = parse(&text).unwrap();
+            assert!(c.issues.is_empty(), "{:?}", c.issues);
+            assert_eq!((c.tv_intro_from, c.tv_intro_to), (304, 304));
+        }
+        let c = parse(&format!("{HEADER}tv_intro_to = 5\n")).unwrap();
+        assert_eq!((c.tv_intro_from, c.tv_intro_to), (crate::tv::INTRO_FROM, 5), "what wasn't the console's stays");
+        // Written down again, the console's channel is the usual end of the run: it's not there at all.
+        let c = parse(&format!("{HEADER}tv_intro_to = 6\n")).unwrap();
+        assert!(!to_toml(&c).unwrap().contains("tv_intro"));
+        assert_eq!(crate::tv::INTRO_TO, 304);
+    }
+
+    #[test]
+    fn number_one_is_off_until_you_say_and_its_defaults_are_not_written() {
+        let c = parse(HEADER).unwrap();
+        assert!(c.iss.is_none() && !Iss::default().online && Iss::default().notify_flush && Iss::default().bumps == "often");
+        let c = parse(&format!("{HEADER}[iss]\nonline = true\nevery = \"live\"\n")).unwrap();
+        assert!(c.issues.is_empty(), "how often it looks is the tank's to say now: an old `every` is read, and forgotten: {:?}", c.issues);
+        assert_eq!(c.iss.as_ref().map(|i| (i.online, i.every.clone(), i.notify_flush)), Some((true, None, true)));
+        let written = to_toml(&c).unwrap();
+        assert!(written.contains("online = true") && !written.contains("notify_flush") && !written.contains("every ="), "{written}");
+        // Switched off, that's what's written.
+        let c = parse(&format!("{HEADER}[iss]\nonline = true\nnotify_flush = false\n")).unwrap();
+        assert!(to_toml(&c).unwrap().contains("notify_flush = false"));
+        let c = parse(&format!("{HEADER}[iss]\nbumps = \"sometimes\"\n")).unwrap();
+        assert_eq!(c.issues.iter().map(|e| issue_setting(e)).collect::<Vec<_>>(), ["iss.bumps"]);
+        assert_eq!(settings_page("iss.bumps"), "iss", "Number One's own page");
+        let n: Network = toml::from_str("iss = true").unwrap();
+        assert!(n.iss && !n.live_checks, "the telemetry has a proxy switch of its own");
     }
 }

@@ -8,6 +8,14 @@ tv_intro = true
 shuffle_seconds = 5
 shuffle_jitter = true
 
+# The helpers out of their sandboxes, for the training alone: a sandboxed one can't write what it recorded into
+# target\pgo-profiles, so POOM, pms-fetch and Twatch TV's player would go untrained. (People have them sandboxed.)
+[sandbox]
+fetch = false
+twatch = false
+streamlink = false
+poom = false
+
 [backdrop]
 tint  = "#7F060606"
 grain = 0.02

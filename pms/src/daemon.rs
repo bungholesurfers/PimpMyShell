@@ -34,6 +34,7 @@ use crate::system;
 use crate::toasts::{self, Banners, Incoming, Listener};
 use crate::tray::{self, Tray};
 use crate::watchdog::Watchdog;
+use crate::lang::daemon as says;
 use crate::{inject, log, send, taskbar_pid, update};
 
 const STOP_EVENT: PCWSTR = w!(r"Local\PimpMyShellDaemonStop");
@@ -50,6 +51,18 @@ const LEVEL_EVERY: Duration = Duration::from_millis(66);
 /// How long an app that let go of the mic stays in the label.
 const CLOSED_FOR: Duration = Duration::from_secs(10);
 const TOAST_POLL: Duration = Duration::from_millis(500);
+/// How long an app's next card waits after its last: what else comes from it meanwhile waits as one card, which says how many
+/// more it stands for. A flood (a chat app opened after weeks: a thousand at a time) is then a card every few seconds, not a
+/// thousand cards, each built, animated in and out, and restacking the deck.
+const APP_GAP: Duration = Duration::from_secs(3);
+/// How long the next card, from any app, waits after the last one came.
+const CARD_GAP: Duration = Duration::from_millis(400);
+
+/// How long to the next look at the notification center, holding `held`: asking for them costs Windows' notification service
+/// more the more there are (about 57 ms of its time for 260), and it's the service that's delivering them.
+fn toast_poll(held: usize) -> Duration {
+    (TOAST_POLL + Duration::from_millis(2 * held.saturating_sub(200) as u64)).min(Duration::from_secs(3))
+}
 /// A card's time once it comes forward again with more behind it.
 const QUEUED_TOAST_MS: u32 = 4000;
 /// The most cards on screen at once (newest in front); older ones are let go (they stay in the notification center).
@@ -192,10 +205,15 @@ struct Daemon {
     stand_in: bool,
     /// When it was last worked out whether Explorer could do with a restart.
     explorer_checked: Option<Instant>,
+    /// Since when the TAP's pipe has been something else's (`not_explorers`).
+    impostor_since: Option<Instant>,
 }
 
 /// How many times in a row a TAP of another build gets swapped for ours before we stop trying.
 const MAX_SWAPS: u32 = 2;
+
+/// How long something else may hold the TAP's pipe before we stop looking and say so (`not_explorers`).
+const IMPOSTOR_AFTER: Duration = Duration::from_secs(10);
 
 /// How long the taskbar may go without our config (explorer restarting, say) before notification banners go back to
 /// Windows: toasts the taskbar can't show must not vanish. Short, but past a re-apply's blink.
@@ -222,6 +240,20 @@ struct Updates {
     /// A finished update's download was cleared away (a minute in: the installer that started this daemon still
     /// holds its files at first).
     tidied: bool,
+    /// Checks by themselves that have failed since one last worked, this run; and whether that's been warned of (`update_warn`).
+    failed: u32,
+    warned: bool,
+}
+
+/// How long checks by themselves have to have kept failing before that's warned of: a PC that's offline a day or two needn't
+/// hear about it.
+const UPDATE_WARN_AFTER: u64 = 7 * 24 * 3600;
+
+/// Whether a check by itself that's just failed is one to warn of: at once, when it's the download helper's sandbox that
+/// couldn't be made (that won't go away by itself, and nothing else would tell); otherwise once three in a row have, and none
+/// has worked for a week (or ever).
+fn warn_of_failure(sandbox: bool, failed: u32, last_worked: Option<u64>, now: u64) -> bool {
+    sandbox || failed >= 3 && last_worked.is_none_or(|t| now.saturating_sub(t) >= UPDATE_WARN_AFTER)
 }
 
 /// How long into a run the question about software update waits.
@@ -238,8 +270,12 @@ struct ToastFeed {
     listener: Option<Listener>,
     next_listen: Instant,
     banners: Banners,
-    /// Toasts waiting for the taskbar (it's being set up).
+    /// Toasts waiting for the taskbar (it's being set up, or their app's had a card lately): one for each app at most, the newest,
+    /// standing for the others (`queue_up`).
     queue: VecDeque<Incoming>,
+    /// When each app's card last came, and when any did: for APP_GAP and CARD_GAP.
+    last_card: std::collections::HashMap<String, Instant>,
+    last_any: Option<Instant>,
     /// The cards on screen, oldest first; the last is in front, counting down to `showing_until`.
     deck: Vec<Incoming>,
     showing_until: Option<Instant>,
@@ -261,6 +297,19 @@ struct ToastFeed {
 }
 
 impl ToastFeed {
+    /// `n` waits for the taskbar: in place of one from the same app that's waiting already, standing for it and all it stood for.
+    /// What has to be seen (a call, something with progress to show, a notice of PimpMyShell's) waits as itself. One with buttons
+    /// (a chat app's Reply, say, on every message) joins too: the card has the newest's. Says whether it's one more card,
+    /// rather than one more on a card.
+    fn queue_up(&mut self, n: Incoming) -> bool {
+        queue_up(&mut self.queue, n)
+    }
+
+    /// Whether `n` may come now, or waits (APP_GAP, CARD_GAP): what has to be seen never waits.
+    fn may_come(&self, n: &Incoming, now: Instant) -> bool {
+        may_come(n, &self.last_card, self.last_any, now)
+    }
+
     /// Start listening for notifications, if Windows lets us: then native banners go (to the taskbar from now on),
     /// and so do the notices that said it couldn't. Otherwise a notice says why, and it tries again in a while.
     fn listen(&mut self, cfg: &crate::config::Toasts, notices: &mut Notices, now: Instant) {
@@ -350,6 +399,28 @@ impl ToastFeed {
 
 /// How long a card that comes forward stays: shorter while more wait behind it, Windows' long time for those that
 /// ask for it, and 0 (no limit) for the kinds it keeps up until they're answered (alarms, calls, reminders).
+/// ToastFeed::queue_up, on `queue`.
+fn queue_up(queue: &mut VecDeque<Incoming>, mut n: Incoming) -> bool {
+    let one_of_many = |m: &Incoming| !m.sticky && m.progress.is_none() && !Notices::is_ours(m.id);
+    if one_of_many(&n)
+        && let Some(waiting) = queue.iter_mut().find(|q| q.aumid == n.aumid && one_of_many(q))
+    {
+        n.more = waiting.more + 1;
+        *waiting = n;
+        return false;
+    }
+    queue.push_back(n);
+    true
+}
+
+/// ToastFeed::may_come, by when each app's card last came (`last_card`) and when any did.
+fn may_come(n: &Incoming, last_card: &std::collections::HashMap<String, Instant>, last_any: Option<Instant>, now: Instant) -> bool {
+    let urgent = n.sticky || Notices::is_ours(n.id);
+    let app_lately = last_card.get(&n.aumid).is_some_and(|at| now.duration_since(*at) < APP_GAP);
+    let any_lately = last_any.is_some_and(|at| now.duration_since(at) < CARD_GAP);
+    urgent || !(app_lately || any_lately)
+}
+
 fn front_ms(cfg: &crate::config::Toasts, n: &Incoming, deck: usize) -> u32 {
     match (n.sticky, n.long, deck > 1) {
         (true, ..) => 0,
@@ -387,6 +458,8 @@ fn toast_feed(config: &Config) -> Option<ToastFeed> {
         next_listen: now,
         banners,
         queue: VecDeque::new(),
+        last_card: std::collections::HashMap::new(),
+        last_any: None,
         deck: Vec::new(),
         showing_until: None,
         gone: VecDeque::new(),
@@ -401,11 +474,12 @@ fn toast_feed(config: &Config) -> Option<ToastFeed> {
     })
 }
 
-/// Lines of the settings that aren't settings: left out, and the rest loaded. Said in the log; the settings window shows them.
+/// Lines of the settings that aren't settings: left out, and the rest loaded. Said in the log as the error has it, in English,
+/// rather than in the words a person's told, which are in the language of now; the settings window shows them.
 fn note_ignored(path: &Path, config: &Config) {
     for e in &config.issues {
         let p = crate::problem::Problem::of(path, e);
-        log(format!("{}: {} (ignored; the rest loaded)", p.line.map_or("the settings".into(), |n| format!("line {n}")), p.what));
+        log(format!("{}: {} (ignored; the rest loaded)", p.line.map_or("the settings".into(), |n| format!("line {n}")), e.trim().replace('\n', " | ")));
     }
 }
 
@@ -452,7 +526,27 @@ impl Daemon {
                 self.check_watchlist();
                 self.stand_in = false;
                 crate::net::follow(&config);
+                crate::efficiency::own(&config);
+                if config.language != self.config.language {
+                    crate::speak(&config.language);
+                    log(format!("speaking {}", crate::lang::language().code));
+                    // What's up says it the new way: the TAP's remotes when they next look, the TVs' lines as they're next told,
+                    // the tray's tip now. Cards already up, and the PIMPBOX while it runs, keep the words they came with.
+                    if self.active() && self.applied.is_some() {
+                        self.tell_language();
+                    }
+                    self.sync_tray();
+                }
                 let old = std::mem::replace(&mut self.config, config);
+                // A sandbox switched off is taken down: its container, and what it was let into of your folders.
+                for helper in crate::sandbox::Helper::ALL {
+                    if old.sandboxed(helper) && !self.config.sandboxed(helper) {
+                        match crate::sandbox::take_down(helper) {
+                            Ok(()) => log(format!("sandbox: {}'s is switched off, and taken down", helper.key())),
+                            Err(e) => log(format!("sandbox: {}'s is switched off, but couldn't be taken down: {e}", helper.key())),
+                        }
+                    }
+                }
                 let same_meters = sampler.is_none();
                 if let Some(sampler) = sampler {
                     self.sampler = sampler;
@@ -589,7 +683,7 @@ impl Daemon {
             self.notices.clear("explorer");
             std::thread::spawn(|| {
                 if let Err(e) = crate::explorer::restart() {
-                    log(format!("Explorer restart: {e}"));
+                    log(format!("Explorer restart: {}", e.words(0)));
                 }
                 RESTARTING.store(false, Ordering::Relaxed);
             });
@@ -643,13 +737,18 @@ impl Daemon {
         }
     }
 
-    /// One more Twatch TV, a different quality or volume for all of them, and news of favorites going live.
+    /// One more Twatch TV, sets coming by themselves switched off or on, a different quality or volume for all of them, and news
+    /// of favorites going live.
     fn do_what_the_sets_asked(&mut self) {
         let asked = crate::twatch::take_asked();
-        if asked.add_set || !asked.removed.is_empty() || asked.quality != 0 || asked.volume != 0 {
+        if asked.add_set || asked.more_sets.is_some() || !asked.removed.is_empty() || asked.quality != 0 || asked.volume != 0 {
             let mut config = self.config.clone();
             if asked.add_set {
                 crate::twatch::add_set(&mut config);
+            }
+            if let Some((how_many, on)) = asked.more_sets {
+                crate::twatch::set_more_sets(&mut config, how_many, on);
+                log(format!("Twatch TV: up to {how_many} sets that come by themselves, switched {}, from the taskbar", if on { "on" } else { "off" }));
             }
             for (name, fixed) in &asked.removed {
                 log(format!("{name}: taken off the taskbar from its remote"));
@@ -668,6 +767,9 @@ impl Daemon {
         }
         if self.screens.take_spared() {
             self.notices.raise(notices::console_spared());
+        }
+        if let Some(level) = crate::iss::take_flushed() {
+            self.notices.raise(notices::iss_flushed(level));
         }
     }
 
@@ -739,7 +841,7 @@ impl Daemon {
         }
         let Some(pid) = system::shell_pid() else { return };
         if let Some(k) = system::taskbar_software(pid).into_iter().find(|k| k.role == system::Role::Hides) {
-            self.watchdog.bench(format!("{} has the keys to your taskbar", k.name));
+            self.watchdog.bench(crate::watchdog::Why::of(says::KEYS_TAKEN, &[("name", &k.name)]));
             self.quiet();
             let _ = send("detach");
             self.tell_replaced(Some(k.name));
@@ -831,7 +933,7 @@ impl Daemon {
         // A TAP that keeps failing goes inert for good (until a retry injects a fresh one).
         let _ = send("detach");
         if let Some(t) = &self.tray {
-            t.notify("PimpMyShell stopped", &format!("{why}. Your taskbar is back to normal. To try again, select Try again in the PimpMyShell menu in the system tray. Select Save a report there to help us fix this."));
+            t.notify(says::STOPPED_TITLE.t(), &says::STOPPED_TEXT.with(&[("why", &why)]));
         }
     }
 
@@ -895,6 +997,7 @@ impl Daemon {
         let told = match result {
             Ok(status) => {
                 update::checked();
+                self.updates.failed = 0;
                 self.updates.next = now + update::random_secs(update::EVERY);
                 log(match &status {
                     update::Status::UpToDate { stable } => format!("update: up to date (stable is {stable})"),
@@ -903,31 +1006,14 @@ impl Daemon {
                     update::Status::Stuck { version } => format!("update: {version} didn't install last time; not trying it again"),
                 });
                 let told = match &status {
-                    update::Status::Ready { version, .. } => Some((
-                        version.clone(),
-                        format!("PimpMyShell {version} is ready to install"),
-                        "It's downloaded and verified. To install it, select Install in the PimpMyShell menu in the system tray.".to_string(),
-                    )),
-                    update::Status::Available { version } => Some((
-                        version.clone(),
-                        format!("PimpMyShell {version} is available"),
-                        "This copy can't install updates. To get it, select it in the PimpMyShell menu in the system tray.".to_string(),
-                    )),
+                    update::Status::Ready { version, .. } => Some((version.clone(), says::READY_TITLE.with(&[("version", version)]), says::READY_TEXT.t().to_string())),
+                    update::Status::Available { version } => Some((version.clone(), says::AVAILABLE_TITLE.with(&[("version", version)]), says::AVAILABLE_TEXT.t().to_string())),
                     // Only a check by itself finds this (one asked for downloads it again).
-                    update::Status::Stuck { version } => Some((
-                        version.clone(),
-                        format!("PimpMyShell {version} didn't install"),
-                        "You still have the earlier version. To try again, check for updates in settings, or download it from the releases page.".to_string(),
-                    )),
-                    update::Status::UpToDate { stable } if manual => Some((
-                        String::new(),
-                        "You're up to date".to_string(),
-                        format!(
-                            "You have PimpMyShell {}. The latest {} is {stable}.",
-                            crate::version::CURRENT,
-                            if self.config.latest_channel() { "release" } else { "stable version" }
-                        ),
-                    )),
+                    update::Status::Stuck { version } => Some((version.clone(), says::NOT_INSTALLED_TITLE.with(&[("version", version)]), says::STUCK_TEXT.t().to_string())),
+                    update::Status::UpToDate { stable } if manual => {
+                        let latest = if self.config.latest_channel() { says::UP_TO_DATE_LATEST } else { says::UP_TO_DATE_STABLE };
+                        Some((String::new(), says::UP_TO_DATE_TITLE.t().to_string(), latest.with(&[("have", &crate::version::CURRENT), ("version", stable)])))
+                    }
                     _ => None,
                 };
                 self.updates.found = Some(status);
@@ -936,7 +1022,24 @@ impl Daemon {
             Err(e) => {
                 self.updates.next = now + update::random_secs(update::RETRY);
                 log(format!("update: the check failed: {e}"));
-                manual.then(|| (String::new(), "We couldn't check for updates".to_string(), e))
+                if manual {
+                    Some((String::new(), says::CHECK_FAILED_TITLE.t().to_string(), e))
+                } else {
+                    // A sandbox that's switched off isn't why, whatever was said of it before.
+                    use crate::sandbox::{Helper, trouble, wanted};
+                    self.updates.failed += 1;
+                    let sandbox = wanted(Helper::Fetch).then(|| trouble(Helper::Fetch)).flatten();
+                    let warn = self.config.update_warn && !self.updates.warned && warn_of_failure(sandbox.is_some(), self.updates.failed, update::last_worked(), now);
+                    warn.then(|| {
+                        self.updates.warned = true;
+                        log(format!("update: warned that checks by themselves aren't working ({} failed this run{})", self.updates.failed, if sandbox.is_some() { ", the sandbox" } else { "" }));
+                        let text = match &sandbox {
+                            Some(why) => crate::lang::update::WARN_SANDBOX.with(&[("why", why)]),
+                            None => crate::lang::update::WARN_FAILING.with(&[("why", &e)]),
+                        };
+                        (String::new(), crate::lang::update::WARN_TITLE.t().to_string(), text)
+                    })
+                }
             }
         };
         self.sync_tray();
@@ -983,7 +1086,7 @@ impl Daemon {
             self.updates.found = None;
             self.sync_tray();
             if let Some(t) = &self.tray {
-                t.notify(&format!("PimpMyShell {version} didn't install"), &e);
+                t.notify(&says::NOT_INSTALLED_TITLE.with(&[("version", &version)]), &e);
             }
         }
         // Otherwise the installer stops this daemon, installs, and starts the new one, and settings it found open.
@@ -1033,12 +1136,12 @@ impl Daemon {
         });
     }
 
-    /// Something on the taskbar failed. Once it's clearly not a blip, a notice asks for a report.
-    fn failed(&mut self, what: &str, error: &str) {
+    /// Something on the taskbar failed (`what`, a sentence). Once it's clearly not a blip, a notice asks for a report.
+    fn failed(&mut self, what: says::Id, error: &str) {
         self.meter_failures += 1;
         if self.meter_failures == METER_FAILURES {
-            log(format!("{what} ({METER_FAILURES} times in a row): a notice asks for a report"));
-            self.notices.raise(notices::problem(what, error));
+            log(format!("{} ({METER_FAILURES} times in a row): a notice asks for a report", what.of(0)));
+            self.notices.raise(notices::problem(what.t(), error));
         }
     }
 
@@ -1124,11 +1227,30 @@ impl Daemon {
         false
     }
 
+    /// The TAP's pipe is there, and it isn't Explorer serving it: another program has the name. Nothing's been sent to it
+    /// and nothing it says is listened to (`connect` saw to that). A TAP of ours can't be reached while it's there, and
+    /// putting another in wouldn't change that: so the taskbar's left alone, the banners go back to Windows, and if it's
+    /// still there after a while we stop and say so, as for an Explorer that keeps crashing. Try again starts over.
+    fn not_explorers(&mut self) {
+        self.applied = None;
+        self.note(format!("{}: nothing's sent to it, and the taskbar's left alone ({})", crate::NOT_OURS, pms_tap::ipc::pipe_name()));
+        if self.impostor_since.get_or_insert_with(Instant::now).elapsed() >= IMPOSTOR_AFTER {
+            self.impostor_since = None;
+            let why = self.watchdog.bench(crate::watchdog::Why::of(says::IMPOSTOR, &[]));
+            self.bench(why);
+        }
+    }
+
     /// Make sure a TAP is there and shows our config.
     fn ensure(&mut self) {
-        let status = match send("status") {
+        let status = send("status");
+        if !matches!(&status, Err(e) if crate::not_ours(e)) {
+            self.impostor_since = None;
+        }
+        let status = match status {
             Ok(s) if s.starts_with("error") => return self.fail(s),
             Ok(s) => s,
+            Err(e) if crate::not_ours(&e) => return self.not_explorers(),
             Err(e) if crate::no_tap(&e) => return self.inject(),
             // Someone else (REPL, layout watch) holds the pipe; not the TAP's fault.
             Err(e) if crate::busy(&e) => return self.note("the TAP's pipe is busy with another client".into()),
@@ -1178,13 +1300,24 @@ impl Daemon {
         self.apply(key);
     }
 
+    /// Tells the TAP the language to say things in. One from before there was a `lang` doesn't know it, and says them in English:
+    /// that's no reason not to apply the rest.
+    fn tell_language(&self) {
+        match send(&format!("lang {}", crate::lang::language().code)) {
+            Ok(said) if said.starts_with("error") => log(format!("the TAP stays in English: {said}")),
+            Ok(_) => {}
+            Err(e) => log(format!("couldn't tell the TAP the language: {e}")),
+        }
+    }
+
     fn apply(&mut self, key: String) {
+        self.tell_language();
         let mut cmds = vec!["reset".to_string()];
         self.light = self.wants_light();
         cmds.push(format!("theme {}", if self.light { "light" } else { "dark" }));
         self.fps = self.wanted_fps();
         cmds.push(format!("pace {}", self.fps));
-        cmds.push(format!("toast position {}", self.config.toasts().map_or("clock", |t| t.position.as_str())));
+        cmds.push(format!("toast position {}", self.config.toasts().map_or("tray", |t| t.position.as_str())));
         cmds.extend(self.config.backdrop.iter().flat_map(|b| b.commands(self.light)));
         cmds.extend(self.config.start_glow.iter().map(|g| g.command()));
         cmds.extend(self.config.app_glow.iter().map(|g| g.command()));
@@ -1202,7 +1335,7 @@ impl Daemon {
             } {
                 self.applied = None;
                 self.retry_apply = Instant::now() + APPLY_BACKOFF;
-                let what = if cmd.starts_with("meters") { "The meters couldn't start" } else { "PimpMyShell couldn't set up your taskbar" };
+                let what = if cmd.starts_with("meters") { says::FAILED_METERS } else { says::FAILED_TASKBAR };
                 self.failed(what, &e);
                 return self.note(format!("applying the config: `{cmd}`: {e}"));
             }
@@ -1498,8 +1631,9 @@ impl Daemon {
             f.scan = Some(scan_notifiers());
         }
         if let Some(listener) = f.listener.as_mut().filter(|_| now >= f.next_poll) {
-            f.next_poll = now + TOAST_POLL;
-            match listener.poll() {
+            let polled = listener.poll();
+            f.next_poll = now + toast_poll(f.listener.as_ref().map_or(0, Listener::held));
+            match polled {
                 Ok(new) => {
                     for n in new {
                         if cfg.ignores(&n.app, &n.aumid) || f.banners.user_silenced(&n.aumid) {
@@ -1512,9 +1646,12 @@ impl Daemon {
                         } else if !toasts::windows_accepts_toasts() {
                             log(format!("toast from {} held back by Windows (do not disturb or full screen)", n.app));
                         } else {
-                            // The app alone: a toast's words are often someone's name, and logs get sent to people.
-                            log(format!("toast from {}", n.app));
-                            f.queue.push_back(n);
+                            // The app alone: a toast's words are often someone's name, and logs get sent to people. One that
+                            // joins another waiting from its app isn't said: in a flood, that'd be a line for each of them.
+                            let app = n.app.clone();
+                            if f.queue_up(n) {
+                                log(format!("toast from {app}"));
+                            }
                         }
                     }
                     // A card with no time limit whose notification is gone (a call that ended) goes too.
@@ -1664,16 +1801,29 @@ impl Daemon {
             let logo = tray::logo_file().ok();
             for (id, n) in self.notices.due(now) {
                 log(format!("notice: {}", n.title));
-                f.queue.push_back(Incoming::own(id, &n.title, &n.body, logo.clone()));
+                let mut card = Incoming::own(id, &n.title, &n.body, logo.clone());
+                card.long = !n.brief;
+                f.queue.push_back(card);
             }
         }
-        // New toasts go on top, in front of the ones still showing.
+        // New toasts go on top, in front of the ones still showing: as each may come (`may_come`), the rest waiting their turn.
         let mut refused = None;
+        let mut later = VecDeque::new();
+        f.last_card.retain(|_, at| now.duration_since(*at) < APP_GAP);
         while let Some(n) = f.queue.pop_front() {
+            if !f.may_come(&n, now) {
+                later.push_back(n);
+                continue;
+            }
             let ms = front_ms(cfg, &n, 1);
             let asks = if cfg.confirm_clicks == "card" && !Notices::is_ours(n.id) { n.asks() } else { Vec::new() };
             match send(&n.command(ms, cfg.pimped(), &asks)) {
                 Ok(r) if !r.starts_with("error") => {
+                    if n.more > 0 {
+                        log(format!("toast from {}, standing for {} more", n.app, n.more));
+                    }
+                    f.last_card.insert(n.aumid.clone(), now);
+                    f.last_any = Some(now);
                     f.shown(&mut self.notices);
                     f.showing_until = time_up(now, ms);
                     // A card with the same id (a notice come again) is replaced: in front now.
@@ -1698,6 +1848,9 @@ impl Daemon {
                 Err(e) => log(format!("showing toast from {}: {e}", n.app)),
             }
         }
+        // What waits goes back in front of anything left after a refusal, in the order it came.
+        later.append(&mut f.queue);
+        f.queue = later;
         if let Some(e) = refused {
             let around: Vec<&str> = self.taskbar_software.iter().map(|k| k.name).collect();
             f.give_back(&e, &around, &mut self.notices, now);
@@ -1723,7 +1876,7 @@ impl Daemon {
         match r {
             Ok(r) if r.lines().any(|l| l.starts_with("error")) => {
                 self.note(format!("meters push: {r}"));
-                self.failed("The meters keep failing", &r);
+                self.failed(says::FAILED_AGAIN, &r);
                 self.applied = None;
             }
             Ok(_) => self.meter_failures = 0,
@@ -1776,7 +1929,13 @@ pub fn run(path: &Path) -> Result<(), String> {
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let mic = MicWatch::new()?;
 
+    // This run's SOCKS logins, before anything goes out.
+    crate::net::begin();
     crate::net::follow(&config);
+    crate::efficiency::own(&config);
+    // What it says on the taskbar (cards, remotes, the PIMPBOX it starts) is in the language the settings choose.
+    crate::speak(&config.language);
+    log(format!("speaking {}", crate::lang::language().code));
     let mut d = Daemon {
         screens: Default::default(),
         modified: modified(&path),
@@ -1818,6 +1977,8 @@ pub fn run(path: &Path) -> Result<(), String> {
             since: Instant::now(),
             asked: false,
             tidied: false,
+            failed: 0,
+            warned: false,
         },
         unhooked_since: None,
         toasts_parked: false,
@@ -1834,6 +1995,7 @@ pub fn run(path: &Path) -> Result<(), String> {
         notices: Notices::default(),
         stand_in,
         explorer_checked: None,
+        impostor_since: None,
     };
     if let Some(e) = &broken {
         let notice = notices::config(&d.path, e, !stand_in);
@@ -1957,6 +2119,7 @@ pub fn run(path: &Path) -> Result<(), String> {
     if let Some(mut f) = d.toasts.take() {
         f.banners.restore();
     }
+    crate::net::end();
     unsafe {
         CloseHandle(stop).ok();
         CloseHandle(instance).ok();
@@ -2157,5 +2320,49 @@ mod tests {
         assert_eq!(without_legacy_config(exe, legacy), None);
         assert_eq!(without_legacy_config(&format!(r#"{exe} "D:\mine.toml""#), legacy), None);
         assert_eq!(without_legacy_config("pmsd.exe", legacy), None);
+    }
+
+    #[test]
+    fn failing_update_checks_are_warned_of_when_they_wont_mend() {
+        let (now, day) = (100 * 24 * 3600, 24 * 3600);
+        assert!(warn_of_failure(true, 1, Some(now - 60), now), "a sandbox that can't be made: at once");
+        assert!(!warn_of_failure(false, 1, None, now) && !warn_of_failure(false, 2, None, now), "a check or two that failed is the network's day");
+        assert!(warn_of_failure(false, 3, None, now), "three, and none has ever worked");
+        assert!(!warn_of_failure(false, 9, Some(now - 2 * day), now), "a check worked two days ago");
+        assert!(warn_of_failure(false, 3, Some(now - 8 * day), now), "none for more than a week");
+    }
+
+    #[test]
+    fn a_flood_of_notifications_is_a_few_cards() {
+        let mut queue = VecDeque::new();
+        // A thousand from one app, while its card waits: one card, the newest, standing for the rest.
+        assert!(queue_up(&mut queue, Incoming::test(1, "chat")));
+        for id in 2..=1000 {
+            assert!(!queue_up(&mut queue, Incoming::test(id, "chat")));
+        }
+        assert_eq!((queue.len(), queue[0].id, queue[0].more), (1, 1000, 999));
+        // Another app's waits as its own; a call never joins anything; nor does one with progress to show.
+        assert!(queue_up(&mut queue, Incoming::test(2000, "mail")));
+        let mut call = Incoming::test(2001, "chat");
+        call.sticky = true;
+        assert!(queue_up(&mut queue, call));
+        let mut counting = Incoming::test(2002, "chat");
+        counting.progress = Some(0.5);
+        assert!(queue_up(&mut queue, counting));
+        assert!(!queue_up(&mut queue, Incoming::test(2003, "chat")), "but the next plain one joins the one waiting");
+        assert_eq!(queue.len(), 4);
+        assert_eq!(queue[0].more, 1000);
+
+        let now = Instant::now();
+        let mut last = std::collections::HashMap::new();
+        assert!(may_come(&queue[0], &last, None, now));
+        last.insert("chat".to_string(), now);
+        assert!(!may_come(&queue[0], &last, None, now + Duration::from_secs(1)), "its app had a card a moment ago");
+        assert!(may_come(&queue[0], &last, None, now + APP_GAP), "and then it may");
+        assert!(!may_come(&queue[1], &last, Some(now), now + Duration::from_millis(100)), "another app's waits a moment after any card");
+        assert!(may_come(&queue[2], &last, Some(now), now), "a call never waits");
+        // The notification center's looked at less often as it fills up.
+        assert_eq!(toast_poll(0), TOAST_POLL);
+        assert!(toast_poll(1000) > Duration::from_secs(2) && toast_poll(100_000) == Duration::from_secs(3));
     }
 }

@@ -18,6 +18,10 @@
 mod art;
 #[path = "../../pms-gui/src/flag.rs"]
 mod flag;
+/// The PIMPBOX's icon, as it draws it (MIT, in its boot animation's crate): for its previews here, in the colors chosen.
+#[path = "../../pms-pimpbox/boot/src/icon.rs"]
+#[allow(dead_code)]
+mod pimpbox_icon;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -68,6 +72,8 @@ struct Previews {
     small: Vec<(u32, TextureHandle)>,
     boxed: TextureHandle,
     wizard: TextureHandle,
+    /// The PIMPBOX's icon in each look: big, and as the taskbar has it.
+    pimpbox: Vec<(&'static str, TextureHandle, TextureHandle)>,
 }
 
 struct Customizer {
@@ -107,11 +113,19 @@ impl Customizer {
         let on_box = art::logo_svg(d, &self.crab, d.box_bill)?;
         let boxed = art::box_svg(d, &on_box);
         let wizard = art::backdrop_svg(d)?;
+        // The PIMPBOX's icons, drawn as it draws them: at 64, and at 24, as the taskbar shows it, crisp.
+        let drawn = |name: String, look: pimpbox_icon::Look, size: u32| {
+            let rgba: Vec<u8> = pimpbox_icon::pixels(size, d.pimpbox.colors(look), d.pimpbox.shape()).into_iter().flatten().collect();
+            let image = egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &rgba);
+            ctx.load_texture(name, image, TextureOptions::NEAREST)
+        };
+        let pimpbox = pimpbox_icon::Look::ALL.iter().map(|&look| (look.name(), drawn(format!("pimpbox-{}", look.name()), look, 64), drawn(format!("pimpbox-{}-24", look.name()), look, 24))).collect();
         self.previews = Some(Previews {
             logo: tex("logo", &logo, 256, 256, false)?,
             small: [16, 24, 32, 48].iter().map(|&s| tex(&format!("logo{s}"), &logo, s, s, true).map(|t| (s, t))).collect::<Result<_, _>>()?,
             boxed: tex("box", &boxed, 256, 256, false)?,
             wizard: tex("wizard", &wizard, 596, 432, false)?,
+            pimpbox,
         });
         self.shown = Some(self.design.clone());
         Ok(())
@@ -164,7 +178,7 @@ fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
 
 fn knob_row(ui: &mut egui::Ui, name: &str, help: &str, value: &mut f32, min: f32, max: f32) {
     ui.label(name).on_hover_text(help);
-    ui.horizontal(|ui| pms_ui::knob(ui, value, min, max));
+    ui.horizontal(|ui| pms_ui::knob(ui, value, min, max).on_hover_text("drag up or down to turn it; double click for 0. And yes, it goes to eleven"));
     ui.end_row();
 }
 
@@ -251,6 +265,38 @@ impl eframe::App for Customizer {
                     knob_row(ui, "size", "how big the tile of bills is (22 is as in the settings)", &mut d.dollar_size, 10.0, 60.0);
                     knob_row(ui, "tilt", "how the rows of bills slant", &mut d.dollar_tilt, -45.0, 45.0);
                 });
+                // The PIMPBOX's taskbar icon, which follows its boot animation: the mark's color and the square's, for each part.
+                section(ui, "PIMPBOX icon", |ui| {
+                    let p = &mut d.pimpbox;
+                    knob_row(ui, "dollar size", "how much of the icon's height the dollar spans (0.75 is as it was)", &mut p.mark_size, pimpbox_icon::MIN_SCALE, pimpbox_icon::MAX_SCALE);
+                    ui.label("dollar edges").on_hover_text(
+                        "Crisp: each dot of the dollar is whole pixels, so its edges are sharp, but it only grows in whole steps (at the taskbar's 24 pixels, not at all). Smooth: exactly the size set, its edges a little soft.",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut p.mark_crisp, true, "Crisp");
+                        ui.selectable_value(&mut p.mark_crisp, false, "Smooth");
+                    });
+                    ui.end_row();
+                    for (name, ink, paper) in [
+                        ("warming up", &mut p.rain_ink, &mut p.rain_paper),
+                        ("rain flashes", &mut p.flash_ink, &mut p.flash_paper),
+                        ("mirror ball", &mut p.hall_ink, &mut p.hall_paper),
+                        ("the mark (the exe)", &mut p.mark_ink, &mut p.mark_paper),
+                    ] {
+                        ui.label(name);
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("mark").small());
+                                color(ui, ink);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("square").small());
+                                color(ui, paper);
+                            });
+                        });
+                        ui.end_row();
+                    }
+                });
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
                     let unsaved = self.design != self.saved;
@@ -277,7 +323,8 @@ impl eframe::App for Customizer {
                 ui.label("Rendering…");
                 return;
             };
-            ui.horizontal_top(|ui| {
+            // It scrolls, for a window too short for all of them.
+            egui::ScrollArea::vertical().show(ui, |ui| ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Logo").strong());
                     ui.image((p.logo.id(), egui::vec2(256.0, 256.0)));
@@ -294,13 +341,24 @@ impl eframe::App for Customizer {
                     ui.add_space(12.0);
                     ui.label(RichText::new("Installer box").strong());
                     ui.image((p.boxed.id(), egui::vec2(200.0, 200.0)));
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("PIMPBOX icon, through its boot").strong());
+                    ui.horizontal(|ui| {
+                        for (name, big, small) in &p.pimpbox {
+                            ui.vertical(|ui| {
+                                ui.image((big.id(), egui::vec2(64.0, 64.0)));
+                                ui.image((small.id(), egui::vec2(24.0, 24.0)));
+                                ui.label(RichText::new(*name).small().color(Color32::from_gray(130)));
+                            });
+                        }
+                    });
                 });
                 ui.add_space(16.0);
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Installer background").strong());
                     ui.image((p.wizard.id(), egui::vec2(596.0, 432.0)));
                 });
-            });
+            }));
         });
         let waiting = self.shown.as_ref() != Some(&self.design);
         if waiting {

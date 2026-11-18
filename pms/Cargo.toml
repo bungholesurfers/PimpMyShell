@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 pms-tap = { path = "../pms-tap" }
+pms-lang = { path = "../pms-lang" }
+pms-spawn = { path = "../pms-spawn" }
 windows-core = "0.62.2"
 windows = { version = "0.62.2", features = [
     "ApplicationModel",
@@ -29,6 +31,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
@@ -57,18 +61,16 @@ windows = { version = "0.62.2", features = [
     "Storage_Streams",
 ] }
 png = "0.18.1"
-jpeg-decoder = { version = "0.3", default-features = false }
 pms-screen = { path = "../pms-screen" }
 # The shareware episode comes in a Debian package (wads.rs).
 lzma-rs = "0.3"
 # Freedoom, and Streamlink, come zipped.
 zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
-# The updater (update.rs), as Nagare has it: HTTPS through rustls with Mozilla's roots bundled, the manifest's
-# Ed25519 signature, the installer's SHA-256. Pinned.
-ureq = { version = "=3.5.1", default-features = false, features = ["rustls", "socks-proxy"] }
+# The updater (update.rs), as Nagare has it: the manifest's Ed25519 signature, the installer's SHA-256. Pinned. (Its HTTPS is
+# pms-fetch's.)
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize"] }
 sha2 = "=0.11.1"
 getrandom = "=0.4.3"

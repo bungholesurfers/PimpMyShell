@@ -18,7 +18,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use pms_xaml::{ElementCompositionPreview, Grid, LoadedImageSurface, UIElement};
+use pms_xaml::{ElementCompositionPreview, LoadedImageSurface, UIElement};
 use windows::Foundation::TimeSpan;
 use windows::Storage::Streams::IRandomAccessStream;
 use windows::UI::Color;
@@ -143,10 +143,12 @@ pub(crate) fn parse_color(s: &str) -> R<Color> {
     Ok(Color { A: a, R: (rgb >> 16) as u8, G: (rgb >> 8) as u8, B: rgb as u8 })
 }
 
-fn sprite(compositor: &Compositor, brush: &CompositionBrush) -> windows_core::Result<SpriteVisual> {
-    let s = compositor.CreateSpriteVisual()?;
-    s.SetBrush(brush)?;
-    s.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
+/// A layer filling the backdrop, painted with `brush`. Its visuals come from the stage's spares and go back to them (a visual
+/// once on screen is never freed, stage.rs): the backdrop is made again each time PimpMyShell starts.
+fn sprite(compositor: &Compositor, brush: &CompositionBrush) -> R<SpriteVisual> {
+    let s = stage::sprite(compositor)?;
+    s.SetBrush(brush).map_err(w)?;
+    s.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 }).map_err(w)?;
     Ok(s)
 }
 
@@ -207,8 +209,8 @@ fn enable(ctx: &Ctx) -> R<String> {
     crate::dwm::set_host_backdrop(true)?;
 
     // XAML side: two empty (so hit-test-invisible) Grids in the backdrop and grain slots.
-    let host: UIElement = Grid::new().and_then(|g| g.cast()).map_err(w)?;
-    let grain_host: UIElement = Grid::new().and_then(|g| g.cast()).map_err(w)?;
+    let host: UIElement = crate::stage::grid()?.cast().map_err(w)?;
+    let grain_host: UIElement = crate::stage::grid()?.cast().map_err(w)?;
     stage::insert(ctx, Slot::Backdrop, &host)?;
     if let Err(e) = stage::insert(ctx, Slot::Grain, &grain_host) {
         let _ = stage::remove(ctx, &host);
@@ -218,21 +220,21 @@ fn enable(ctx: &Ctx) -> R<String> {
     let built = (|| -> R<Backdrop> {
         let compositor = ElementCompositionPreview::GetElementVisual(&host).map_err(w)?.Compositor().map_err(w)?;
 
-        let root = compositor.CreateContainerVisual().map_err(w)?;
+        let root = stage::container(&compositor)?;
         root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 }).map_err(w)?;
         let children = root.Children().map_err(w)?;
 
         let backdrop = compositor.CreateHostBackdropBrush().map_err(w)?;
-        children.InsertAtTop(&sprite(&compositor, &backdrop.cast().map_err(w)?).map_err(w)?).map_err(w)?;
+        children.InsertAtTop(&sprite(&compositor, &backdrop.cast().map_err(w)?)?).map_err(w)?;
 
         let tint = compositor.CreateColorBrushWithColor(DEFAULT_TINT).map_err(w)?;
-        children.InsertAtTop(&sprite(&compositor, &tint.cast().map_err(w)?).map_err(w)?).map_err(w)?;
+        children.InsertAtTop(&sprite(&compositor, &tint.cast().map_err(w)?)?).map_err(w)?;
 
         let layer_brush = compositor.CreateColorBrushWithColor(Color { A: 0, R: 0, G: 0, B: 0 }).map_err(w)?;
-        let layer = sprite(&compositor, &layer_brush.cast().map_err(w)?).map_err(w)?;
+        let layer = sprite(&compositor, &layer_brush.cast().map_err(w)?)?;
         children.InsertAtTop(&layer).map_err(w)?;
 
-        let gaps = compositor.CreateContainerVisual().map_err(w)?;
+        let gaps = stage::container(&compositor)?;
         gaps.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 }).map_err(w)?;
         children.InsertAtTop(&gaps).map_err(w)?;
         let gap_brush = compositor.CreateColorBrushWithColor(Color { A: 0, R: 0, G: 0, B: 0 }).map_err(w)?;
@@ -243,13 +245,13 @@ fn enable(ctx: &Ctx) -> R<String> {
         noise_brush.SetHorizontalAlignmentRatio(0.0).map_err(w)?;
         noise_brush.SetVerticalAlignmentRatio(0.0).map_err(w)?;
         let noise_brush: CompositionBrush = noise_brush.cast().map_err(w)?;
-        let grain = compositor.CreateContainerVisual().map_err(w)?;
+        let grain = stage::container(&compositor)?;
         grain.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 }).map_err(w)?;
         grain.SetOpacity(DEFAULT_GRAIN).map_err(w)?;
         let tiles = grain.Children().map_err(w)?;
         let mut x = 0.0;
         while x < GRAIN_SPAN {
-            let tile = compositor.CreateSpriteVisual().map_err(w)?;
+            let tile = stage::sprite(&compositor)?;
             tile.SetBrush(&noise_brush).map_err(w)?;
             tile.SetSize(Vector2 { X: NOISE_W as f32, Y: NOISE_H as f32 }).map_err(w)?;
             tile.SetOffset(Vector3 { X: x, Y: 0.0, Z: 0.0 }).map_err(w)?;
@@ -347,9 +349,22 @@ fn draw_gaps(b: &Backdrop, s: &crate::layout::Snapshot) -> R<()> {
     // Snapshot coordinates are relative to the taskbar window; ours to the host element.
     let origin = crate::layout::bounds(&b.host, 0.0, 0.0)?;
     let tiles = b.gaps.Children().map_err(w)?;
-    tiles.RemoveAll().map_err(w)?;
+    // The last layout's tiles go back to the spares and come out again for this one: drawn on every layout change (a window
+    // opening, say), new ones each time would each stay in Explorer's memory for good (stage.rs).
+    let mut old = Vec::new();
+    if let Ok(it) = tiles.First() {
+        while it.HasCurrent().unwrap_or(false) {
+            if let Ok(tile) = it.Current() {
+                old.push(tile);
+            }
+            if !it.MoveNext().unwrap_or(false) {
+                break;
+            }
+        }
+    }
+    old.iter().for_each(stage::spare);
     for &(start, end) in &s.free {
-        let tile = b.compositor.CreateSpriteVisual().map_err(w)?;
+        let tile = stage::sprite(&b.compositor)?;
         tile.SetBrush(&b.gap_brush).map_err(w)?;
         tile.SetOffset(Vector3 { X: start - origin.X + INSET_X, Y: INSET_Y - origin.Y, Z: 0.0 }).map_err(w)?;
         tile.SetSize(Vector2 { X: (end - start - 2.0 * INSET_X).max(0.0), Y: (s.height - 2.0 * INSET_Y).max(0.0) }).map_err(w)?;

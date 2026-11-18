@@ -20,6 +20,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
     "Win32_UI_Shell",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Imaging",
@@ -33,6 +34,8 @@ windows = { version = "0.62.2", features = [
 png = "0.18.1"
 pms-xaml = { version = "0.1.0", path = "../pms-xaml" }
 pms-screen = { path = "../pms-screen" }
+# Only its [tap] section is used, so only that is linked in (said.rs).
+pms-lang = { path = "../pms-lang" }
 windows-numerics = "0.3"
 windows-future = "0.3"
 

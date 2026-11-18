@@ -455,7 +455,7 @@ pub struct Sampler {
 /// Whether a `Sampler` for `a` would do for `b`: all it goes by is the same. Then it needn't be made again, which takes a moment
 /// and forgets what it had seen, like which disks have been idle.
 pub fn same_sampler(a: &Config, b: &Config) -> bool {
-    let sets = |c: &Config| c.twatch.as_ref().map_or(0, |t| t.more_sets);
+    let sets = crate::twatch::more_sets;
     a.meters == b.meters
         && a.counters == b.counters
         && a.interval_ms == b.interval_ms
@@ -1046,7 +1046,7 @@ impl Sampler {
                                 lines.push(link.chain(v4.chain(v6).cloned()).collect::<Vec<_>>().join(" · "));
                                 // Why it isn't eth0, and why those aren't on the bar beside it.
                                 if !n.earlier.is_empty() {
-                                    lines.push("\nInterfaces with a lower LUID index and no PDH instance:".to_string());
+                                    lines.push(format!("\n{}", crate::lang::meters::EARLIER.t()));
                                     lines.extend(n.earlier.iter().cloned());
                                 }
                                 (n.label.clone(), n.internet, lines, if n.id.is_empty() { n.label.clone() } else { n.id.clone() })

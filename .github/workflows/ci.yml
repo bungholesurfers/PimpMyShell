@@ -1,6 +1,7 @@
-# Builds PimpMyShell on every push to main and every pull request: clippy (warnings are errors), the tests, and a
-# plain release build, whose exes are kept as the run's artifact for trying out. Releases, built with fat LTO or PGO
-# and packaged, are release.yml's.
+# Builds PimpMyShell on every push to main and every pull request: `cargo xtask check` (clippy, where warnings are
+# errors, and the tests, of the workspace and of what's ours in the PIMPBOX's, which is one of its own; and that every
+# handler in the TAP runs through its guard), and a plain release build, whose exes are kept as the run's artifact for
+# trying out. Releases, built with fat LTO or PGO and packaged, are release.yml's.
 name: CI
 
 on:
@@ -36,15 +37,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The whole workspace, xtask (the build tasks) and the dev tools (pms-art, pms-recon) included.
-      - name: Clippy
-        run: cargo clippy --release --workspace --all-targets -- -D warnings
+      # The whole workspace, xtask (the build tasks) and the dev tools (pms-art, pms-recon) included; then the PIMPBOX.
+      # The same as `cargo xtask check` on a PC, so that what passes there passes here.
+      - name: Check
+        run: cargo xtask check
 
-      - name: Tests
-        run: cargo test --release --workspace
-
+      # All that ships, the PIMPBOX with it.
       - name: Build
-        run: cargo build --release
+        run: cargo xtask build
 
       - uses: actions/upload-artifact@v7
         with:
@@ -54,5 +54,9 @@ jobs:
             target/release/pms.exe
             target/release/pms-gui.exe
             target/release/pms_tap.dll
+            target/release/pms-twatch.exe
+            target/release/pms-fetch.exe
+            target/release/pms-pimpbox.exe
+            target/release/pms-poom.exe
             pms.example.toml
           if-no-files-found: error

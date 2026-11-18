@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pms_screen::Button;
-use pms_xaml::{Border, ElementCompositionPreview, FontFamily, GradientStop, Grid, LinearGradientBrush, Orientation, PointerEventHandler, Popup, SolidColorBrush, StackPanel, TextBlock, Thickness, UIElement, XamlRoot};
+use pms_xaml::{Border, ElementCompositionPreview, GradientStop, LinearGradientBrush, Orientation, PointerEventHandler, Popup, SolidColorBrush, TextBlock, Thickness, UIElement, XamlRoot};
 use windows::Foundation::{Point, TimeSpan};
 use windows::UI::Color;
 use windows::UI::Composition::{CompositionObject, InsetClip};
@@ -21,6 +21,7 @@ use windows_core::{HSTRING, Interface};
 use windows_numerics::Vector3;
 
 use crate::commands::R;
+use crate::said::{Said, t};
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color { A: 0xFF, R: r, G: g, B: b }
@@ -100,7 +101,7 @@ fn label(text: &str, size: f64, color: Color) -> R<TextBlock> {
     let t = TextBlock::new().map_err(w)?;
     t.SetText(&HSTRING::from(text)).map_err(w)?;
     t.SetFontSize(size).map_err(w)?;
-    t.SetFontFamily(&FontFamily::CreateInstanceWithName(&HSTRING::from("Tahoma, Segoe UI")).map_err(w)?).map_err(w)?;
+    t.SetFontFamily(&crate::stage::font("Tahoma, Segoe UI")?).map_err(w)?;
     t.SetForeground(&brush(color)?).map_err(w)?;
     Ok(t)
 }
@@ -157,26 +158,26 @@ fn pressable(look: &Look, inside: &UIElement, width: f64, press: Option<Button>)
     let el = ui(&b)?;
     let colors = [look.face, look.light, look.shade, look.dark];
     let down = parts.clone();
-    el.PointerPressed(&PointerEventHandler::new(move |_, _| {
+    el.PointerPressed(&PointerEventHandler::new(move |_, _| crate::guard(|| {
         let _ = set_edge(colors, &down, true);
         Ok(())
-    }))
+    })))
     .map_err(w)?;
     let up = parts.clone();
     // Which remote this tooltip's beside, and so whose set its keys are for.
     let docked = crate::remote::building_docked();
-    el.PointerReleased(&PointerEventHandler::new(move |_, _| {
+    el.PointerReleased(&PointerEventHandler::new(move |_, _| crate::guard(|| {
         let _ = set_edge(colors, &up, false);
         if let Some(press) = press {
             crate::remote::pressed_from(press, docked);
         }
         Ok(())
-    }))
+    })))
     .map_err(w)?;
-    el.PointerExited(&PointerEventHandler::new(move |_, _| {
+    el.PointerExited(&PointerEventHandler::new(move |_, _| crate::guard(|| {
         let _ = set_edge(colors, &parts, false);
         Ok(())
-    }))
+    })))
     .map_err(w)?;
     Ok(b)
 }
@@ -191,7 +192,7 @@ fn key(look: &Look, text: &str, press: Button) -> R<(Border, Border)> {
     light.SetBorderThickness(thickness(1.0, 1.0, 1.0, 1.0)).map_err(w)?;
     light.SetMargin(thickness(0.0, 0.0, 4.0, 0.0)).map_err(w)?;
     light.SetVerticalAlignment(pms_xaml::VerticalAlignment::Center).map_err(w)?;
-    let row = StackPanel::new().map_err(w)?;
+    let row = crate::stage::stack_panel()?;
     row.SetOrientation(Orientation::Horizontal).map_err(w)?;
     row.SetHorizontalAlignment(pms_xaml::HorizontalAlignment::Center).map_err(w)?;
     row.Children().map_err(w)?.Append(&ui(&light)?).map_err(w)?;
@@ -201,10 +202,11 @@ fn key(look: &Look, text: &str, press: Button) -> R<(Border, Border)> {
 
 /// Something to choose one of: what it is, said above it; which it is now, on a little screen; and a key each side of that
 /// for the one before and the next (keys with nothing to press, where there's only the one to choose).
-fn chooser(look: &Look, what: &str, now: &TextBlock, before: Option<Button>, next: Option<Button>) -> R<[UIElement; 2]> {
-    let said = label(what, 9.0, look.text)?;
+fn chooser(look: &Look, words: &mut Said, what: t::Id, now: &TextBlock, before: Option<Button>, next: Option<Button>) -> R<[UIElement; 2]> {
+    let said = label("", 9.0, look.text)?;
+    words.keep(&said, what)?;
     said.SetMargin(thickness(1.0, 0.0, 0.0, 2.0)).map_err(w)?;
-    now.SetFontFamily(&FontFamily::CreateInstanceWithName(&HSTRING::from("Cascadia Mono, Consolas")).map_err(w)?).map_err(w)?;
+    now.SetFontFamily(&crate::stage::font("Cascadia Mono, Consolas")?).map_err(w)?;
     now.SetTextTrimming(pms_xaml::TextTrimming::CharacterEllipsis).map_err(w)?;
     let glass = Border::new().map_err(w)?;
     glass.SetBackground(&brush(look.glass)?).map_err(w)?;
@@ -213,7 +215,7 @@ fn chooser(look: &Look, what: &str, now: &TextBlock, before: Option<Button>, nex
     glass.SetChild(&ui(now)?).map_err(w)?;
     let screen = sunken(look, &ui(&glass)?)?;
     screen.SetMargin(thickness(0.0, 0.0, 3.0, 3.0)).map_err(w)?;
-    let row = StackPanel::new().map_err(w)?;
+    let row = crate::stage::stack_panel()?;
     row.SetOrientation(Orientation::Horizontal).map_err(w)?;
     for part in [ui(&pressable(look, &ui(&label("<", 10.0, look.text)?)?, 20.0, before)?)?, ui(&screen)?, ui(&pressable(look, &ui(&label(">", 10.0, look.text)?)?, 20.0, next)?)?] {
         row.Children().map_err(w)?.Append(&part).map_err(w)?;
@@ -229,9 +231,59 @@ struct Copy {
     state: TextBlock,
     help: TextBlock,
     lights: Vec<Border>,
+    /// The speed demo it's showing: the whole part (there only while there's one), its map, category and time, who played it,
+    /// and what with and how much shooting there is in it.
+    speedrun: UIElement,
+    demo: TextBlock,
+    runner: TextBlock,
+    demo_about: TextBlock,
+    /// The words built in, said again when the language changes.
+    said: Said,
+}
+
+/// The speed demo being shown, as the card has it: map, category and time; who played it; what with, and how often they fire.
+pub(crate) struct Showing<'a> {
+    pub(crate) demo: &'a str,
+    pub(crate) runner: &'a str,
+    pub(crate) about: &'a str,
+}
+
+/// The part that says which speed demo's being shown: a heading, a little screen with the run and its runner, and a line
+/// under it. Its three changing texts.
+fn speedrun(look: &Look, words: &mut Said) -> R<(UIElement, TextBlock, TextBlock, TextBlock)> {
+    let said = label("", 9.0, look.text)?;
+    words.keep(&said, t::SPEEDRUN)?;
+    said.SetMargin(thickness(1.0, 0.0, 0.0, 2.0)).map_err(w)?;
+    let mono = crate::stage::font("Cascadia Mono, Consolas")?;
+    let (demo, runner) = (label("", 10.0, look.glass_text)?, label("", 10.0, look.glass_text)?);
+    for line in [&demo, &runner] {
+        line.SetFontFamily(&mono).map_err(w)?;
+        line.SetTextTrimming(pms_xaml::TextTrimming::CharacterEllipsis).map_err(w)?;
+    }
+    let lines = crate::stage::stack_panel()?;
+    lines.Children().map_err(w)?.Append(&ui(&demo)?).map_err(w)?;
+    lines.Children().map_err(w)?.Append(&ui(&runner)?).map_err(w)?;
+    let glass = Border::new().map_err(w)?;
+    glass.SetBackground(&brush(look.glass)?).map_err(w)?;
+    glass.SetPadding(thickness(4.0, 2.0, 4.0, 2.0)).map_err(w)?;
+    glass.SetWidth(WIDTH - 16.0).map_err(w)?;
+    glass.SetChild(&ui(&lines)?).map_err(w)?;
+    let screen = sunken(look, &ui(&glass)?)?;
+    screen.SetMargin(thickness(0.0, 0.0, 3.0, 2.0)).map_err(w)?;
+    let about = label("", 9.0, look.text)?;
+    about.SetTextWrapping(pms_xaml::TextWrapping::Wrap).map_err(w)?;
+    about.SetMargin(thickness(1.0, 0.0, 3.0, 3.0)).map_err(w)?;
+    let part = crate::stage::stack_panel()?;
+    for piece in [ui(&said)?, ui(&screen)?, ui(&about)?] {
+        part.Children().map_err(w)?.Append(&piece).map_err(w)?;
+    }
+    let part = ui(&part)?;
+    part.SetVisibility(pms_xaml::Visibility::Collapsed).map_err(w)?;
+    Ok((part, demo, runner, about))
 }
 
 fn copy(look: &'static Look) -> R<Copy> {
+    let mut said = Said::default();
     let title = label("PIMPBOX", 10.0, look.title_text)?;
     title.SetFontWeight(windows::UI::Text::FontWeight { Weight: 700 }).map_err(w)?;
     let gradient = LinearGradientBrush::new().map_err(w)?;
@@ -252,17 +304,18 @@ fn copy(look: &'static Look) -> R<Copy> {
     // What it runs, and which game that plays: each to be chosen.
     let program = label("POOM (ROOM)", 10.0, look.glass_text)?;
     let game = label("", 10.0, look.glass_text)?;
-    let [program_said, program_row] = chooser(look, "PROGRAM", &program, None, None)?;
-    let [game_said, game_row] = chooser(look, "GAME", &game, Some(Button::GamePrev), Some(Button::GameNext))?;
+    let [program_said, program_row] = chooser(look, &mut said, t::PROGRAM, &program, None, None)?;
+    let [game_said, game_row] = chooser(look, &mut said, t::GAME, &game, Some(Button::GamePrev), Some(Button::GameNext))?;
 
     let state = label("", 10.0, look.text)?;
     state.SetTextWrapping(pms_xaml::TextWrapping::Wrap).map_err(w)?;
     state.SetMargin(thickness(1.0, 0.0, 3.0, 4.0)).map_err(w)?;
 
     // Its settings: how big a picture it puts out.
-    let video = label("VIDEO", 9.0, look.text)?;
+    let video = label("", 9.0, look.text)?;
+    said.keep(&video, t::VIDEO)?;
     video.SetMargin(thickness(1.0, 0.0, 0.0, 2.0)).map_err(w)?;
-    let keys = StackPanel::new().map_err(w)?;
+    let keys = crate::stage::stack_panel()?;
     keys.SetOrientation(Orientation::Horizontal).map_err(w)?;
     let mut lights = Vec::new();
     for (text, press, _) in VIDEO {
@@ -275,17 +328,19 @@ fn copy(look: &'static Look) -> R<Copy> {
     help.SetTextWrapping(pms_xaml::TextWrapping::Wrap).map_err(w)?;
     help.SetMargin(thickness(1.0, 2.0, 3.0, 2.0)).map_err(w)?;
 
-    let body = StackPanel::new().map_err(w)?;
+    let (speedrun, demo, runner, demo_about) = speedrun(look, &mut said)?;
+
+    let body = crate::stage::stack_panel()?;
     body.SetMargin(thickness(5.0, 5.0, 2.0, 4.0)).map_err(w)?;
-    for part in [ui(&state)?, program_said, program_row, game_said, game_row, ui(&video)?, ui(&keys)?, ui(&help)?] {
+    for part in [ui(&state)?, program_said, program_row, game_said, game_row, speedrun.clone(), ui(&video)?, ui(&keys)?, ui(&help)?] {
         body.Children().map_err(w)?.Append(&part).map_err(w)?;
     }
-    let window = StackPanel::new().map_err(w)?;
+    let window = crate::stage::stack_panel()?;
     window.Children().map_err(w)?.Append(&ui(&bar)?).map_err(w)?;
     window.Children().map_err(w)?.Append(&ui(&body)?).map_err(w)?;
     let (whole, _) = raised(look, &ui(&window)?)?;
     whole.SetWidth(WIDTH).map_err(w)?;
-    Ok(Copy { whole: ui(&whole)?, look, game, state, help, lights })
+    Ok(Copy { whole: ui(&whole)?, look, game, state, help, lights, speedrun, demo, runner, demo_about, said })
 }
 
 /// The tooltip.
@@ -366,7 +421,7 @@ pub(crate) fn build(root: &XamlRoot, docked: bool) -> R<Tooltip> {
     glow.SetIsHitTestVisible(false).map_err(w)?;
     let beam = ui(&glow)?;
 
-    let layers = Grid::new().map_err(w)?;
+    let layers = crate::stage::grid()?;
     layers.SetWidth(WIDTH).map_err(w)?;
     for layer in [&copies[0].whole, &copies[1].whole, &beam] {
         layers.Children().map_err(w)?.Append(layer).map_err(w)?;
@@ -384,12 +439,12 @@ pub(crate) fn build(root: &XamlRoot, docked: bool) -> R<Tooltip> {
     // The pointer on it, with the console on: the beam, once.
     if !docked {
         let (its_clip, its_beam, its_green, on) = (clip.clone(), beam.clone(), greened.clone(), console_on.clone());
-        el.PointerEntered(&PointerEventHandler::new(move |_, _| {
+        el.PointerEntered(&PointerEventHandler::new(move |_, _| crate::guard(|| {
             if on.load(Ordering::Relaxed) && !its_green.swap(true, Ordering::Relaxed) {
                 let _ = sweep(&its_clip, &its_beam, true);
             }
             Ok(())
-        }))
+        })))
         .map_err(w)?;
     }
     let popup = Popup::new().map_err(w)?;
@@ -400,13 +455,20 @@ pub(crate) fn build(root: &XamlRoot, docked: bool) -> R<Tooltip> {
 }
 
 impl Tooltip {
-    /// What it says: the game, how the console is, what to do, and which video mode it's in. `on`: the console's on. Switched
-    /// off, it goes back to the plastic: with the beam, if it's there to be seen.
-    pub(crate) fn say(&self, game: &str, state: &str, help: &str, video: &str, on: bool) -> R<()> {
+    /// What it says: the game, how the console is, what to do, which video mode it's in, and the speed demo it's showing, if
+    /// it is. `on`: the console's on. Switched off, it goes back to the plastic: with the beam, if it's there to be seen.
+    pub(crate) fn say(&self, game: &str, state: &str, help: &str, video: &str, showing: Option<&Showing>, on: bool) -> R<()> {
         for copy in &self.copies {
+            copy.said.follow()?;
             copy.game.SetText(&HSTRING::from(game)).map_err(w)?;
             copy.state.SetText(&HSTRING::from(state)).map_err(w)?;
             copy.help.SetText(&HSTRING::from(help)).map_err(w)?;
+            copy.speedrun.SetVisibility(if showing.is_some() { pms_xaml::Visibility::Visible } else { pms_xaml::Visibility::Collapsed }).map_err(w)?;
+            if let Some(s) = showing {
+                copy.demo.SetText(&HSTRING::from(s.demo.to_uppercase())).map_err(w)?;
+                copy.runner.SetText(&HSTRING::from(t::RUN_BY.with(&[("name", &s.runner.to_uppercase())]))).map_err(w)?;
+                copy.demo_about.SetText(&HSTRING::from(s.about)).map_err(w)?;
+            }
             for (light, (_, _, name)) in copy.lights.iter().zip(VIDEO) {
                 light.SetBackground(&brush(if name == video { copy.look.led_on } else { copy.look.led_off })?).map_err(w)?;
             }

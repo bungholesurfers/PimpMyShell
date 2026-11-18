@@ -72,11 +72,12 @@ fn read_release(json: &str) -> Result<Build, String> {
 }
 
 fn newest() -> Result<Build, String> {
-    let response = crate::wads::agent(crate::net::Use::Downloads, Duration::from_secs(20), 3).get(NEWEST).header("Accept", "application/vnd.github+json").call().map_err(|e| format!("{NEWEST}: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!("{NEWEST}: {}", response.status()));
+    // By way of pms-fetch.exe. GitHub's API answers in its JSON without being asked for it.
+    let got = crate::fetch::fetch(crate::net::Use::Downloads, crate::fetch::Kind::Get, NEWEST, Duration::from_secs(20), 3, 4 << 20).map_err(|e| format!("{NEWEST}: {e}"))?;
+    if !(200..300).contains(&got.status) {
+        return Err(format!("{NEWEST}: {}", got.status));
     }
-    read_release(&response.into_body().read_to_string().map_err(|e| format!("{NEWEST}: {e}"))?)
+    read_release(&String::from_utf8(got.body).map_err(|e| format!("{NEWEST}: {e}"))?)
 }
 
 /// A stream it found.
@@ -86,6 +87,8 @@ pub struct Stream {
     pub master: String,
     pub title: String,
     pub category: String,
+    /// Who it was found as, through the proxy: its playlists and video go as the same somebody (net::Session).
+    pub session: Option<crate::net::Session>,
 }
 
 /// What it said about a channel.
@@ -96,7 +99,7 @@ pub enum Asked {
     Failed(String),
 }
 
-fn dir() -> PathBuf {
+pub(crate) fn dir() -> PathBuf {
     pms_tap::data_dir().join("streamlink")
 }
 
@@ -179,40 +182,107 @@ fn read(json: &str) -> Asked {
     let best = streams.get("best").and_then(|s| s["url"].as_str());
     let Some(master) = master.or(best) else { return Asked::Failed("no address for the stream".into()) };
     let text = |key: &str| v["metadata"][key].as_str().unwrap_or_default().to_string();
-    Asked::Live(Stream { master: master.to_string(), title: text("title"), category: text("category") })
+    Asked::Live(Stream { master: master.to_string(), title: text("title"), category: text("category"), session: None })
 }
 
 /// Whether it can reach Twitch, the way it goes: Twitch's own channel, live or not, is an answer either way.
 pub fn try_out() -> Result<(), String> {
     if exe().is_none() {
-        return Err("Streamlink isn't installed. It's under Twatch TV.".into());
+        return Err(crate::lang::net::TRY_NO_STREAMLINK.t().into());
     }
-    match ask("twitch") {
+    match ask("twitch", None) {
         Asked::Live(_) | Asked::Offline => Ok(()),
-        Asked::Failed(why) => Err(format!("That didn't work: {why}")),
+        Asked::Failed(why) => Err(crate::lang::net::TRY_FAILED.with(&[("error", &why)])),
     }
 }
 
+/// The few lines the build's own `streamlink.exe` runs, which is only a launcher: it starts its Python as a second process
+/// with them. Run here in that Python directly, Streamlink is one process, and may start none.
+const BOOT: &str = "import sys, os, site\ninstalldir = os.path.dirname(os.path.dirname(sys.executable))\npkgdir = os.path.join(installdir, 'pkgs')\nsys.path.insert(0, pkgdir)\nsite.addsitedir(pkgdir)\nos.environ['PATH'] += ';' + os.path.dirname(sys.executable)\nfrom streamlink_cli.main import main\nsys.exit(main())\n";
+
+/// Where Streamlink is told its %APPDATA% is: a folder of PimpMyShell's, so that a config of your own Streamlink's (its
+/// proxy, say, or its Twitch plugin's) never decides where these requests go. What it's told goes in a file here, for the
+/// one run.
+pub(crate) fn home() -> PathBuf {
+    pms_tap::data_dir().join("streamlink-home")
+}
+
+/// The config files `ask` writes, which are named for the process and a count: `pms-<pid>-<n>.conf`.
+fn is_run_config(name: &str) -> bool {
+    name.strip_prefix("pms-").and_then(|n| n.strip_suffix(".conf")).is_some_and(|n| n.split('-').count() == 2 && n.split('-').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())))
+}
+
 /// Asks it about the Twitch channel `handle`, which must be one `live::valid` passes. Takes seconds: not on a thread that's drawing.
-pub fn ask(handle: &str) -> Asked {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+///
+/// It runs as a helper (pms-spawn): in a job that ends with this process, as its only process, with no console and only its
+/// pipes. The proxy goes in a config file, not on its command line, where any program could read the password in it. Through the
+/// proxy, it goes as `session` if there's one (net::route_as): the stream it finds is then that somebody's, and what's found
+/// carries it, for its playlists and video to go as the same.
+pub fn ask(handle: &str, session: Option<&crate::net::Session>) -> Asked {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static RUNS: AtomicU32 = AtomicU32::new(0);
     let Some(exe) = exe() else { return Asked::Failed("Streamlink isn't here".into()) };
-    let mut command = std::process::Command::new(exe);
-    // Through the proxy, if that's where finding streams goes: Streamlink takes socks5 and socks5h addresses as they are.
-    if let Some(proxy) = crate::net::route_for(crate::net::Use::Streams) {
-        command.args(["--http-proxy", &proxy]);
+    let Some(python) = exe.parent().and_then(Path::parent).map(|b| b.join("Python").join("python.exe")).filter(|p| p.is_file()) else {
+        return Asked::Failed("Streamlink's Python isn't where its build keeps it".into());
+    };
+    let home = home();
+    if let Err(e) = std::fs::create_dir_all(&home) {
+        return Asked::Failed(format!("{}: {e}", crate::shown(&home)));
     }
-    let mut child = match command
+    // A run that never got to tidy up (a daemon that was ended, say) left its file: its own, by its name, and nothing else.
+    if let Ok(entries) = std::fs::read_dir(&home) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_str().is_some_and(is_run_config) && entry.path().is_file() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let config = home.join(format!("pms-{}-{}.conf", std::process::id(), RUNS.fetch_add(1, Ordering::Relaxed)));
+    // Sandboxed, it may read its own folder, and its settings' folder here, and nothing else of yours; and through a proxy,
+    // it goes by way of the relay in its container (relay.rs). Nothing's changed about any folder unless the sandbox is wanted.
+    let (sandbox, relayed) = if crate::sandbox::wanted(crate::sandbox::Helper::Streamlink) {
+        match crate::sandbox::let_helpers_read(&dir()).and_then(|()| crate::sandbox::for_online(crate::sandbox::Helper::Streamlink, crate::net::Use::Streams, session, &[(&home, true)])) {
+            Ok(Some((c, relayed))) => (Some(c), relayed),
+            Ok(None) => (None, None),
+            Err(e) => {
+                crate::sandbox::said(crate::sandbox::Helper::Streamlink, &e);
+                return Asked::Failed(e);
+            }
+        }
+    } else {
+        (None, None)
+    };
+    // Through the proxy, if that's where finding streams goes: Streamlink takes socks5 and socks5h addresses as they are.
+    let said = relayed.or_else(|| crate::net::route_as(crate::net::Use::Streams, session)).map_or(String::new(), |proxy| format!("http-proxy={proxy}\n"));
+    if let Err(e) = std::fs::write(&config, said) {
+        return Asked::Failed(format!("{}: {e}", crate::shown(&config)));
+    }
+    let asked = run(&python, &home, &config, handle, sandbox);
+    let _ = std::fs::remove_file(&config);
+    match asked {
+        Asked::Live(stream) => Asked::Live(Stream { session: session.cloned(), ..stream }),
+        other => other,
+    }
+}
+
+fn run(python: &Path, home: &Path, config: &Path, handle: &str, sandbox: Option<pms_spawn::Container>) -> Asked {
+    let command = pms_spawn::Command::new(python)
+        .args(["-I", "-c", BOOT])
+        .arg("--config")
+        .arg(config)
         .args(["--json", &format!("https://www.twitch.tv/{handle}")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-    {
+        .env("APPDATA", home)
+        .stdout(pms_spawn::Stdio::Piped)
+        .mitigations(pms_spawn::mitigate::THEIRS)
+        .power(crate::efficiency::flags(crate::efficiency::Part::Helpers));
+    let spawned = match sandbox {
+        Some(c) => command.container(c),
+        None => command,
+    }
+    .spawn();
+    let mut child = match spawned {
         Ok(c) => c,
-        Err(e) => return Asked::Failed(e.to_string()),
+        Err(e) => return Asked::Failed(e),
     };
     let began = Instant::now();
     let Some(mut out) = child.stdout.take() else { return Asked::Failed("no output".into()) };
@@ -221,10 +291,10 @@ pub fn ask(handle: &str) -> Asked {
         let _ = std::io::Read::read_to_string(&mut out, &mut text);
         text
     });
-    while matches!(child.try_wait(), Ok(None)) {
+    while child.try_wait().is_none() {
         if began.elapsed() > PATIENCE {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill();
+            child.wait();
             return Asked::Failed("it took too long".into());
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -275,7 +345,7 @@ mod tests {
         let json = r#"{"plugin":"twitch","metadata":{"id":"1","author":"crab","category":"Just Chatting","title":"pinching"},
             "streams":{"audio_only":{"type":"hls","url":"https://a/audio.m3u8","master":"https://usher/master.m3u8"},
                        "best":{"type":"hls","url":"https://a/best.m3u8","master":"https://usher/master.m3u8"}}}"#;
-        assert_eq!(read(json), Asked::Live(Stream { master: "https://usher/master.m3u8".into(), title: "pinching".into(), category: "Just Chatting".into() }));
+        assert_eq!(read(json), Asked::Live(Stream { master: "https://usher/master.m3u8".into(), title: "pinching".into(), category: "Just Chatting".into(), session: None }));
     }
 
     #[test]

@@ -1,0 +1,18 @@
+[package]
+name = "pms-fetch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fetches from the internet for the daemon, and opens what comes back, away from it"
+
+[[bin]]
+name = "pms-fetch"
+path = "src/main.rs"
+
+# Kept small, and without anything that draws: it runs with windows and drawing (win32k) switched off, which loading user32
+# would fail under.
+[dependencies]
+ureq = { version = "=3.5.2", default-features = false, features = ["rustls", "socks-proxy"] }
+jpeg-decoder = { version = "0.3", default-features = false }
+# Speed demos come zipped: unzipped here, not in the daemon, since nothing vouches for them before they're checked.
+zip = { version = "9.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }

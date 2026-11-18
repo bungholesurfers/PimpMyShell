@@ -12,7 +12,7 @@ use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFi
 use windows::Win32::System::Pipes::*;
 use windows_core::{HSTRING, w};
 
-use crate::ipc::{PIPE_NAME, read_frame, write_frame};
+use crate::ipc::{pipe_name, read_frame, write_frame};
 use crate::{DETACHED, commands, log};
 
 pub fn start() {
@@ -32,11 +32,13 @@ fn serve() -> windows_core::Result<()> {
         lpSecurityDescriptor: sd.0,
         bInheritHandle: false.into(),
     };
-    let name = HSTRING::from(PIPE_NAME);
+    let name = HSTRING::from(pipe_name());
     let result = (|| {
-        let mut announced = false;
+        // The pipe is made once and kept for as long as this TAP serves, each client disconnected from it in turn. A fresh
+        // one for every request, as it used to be, left the name free in between, several times a second: something else
+        // could take it then, and the daemon would have talked to that.
         let mut busy_retries = 0;
-        while !DETACHED.load(Ordering::Acquire) {
+        let pipe = loop {
             // FIRST_PIPE_INSTANCE: if a previous TAP copy is still serving, refuse rather than share.
             let pipe = unsafe {
                 CreateNamedPipeW(
@@ -50,25 +52,29 @@ fn serve() -> windows_core::Result<()> {
                     Some(&sa),
                 )
             };
-            if pipe.is_invalid() {
-                let err = unsafe { GetLastError() };
-                if err == ERROR_ACCESS_DENIED && busy_retries < 50 {
-                    busy_retries += 1;
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
-                return Err(windows_core::Error::from(err.to_hresult()));
+            if !pipe.is_invalid() {
+                break pipe;
             }
-            // Once: every request gets a fresh instance, and the daemon makes several a second.
-            if !announced {
-                log("pipe server listening");
-                announced = true;
+            let err = unsafe { GetLastError() };
+            if err == ERROR_ACCESS_DENIED && busy_retries < 50 && !DETACHED.load(Ordering::Acquire) {
+                busy_retries += 1;
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
             }
+            return Err(windows_core::Error::from(err.to_hresult()));
+        };
+        // Closes the pipe when this returns, which is when the name's given up.
+        let mut conn = unsafe { File::from_raw_handle(pipe.0) };
+        log(format!("pipe server listening on {name}"));
+        while !DETACHED.load(Ordering::Acquire) {
             if let Err(e) = unsafe { ConnectNamedPipe(pipe, None) }
-                && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
-                    log(format!("ConnectNamedPipe: {e}"));
-                }
-            let mut conn = unsafe { File::from_raw_handle(pipe.0) };
+                && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED
+            {
+                // A client that came and went before we looked, most likely: disconnecting, below, gets the pipe ready again.
+                // Anything else would be the same again at once, so not in a hurry.
+                log(format!("ConnectNamedPipe: {e}"));
+                std::thread::sleep(Duration::from_millis(50));
+            }
             while let Ok(Some(request)) = read_frame(&mut conn) {
                 let response = commands::execute(&request);
                 if write_frame(&mut conn, &response).is_err() || DETACHED.load(Ordering::Acquire) {

@@ -23,6 +23,10 @@ bar_height   = "full"     # meters of bars (threads, engines, disks, adapters): 
 # whether PimpMyShell's text is light or dark.
 theme = "auto"
 
+# What PimpMyShell speaks: "auto" is Windows' own language where PimpMyShell speaks it, and English where it doesn't. Or
+# one of the languages in the repository's lang folder, by its code: "en_US", or "en_RN" for Redneck.
+language = "auto"
+
 # Frame-rate cap for the long-running animations (the hot-mic alert): fewer frames, less work for
 # the compositor (on a 240 Hz display, 60 fps took its GPU time for the alert down by ~40%, 30 by ~65%).
 # max_fps applies always (unset: none, the display's full rate); battery_fps while the PC runs on its
@@ -42,7 +46,7 @@ theme = "auto"
 # rests, and Twatch TVs with their sound off stop; ones with sound go on playing it. Back the moment the taskbar is. On by default.
 # rest_when_covered = false
 
-# A TV arriving on channel 6, even by shuffling, switches its console on (the default). Off, channel 6 shows no signal until
+# A TV arriving on channel 304, even by shuffling, switches its console on (the default). Off, channel 304 shows no signal until
 # you switch the console on yourself.
 # console_autostart = false
 
@@ -50,11 +54,17 @@ theme = "auto"
 # (640 by 480, what nearly everything of its day used), "720p" or "1080i". A console that's on changes at once.
 # console_video = "480p"
 
+# When nobody's playing, the console shows real speedruns of its game from the Doom Speed Demo Archive (dsdarchive.com), in
+# place of the game's own demos: each checked here first, unseen, and shown only if it plays out as it did for its runner.
+# Off by default: it goes online for them, as a download.
+# console_demos = true
+
 # A TV starting up (PimpMyShell starting, or a TV added) flips up through its channels, from tv_intro_from to tv_intro_to,
-# where it stays: by default from Captain Midnight's 1295, round to the console on channel 6. Off, it comes on where it was left.
+# where it stays: by default from Captain Midnight's 1295, round to the console on channel 304. Off, it comes on where it was
+# left. The channels: 2, 3, 4, 5, 37, 304 and 1295. (The console was on 6 until 0.1.8: a 6 here is read as 304.)
 # tv_intro      = false
 # tv_intro_from = 1295
-# tv_intro_to   = 6
+# tv_intro_to   = 304
 
 # How long a shuffling TV stays on a channel, for all of them: 5 to 3600 seconds. Each is late by its own random amount, up to a
 # quarter of that, unless shuffle_jitter is off, when they all change together.
@@ -74,6 +84,9 @@ theme = "auto"
 # newest release published). Only installers signed with PimpMyShell's release key are ever run.
 # update_check   = true
 # update_channel = "stable"
+# update_warn: a notification, at most once a run, when checks by themselves can't be made (the download helper's
+# sandbox can't be) or none has worked for a week.
+# update_warn    = false
 
 # [backdrop]: replace the stock acrylic with PimpMyShell's (blur + tint + grain). Omit the section
 # to keep the stock acrylic.
@@ -97,6 +110,22 @@ broad_ms  = 5000      # whole-taskbar warning first, then it settles around the 
 ignore    = []        # e.g. ["obs64.exe"]: substrings of the app's consent-store key
 position  = "tray"    # where the "in use by" label goes: "tray", after the meters, or "start", before them
 
+# [iss]: Number One, on TV channel 37: the International Space Station's urine tank, from NASA's ISSLive! telemetry (by way of
+# Lightstreamer), after pISSStream by Jaennaet. Off until you switch it on, as it goes online for it: in the background, as often
+# as the tank needs (every 15 minutes while it fills, more often as it drains, live in the last minutes before it's empty; half as
+# often while you're away or on battery), through the proxy if pms-network.toml says (iss, below). Off, the channel says so, and
+# shuffling passes it by.
+#
+#   [iss]
+#   online       = true                        # look at the station's telemetry, in the background
+#   notify_flush = false                       # no notification when the station empties its urine tank (a drain from 30% or
+#                                              # more reaching its bottom); on unless you say, once Number One's switched on
+#   bumps        = "often"                     # PTV's idents and homages on the channel, a few seconds of 3D each: "often" (an ident
+#                                              # on the quarter hour, a homage on the hour, an ident when you're back after 10 minutes
+#                                              # away, a homage on a toilet when the station flushes, the showroom when it's first
+#                                              # tuned to; only while you'd see them: not on battery or while you're away), "hourly"
+#                                              # (the homage on the hour, and nothing else) or "off". `pms bump` plays one now
+
 # [twatch]: a Twatch TV plays your favorite Twitch channels. It's off until there's a meter for it, which Settings > Twatch TV adds:
 #
 #   [[meter]]
@@ -106,12 +135,14 @@ position  = "tray"    # where the "in use by" label goes: "tray", after the mete
 #
 #   [twatch]
 #   (your favorites live beside this file, in pms-twatch-watchlist.txt: one channel per line, best first)
-#   more_sets   = 0                            # up to 2 more sets by themselves, while more favorites are live
+#   more_sets   = 3                            # how many more sets may come by themselves, while more favorites are live: 0 to 9 (the A's remote: 1 to 9)
+#   more_sets_on = true                        # false: none come, and more_sets is kept for when they do; the A beside the sets switches it
 #   pictures    = "low_memory"                 # stills in place of video: "never", "initial" (until a set is clicked), "low_memory" or "always"
 #   notify_live = true                         # a notification when a favorite goes live
 #   volume      = 100                          # how loud every set is, 0 to 100, when its sound is on
 #   metered_pictures = true                    # stills in place of video while Windows says the connection is metered
 #   top_quality = "480p"                       # "1080p60", "720p60", "720p", "480p" or "360p"; it goes lower by itself
+#   frame_rate  = 0                            # at most this many frames a second on each set: 0 for all the stream has, 30 or 15
 #   higher_favorite = "switch"                 # a higher favorite going live: "switch" to it, or "stay" until this one ends
 #   check_seconds = 600                        # how often each favorite is looked at: in no order, spread out, never two at once
 #   check_extra_seconds = 300                  # plus a random wait of up to this for each, picked afresh each time
@@ -123,11 +154,21 @@ position  = "tray"    # where the "in use by" label goes: "tray", after the mete
 #
 #   proxy       = "socks5h://127.0.0.1:9050"   # socks5h looks names up at the proxy too; "user:password@" before the host if it wants them
 #   live_checks = true                         # Twatch TV: who's live, and pictures
+#   iss         = true                         # Number One: the ISS's telemetry, on TV channel 37
 #   streams     = true                         # Twitch streams: Streamlink finding them (it's told --http-proxy) and the video
 #                                              # itself (PimpMyShell fetches it, not Windows), together, as the same somebody
 #   updates     = true                         # PimpMyShell's update checks and downloads
 #   downloads   = true                         # games, and Streamlink itself
 #   isolate     = true                         # each of those with a random user name and password of its own (Tor stream isolation)
+
+# [efficiency]: which of PimpMyShell's processes ask Windows for efficiency mode (EcoQoS): the slowest clock speed that will do,
+# and on a processor that has them, the efficient cores. Each is on unless you say; off, Windows decides, as for any program.
+#
+#   [efficiency]
+#   daemon  = true                             # PimpMyShell itself: the meters, TVs, cards and the Hot Mic alert
+#   twatch  = true                             # Twatch TV's players
+#   helpers = true                             # downloads, Streamlink, and the PIMPBOX's games and demos being looked over
+#   pimpbox = "closed"                         # the PIMPBOX and its game: "closed" (while its window is), "always" or "never"
 
 # [toasts]: show notifications inside the taskbar (the tray slides away meanwhile) instead of
 # as popups - modern toasts and old-style tray balloons alike. Native banners are switched off per app (every app
@@ -139,7 +180,7 @@ position  = "tray"    # where the "in use by" label goes: "tray", after the mete
 duration_ms = 7000    # each toast in front (one that comes forward again with more behind it: at most 4 s). Toasts that
                       # ask for duration="long" get at least 25 s, and alarms, calls and reminders with a button stay
                       # until you answer them, as they do in Windows
-# position  = "tray"    # where cards stop: left of "clock" (default), "tray", "tv" (your first TV) or "mic" (the Hot Mic
+# position  = "clock"   # where cards stop: left of the "tray" (default), the "clock", "tv" (your first TV) or "mic" (the Hot Mic
                         # label). Those two, and what's right of them, stay in sight; one that isn't showing counts as
                         # the tray. On a full taskbar, cards cover the whole tray
 # style     = "pimped"  # gold cards with a sheen sweeping across (default: "standard")
@@ -356,5 +397,5 @@ value     = false
 # expr  = ["net_tx", "net_rx"]
 
 [[meter]]
-label = "TV"                 # a little TV: hover for its remote. With a game (Settings > TV), the PIMPBOX is on channel
-style = "screen"             # 6. Add another [[meter]] with its own label and style = "screen" for another set.
+label = "TV"                 # a little TV: hover for its remote. With a game (Settings > PIMPBOX), the PIMPBOX is on channel
+style = "screen"             # 304. Add another [[meter]] with its own label and style = "screen" for another set.

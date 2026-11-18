@@ -11,7 +11,7 @@
 
 use std::cell::RefCell;
 
-use pms_xaml::{Canvas, ElementCompositionPreview, Grid, UIElement};
+use pms_xaml::{ElementCompositionPreview, UIElement};
 use windows::UI::Color;
 use windows::UI::Composition::*;
 use windows_core::Interface;
@@ -110,34 +110,86 @@ pub fn prominent_in(px: &[u8], channels: usize, bgra: bool) -> Option<Color> {
     Some(Color { A: 0xFF, R: c(r), G: c(g), B: c(b) })
 }
 
-/// The glow behind a toast's icon, `size` square: an element the icon's size with the glow, larger, centered on
-/// it. It fades in, flares a little, and settles.
-pub fn glow(size: f64, color: Color) -> R<UIElement> {
-    let host = Canvas::new().map_err(w)?;
-    // The host is the icon's size, so XAML draws it; the glow reaches beyond it.
+/// How the glow fades out from its middle: (where, 0 the middle and 1 the edge; alpha).
+const GLOW_STOPS: [(f32, u8); 5] = [(0.0, 0xB0), (0.34, 0x88), (0.6, 0x38), (0.82, 0x10), (1.0, 0)];
+
+/// The glow behind a toast's icon, `size` square: an element the icon's size with the glow, larger, centered on it. It fades
+/// in, flares a little, and settles. `px`: pixels per DIP. XAML draws it, a Border's picture brush (a picture of the glow,
+/// made once for each color and size): a sprite of ours, with its gradient, stayed in Explorer for good, Close() or not
+/// (2026-11-16, ~4 KB each card).
+pub fn glow(size: f64, color: Color, px: f64) -> R<UIElement> {
+    let host = crate::stage::canvas()?;
+    // The host is the icon's size, so XAML lays it out as one; the glow reaches beyond it (a Canvas doesn't clip).
     host.SetWidth(size).map_err(w)?;
     host.SetHeight(size).map_err(w)?;
     host.SetIsHitTestVisible(false).map_err(w)?;
+    let side = size + 2.0 * GLOW_REACH;
+    let disc = pms_xaml::Border::new().map_err(w)?;
+    disc.SetWidth(side).map_err(w)?;
+    disc.SetHeight(side).map_err(w)?;
+    let brush = pms_xaml::ImageBrush::new().map_err(w)?;
+    brush.SetStretch(pms_xaml::Stretch::Fill).map_err(w)?;
+    brush.SetImageSource(&glow_picture(color, (side * px).round().max(1.0) as u32)?).map_err(w)?;
+    disc.SetBackground(&brush).map_err(w)?;
+    let disc: UIElement = disc.cast().map_err(w)?;
+    pms_xaml::Canvas::SetLeft(&disc, -GLOW_REACH).map_err(w)?;
+    pms_xaml::Canvas::SetTop(&disc, -GLOW_REACH).map_err(w)?;
+    host.Children().map_err(w)?.Append(&disc).map_err(w)?;
     let host: UIElement = host.cast().map_err(w)?;
-    let c = ElementCompositionPreview::GetElementVisual(&host).map_err(w)?.Compositor().map_err(w)?;
-    let brush = c.CreateRadialGradientBrush().map_err(w)?;
-    let stops = brush.ColorStops().map_err(w)?;
-    for (at, alpha) in [(0.0, 0xB0), (0.34, 0x88), (0.6, 0x38), (0.82, 0x10), (1.0, 0)] {
-        stops.Append(&c.CreateColorGradientStopWithOffsetAndColor(at, Color { A: alpha, ..color }).map_err(w)?).map_err(w)?;
-    }
-    let side = (size + 2.0 * GLOW_REACH) as f32;
-    let sprite = c.CreateSpriteVisual().map_err(w)?;
-    sprite.SetSize(Vector2 { X: side, Y: side }).map_err(w)?;
-    sprite.SetOffset(windows_numerics::Vector3 { X: -GLOW_REACH as f32, Y: -GLOW_REACH as f32, Z: 0.0 }).map_err(w)?;
-    sprite.SetBrush(&brush).map_err(w)?;
-    let fade = c.CreateScalarKeyFrameAnimation().map_err(w)?;
+    let v = ElementCompositionPreview::GetElementVisual(&host).map_err(w)?;
+    let fade = v.Compositor().and_then(|c| c.CreateScalarKeyFrameAnimation()).map_err(w)?;
     fade.InsertKeyFrame(0.0, 0.0).map_err(w)?;
     fade.InsertKeyFrame(0.25, 1.0).map_err(w)?;
     fade.InsertKeyFrame(1.0, 0.85).map_err(w)?;
     fade.SetDuration(windows::Foundation::TimeSpan { Duration: 1800 * 10_000 }).map_err(w)?;
-    sprite.StartAnimation(&windows_core::HSTRING::from("Opacity"), &fade).map_err(w)?;
-    ElementCompositionPreview::SetElementChildVisual(&host, &sprite).map_err(w)?;
+    v.StartAnimation(&windows_core::HSTRING::from("Opacity"), &fade).map_err(w)?;
     Ok(host)
+}
+
+/// A picture of the glow in `color`, `side` pixels square: GLOW_STOPS around its middle. Kept for the next card of the same
+/// color, the last few. UI thread.
+fn glow_picture(color: Color, side: u32) -> R<pms_xaml::BitmapImage> {
+    const KEPT: usize = 8;
+    thread_local! {
+        static MADE: RefCell<Vec<((u32, u32), pms_xaml::BitmapImage)>> = const { RefCell::new(Vec::new()) };
+    }
+    let key = (u32::from_be_bytes([color.A, color.R, color.G, color.B]), side);
+    if let Some(b) = MADE.with_borrow(|m| m.iter().find(|(k, _)| *k == key).map(|(_, b)| b.clone())) {
+        return Ok(b);
+    }
+    let b = crate::toast::bitmap(&glow_png(color, side)?)?;
+    MADE.with_borrow_mut(|m| {
+        if m.len() >= KEPT {
+            m.remove(0);
+        }
+        m.push((key, b.clone()));
+    });
+    Ok(b)
+}
+
+/// The glow's picture, as a PNG.
+fn glow_png(color: Color, side: u32) -> R<Vec<u8>> {
+    let half = side as f32 / 2.0;
+    let alpha = |d: f32| -> u8 {
+        let d = d.clamp(0.0, 1.0);
+        let i = GLOW_STOPS.iter().position(|(at, _)| *at >= d).unwrap_or(GLOW_STOPS.len() - 1).max(1);
+        let ((a0, v0), (a1, v1)) = (GLOW_STOPS[i - 1], GLOW_STOPS[i]);
+        let t = if a1 > a0 { (d - a0) / (a1 - a0) } else { 1.0 };
+        (f32::from(v0) + (f32::from(v1) - f32::from(v0)) * t).round() as u8
+    };
+    let mut px = Vec::with_capacity((side * side * 4) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let (dx, dy) = (x as f32 + 0.5 - half, y as f32 + 0.5 - half);
+            px.extend([color.R, color.G, color.B, alpha((dx * dx + dy * dy).sqrt() / half)]);
+        }
+    }
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, side, side);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().and_then(|mut wr| wr.write_image_data(&px)).map_err(|e| format!("the glow's picture: {e}"))?;
+    Ok(out)
 }
 
 struct Ripple {
@@ -158,18 +210,18 @@ thread_local! {
 /// the same way); rings from an earlier toast finish on their way.
 pub fn start(ctx: &Ctx, at: Vector2, card: (Vector2, f32), color: Color) -> R<()> {
     if RIPPLE.with_borrow(Option::is_none) {
-        let host: UIElement = Grid::new().and_then(|g| g.cast()).map_err(w)?;
+        let host: UIElement = crate::stage::grid()?.cast().map_err(w)?;
         host.SetIsHitTestVisible(false).map_err(w)?;
         stage::insert(ctx, Slot::Alert, &host)?;
         let compositor = ElementCompositionPreview::GetElementVisual(&host).map_err(w)?.Compositor().map_err(w)?;
         let shapes = compositor.CreateShapeVisual().map_err(w)?;
         shapes.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 }).map_err(w)?;
         let rings = Emitter::new(&compositor, &shapes.Shapes().map_err(w)?, &RIPPLE_RINGS)?;
-        let under = compositor.CreateSpriteVisual().map_err(w)?;
+        let under = stage::sprite(&compositor)?;
         under.SetOpacity(0.0).map_err(w)?;
         let under_brush = compositor.CreateRadialGradientBrush().map_err(w)?;
         under.SetBrush(&under_brush).map_err(w)?;
-        let root = compositor.CreateContainerVisual().map_err(w)?;
+        let root = stage::container(&compositor)?;
         root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 }).map_err(w)?;
         root.Children().map_err(w)?.InsertAtTop(&under).map_err(w)?;
         root.Children().map_err(w)?.InsertAtTop(&shapes).map_err(w)?;
@@ -246,4 +298,27 @@ pub fn off(ctx: &Ctx) -> R<()> {
         stage::remove(ctx, &r.host)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_glows_picture_fades_out_from_its_middle_as_its_stops_say() {
+        let color = Color { A: 0xFF, R: 0x20, G: 0x80, B: 0xF0 };
+        let side = 40;
+        let png = glow_png(color, side).unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+        let mut px = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut px).unwrap();
+        let at = |x: u32, y: u32| &px[((y * side + x) * 4) as usize..][..4];
+        let middle = at(side / 2, side / 2);
+        assert_eq!(&middle[..3], &[0x20, 0x80, 0xF0], "the glow's own color");
+        assert!(middle[3] >= 0xAC, "nearly the first stop's alpha in the middle: {}", middle[3]);
+        assert_eq!(at(0, 0)[3], 0, "nothing in the corners, past the edge");
+        assert!(at(0, side / 2)[3] <= 3, "next to nothing at the edge (its middle's just inside it): {}", at(0, side / 2)[3]);
+        let (near, far) = (at(side / 2 + 4, side / 2)[3], at(side / 2 + 12, side / 2)[3]);
+        assert!(near > far && far > 0, "fainter further out: {near}, {far}");
+    }
 }

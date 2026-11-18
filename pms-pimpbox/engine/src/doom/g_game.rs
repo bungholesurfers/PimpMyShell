@@ -751,7 +751,7 @@ use crate::doom::v_video::V_ScreenShot;
 use crate::doom::i_timer::I_GetTime;
 
 /// WAD lump cache / release / lookup primitives from `w_wad.c`.
-use crate::doom::w_wad::{W_CacheLumpName, W_CheckNumForName, W_ReleaseLumpName};
+use crate::doom::w_wad::{W_CacheLumpName, W_CheckNumForName, W_LumpLength, W_ReleaseLumpName};
 
 /// Configurable key, joystick and mouse button bindings from `m_controls.c`.
 /// Imported in bulk because `G_BuildTiccmd` and `G_Responder` interrogate
@@ -1729,6 +1729,14 @@ pub unsafe extern "C" fn G_PlayerReborn(player: c_int) {
 // G_CheckSpot
 // ---------------------------------------------------------------------------
 
+/// The fine-table index of a map spot's facing, `angle` degrees, for the teleport fog: Chocolate Doom's
+/// `(ANG45 >> ANGLETOFINESHIFT) * (angle / 45)`, 1024 a step of 45 degrees. (The port had `0x10000000` there, unshifted:
+/// every spot but one facing east was "an unexpected angle", and the game quit when anyone respawned at one, which
+/// deathmatch and co-op games and demos do.)
+pub fn spawn_fine_angle(angle: i16) -> i32 {
+    1024i32.wrapping_mul(i32::from(angle) / 45)
+}
+
 /// Test whether `playernum` can respawn at `mthing` (a `mapthing_t` spawn
 /// spot) and, if so, evict the oldest corpse and spawn a teleport-fog mobj.
 ///
@@ -1737,7 +1745,7 @@ pub unsafe extern "C" fn G_PlayerReborn(player: c_int) {
 /// player spawn positions. Otherwise it calls `P_CheckPosition` to verify
 /// the spot is clear of monsters / players.
 ///
-/// The teleport-fog placement mirrors the vanilla Doom bug carried in PrBoom+
+/// The teleport-fog placement (`spawn_fine_angle`) mirrors the vanilla Doom bug carried in PrBoom+
 /// where the `an` angle index overflows into `finetangent[]` for spawns
 /// facing certain compass directions; the four special-case `an` values
 /// (4096, 5120, 6144, 7168) reproduce that table lookup exactly to keep
@@ -1784,7 +1792,7 @@ pub unsafe extern "C" fn G_CheckSpot(playernum: c_int, mthing: *mut mapthing_t) 
     let ss = R_PointInSubsector(x, y);
 
     // Replicate vanilla signed-angle overflow (from PrBoom+)
-    let an_raw = (0x10000000i32).wrapping_mul((*mthing).angle as i32 / 45);
+    let an_raw = spawn_fine_angle((*mthing).angle);
     let xa: fixed_t;
     let ya: fixed_t;
     match an_raw {
@@ -1809,7 +1817,9 @@ pub unsafe extern "C" fn G_CheckSpot(playernum: c_int, mthing: *mut mapthing_t) 
             ya = finesine[an_raw as usize];
         }
         _ => {
-            I_Error(c"G_CheckSpot: unexpected angle %d\n".as_ptr(), an_raw);
+            // Said with the number in it: `I_Error` here prints what it's given as it is.
+            let said = std::ffi::CString::new(format!("G_CheckSpot: unexpected angle {an_raw}\n")).unwrap_or_default();
+            I_Error(said.as_ptr());
         }
     }
 
@@ -2420,12 +2430,10 @@ pub unsafe extern "C" fn G_InitNew(skill: skill_t, episode: c_int, map: c_int) {
         respawnmonsters = 0;
     }
 
-    // Fast monsters for nightmare or fastparm
-    if fastparm != 0 || (skill == 4 && gameskill != 4) {
-        set_fast_monsters(true);
-    } else if skill != 4 && gameskill == 4 {
-        set_fast_monsters(false);
-    }
+    // Fast monsters for nightmare or fastparm: what this game is, set only when it changes (G_SetFastMonsters). Vanilla halved
+    // the demons' tics on every new game with -fast and only doubled them leaving nightmare, so -fast demos played one after
+    // another (a title loop of speed demos) took them from 2 to 1 to 0, and a demon with 0-tic states froze the game.
+    set_fast_monsters(fastparm != 0 || skill == 4);
 
     // Force players to be reborn on first level load
     for i in 0..MAXPLAYERS {
@@ -2504,8 +2512,8 @@ unsafe fn set_fast_monsters(fast: bool) {
 /// (15/10/10).
 ///
 /// This change is global to the `states` and `mobjinfo` tables and persists
-/// across maps until inverted again - it is `G_InitNew`'s responsibility to
-/// only call this when the skill flips into or out of nightmare.
+/// across maps. It's a state, not a step: asked for what's already so, it
+/// does nothing, so the tables are only ever halved once and restored once.
 ///
 /// # Safety
 /// Mutates the shared `states` and `mobjinfo` arrays. Exported as
@@ -2515,6 +2523,13 @@ pub unsafe extern "C" fn G_SetFastMonsters(fast: c_int) {
     use crate::doom::info::{
         mobjinfo, states, MT_BRUISERSHOT, MT_HEADSHOT, MT_TROOPSHOT, S_SARG_PAIN2, S_SARG_RUN1,
     };
+
+    // Whether the tables are halved now.
+    static mut FAST_NOW: bool = false;
+    if FAST_NOW == (fast != 0) {
+        return;
+    }
+    FAST_NOW = fast != 0;
 
     for i in S_SARG_RUN1 as usize..=S_SARG_PAIN2 as usize {
         if fast != 0 {
@@ -2562,6 +2577,13 @@ pub unsafe extern "C" fn G_SetFastMonsters(fast: c_int) {
 /// Exported as `#[no_mangle]` for C callers.
 #[no_mangle]
 pub unsafe extern "C" fn G_ReadDemoTiccmd(cmd: *mut TiccmdT) {
+    // PimpMyShell: a demo ends where its data does, too, marker or none, rather than reading on past it (demoend is set for
+    // playback in G_DoPlayDemo). A tic is four bytes, or five with longtics.
+    let tic = if longtics != 0 { 5 } else { 4 };
+    if demoend.is_null() || demo_p.add(1) > demoend || (*demo_p != DEMOMARKER && demo_p.add(tic) > demoend) {
+        G_CheckDemoStatus();
+        return;
+    }
     if *demo_p == DEMOMARKER {
         G_CheckDemoStatus();
         return;
@@ -2883,6 +2905,15 @@ pub unsafe extern "C" fn G_DoPlayDemo() {
     gameaction = ga_nothing;
     demobuffer = W_CacheLumpName(defdemoname, PU_STATIC) as *mut byte;
     demo_p = demobuffer;
+    // PimpMyShell: where its data ends, for G_ReadDemoTiccmd to stop at. One too short for even its header isn't a demo.
+    let length = W_LumpLength(W_CheckNumForName(defdemoname).max(0) as c_uint).max(0) as usize;
+    if length < 13 {
+        demoend = demobuffer;
+        gameaction = ga_nothing;
+        G_CheckDemoStatus();
+        return;
+    }
+    demoend = demobuffer.add(length);
 
     let demoversion = *demo_p as c_int;
     demo_p = demo_p.add(1);
@@ -3068,7 +3099,6 @@ mod tests {
     fn zeroed_cmd() -> TiccmdT {
         unsafe { std::mem::zeroed() }
     }
-
     // --- G_CmdChecksum ---
 
     /// A fully-zero ticcmd checksums to zero.

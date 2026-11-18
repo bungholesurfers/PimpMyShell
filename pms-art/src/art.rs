@@ -65,6 +65,83 @@ pub struct Design {
     pub dollar_strength: f32,
     pub dollar_size: f32,
     pub dollar_tilt: f32,
+    /// The PIMPBOX's icon in each part of its boot animation: written into the PIMPBOX's source (pms-pimpbox/boot/src/looks.txt),
+    /// which draws it with them as it runs, and its program file's icon with "mark" as it's built.
+    pub pimpbox: PimpboxIcon,
+}
+
+/// The PIMPBOX icon's colors, `#RRGGBB`: the mark's (ink) and the square's (paper), for each look.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PimpboxIcon {
+    pub rain_ink: String,
+    pub rain_paper: String,
+    pub flash_ink: String,
+    pub flash_paper: String,
+    pub hall_ink: String,
+    pub hall_paper: String,
+    pub mark_ink: String,
+    pub mark_paper: String,
+    /// How much of the icon's height the mark spans (0.4 to 0.92), and whether its dots stay whole pixels.
+    pub mark_size: f32,
+    pub mark_crisp: bool,
+}
+
+impl Default for PimpboxIcon {
+    fn default() -> Self {
+        PimpboxIcon {
+            rain_ink: "#9EFF99".into(),
+            rain_paper: "#000000".into(),
+            flash_ink: "#000000".into(),
+            flash_paper: "#9EFF99".into(),
+            hall_ink: "#B073FF".into(),
+            hall_paper: "#000000".into(),
+            mark_ink: "#000000".into(),
+            mark_paper: "#FF9A22".into(),
+            mark_size: 0.75,
+            mark_crisp: true,
+        }
+    }
+}
+
+impl PimpboxIcon {
+    /// A look's colors, as hex: ink, then paper.
+    pub fn of(&self, look: crate::pimpbox_icon::Look) -> (&str, &str) {
+        use crate::pimpbox_icon::Look;
+        match look {
+            Look::Rain => (&self.rain_ink, &self.rain_paper),
+            Look::Flash => (&self.flash_ink, &self.flash_paper),
+            Look::Hall => (&self.hall_ink, &self.hall_paper),
+            Look::Mark => (&self.mark_ink, &self.mark_paper),
+        }
+    }
+
+    /// A look's colors, as the PIMPBOX draws with them.
+    pub fn colors(&self, look: crate::pimpbox_icon::Look) -> crate::pimpbox_icon::Colors {
+        let looks = self.looks_txt();
+        crate::pimpbox_icon::colors_in(&looks, look)
+    }
+
+    /// How big the mark is, as the PIMPBOX draws it.
+    pub fn shape(&self) -> crate::pimpbox_icon::Shape {
+        crate::pimpbox_icon::shape_in(&self.looks_txt())
+    }
+
+    /// looks.txt, as the PIMPBOX reads it.
+    pub fn looks_txt(&self) -> String {
+        let mut out = String::from(
+            "# The PIMPBOX's icon in each part of its boot animation: the mark's color (ink), then the square's (paper); and how big the mark\n\
+             # is (of the icon's height) and whether its dots are whole pixels (crisp) or not (smooth). Written by pms-art from art/design.json\n\
+             # (its \"PIMPBOX icon\" section); read by icon.rs, which the console draws its icons with, as it runs, and its build draws the\n\
+             # program file's icon with (\"mark\").\n",
+        );
+        for look in crate::pimpbox_icon::Look::ALL {
+            let (ink, paper) = self.of(look);
+            out.push_str(&format!("{} {} {}\n", look.name(), ink.trim().to_uppercase(), paper.trim().to_uppercase()));
+        }
+        out.push_str(&format!("size {:.2} {}\n", self.mark_size.clamp(crate::pimpbox_icon::MIN_SCALE, crate::pimpbox_icon::MAX_SCALE), if self.mark_crisp { "crisp" } else { "smooth" }));
+        out
+    }
 }
 
 impl Default for Design {
@@ -94,6 +171,7 @@ impl Default for Design {
             dollar_strength: 0.36,
             dollar_size: 22.0,
             dollar_tilt: 0.0,
+            pimpbox: PimpboxIcon::default(),
         }
     }
 }
@@ -520,6 +598,33 @@ pub fn crab(root: &Path) -> Result<String, String> {
     std::fs::read_to_string(root.join("art/openclipart-192996/red-crab.svg")).map_err(|e| format!("the crab: {e}"))
 }
 
+/// Number One's mark (pms/src/iss): a blocky yellow P standing out in blue, dripping, with "tv" sprayed over it in red. Ours,
+/// drawn for PimpMyShell; the network's tagline left off, and nothing behind it.
+const PTV: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="830" height="830" viewBox="96 -17 830 830">
+<g stroke="#111111" stroke-width="8" stroke-linejoin="round">
+<polygon points="330,166 496,166 560,206 394,206" fill="#146aa6"/>
+<polygon points="330,304 330,166 394,206 394,344" fill="#1e8fd6"/>
+<polygon points="640,60 640,340 704,380 704,100" fill="#1e8fd6"/>
+<polygon points="640,340 570,410 634,450 704,380" fill="#1a7cbe"/>
+<polygon points="570,410 330,410 394,450 634,450" fill="#146aa6"/>
+<polygon points="330,410 330,640 394,680 394,450" fill="#1e8fd6"/>
+<polygon points="330,640 120,640 184,680 394,680" fill="#146aa6"/>
+<path d="M120 60 L640 60 L640 340 L570 410 L330 410 L330 640 L120 640 Z M330 166 L496 166 L496 304 L330 304 Z" fill="#f6d22e" fill-rule="evenodd"/>
+</g>
+<path d="M142 640 C163 648 163 673.6 163 711 A25 25 0 1 0 181 711 C181 673.6 181 648 202 640 Z" fill="#f6d22e" stroke="#111111" stroke-width="8" stroke-linejoin="round"/>
+<rect x="145" y="630" width="54" height="14" fill="#f6d22e"/>
+<path d="M244 640 C259 648 259 658.9 259 677 A17 17 0 1 0 273 677 C273 658.9 273 648 288 640 Z" fill="#f6d22e" stroke="#111111" stroke-width="8" stroke-linejoin="round"/>
+<rect x="247" y="630" width="38" height="14" fill="#f6d22e"/>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round">
+<path d="M562 318 C556 420 548 560 566 636 C574 668 604 670 634 648" stroke="#111111" stroke-width="78"/>
+<path d="M424 474 C494 452 576 432 664 418" stroke="#111111" stroke-width="78"/>
+<path d="M664 498 C690 556 704 612 722 652 C764 556 824 430 902 318" stroke="#111111" stroke-width="78"/>
+<path d="M562 318 C556 420 548 560 566 636 C574 668 604 670 634 648" stroke="#c8202a" stroke-width="54"/>
+<path d="M424 474 C494 452 576 432 664 418" stroke="#c8202a" stroke-width="54"/>
+<path d="M664 498 C690 556 704 612 722 652 C764 556 824 430 902 318" stroke="#c8202a" stroke-width="54"/>
+</g>
+</svg>"##;
+
 /// Every picture, written where the build and the installer take them from: assets/icon (pms.ico, a PNG per size,
 /// pms.svg) and installer/art (setup.ico, box.svg, the wizard and corner pictures). Says what it wrote.
 pub fn write_all(root: &Path, d: &Design) -> Result<String, String> {
@@ -572,12 +677,42 @@ pub fn write_all(root: &Path, d: &Design) -> Result<String, String> {
     for size in CORNER_SIZES {
         write(art.join(format!("corner-{size}.png")), &smooth_png(&boxed, size, size)?)?;
     }
-    Ok(format!("{} (pms.ico, {} sizes); {} (setup.ico, {} wizard, {} backdrop and {} corner pictures)", icons.display(), ICON_SIZES.len(), art.display(), WIZARD_SIZES.len(), BACKDROP_SIZES.len(), CORNER_SIZES.len()))
+    // Number One's mark, PTV, for its page in the settings.
+    write(icons.join("ptv-64.png"), &smooth_png(PTV, 64, 64)?)?;
+    // The PIMPBOX's icon colors, into its source: it draws its icons from them (as it runs, and its program file's as it's built).
+    let looks = root.join("pms-pimpbox/boot/src/looks.txt");
+    write(looks.clone(), d.pimpbox.looks_txt().as_bytes())?;
+    Ok(format!(
+        "{} (pms.ico, {} sizes); {} (setup.ico, {} wizard, {} backdrop and {} corner pictures); {} (the PIMPBOX icon's colors)",
+        icons.display(),
+        ICON_SIZES.len(),
+        art.display(),
+        WIZARD_SIZES.len(),
+        BACKDROP_SIZES.len(),
+        CORNER_SIZES.len(),
+        looks.display()
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pimpbox_icons_colors_are_as_the_pimpbox_has_them() {
+        use crate::pimpbox_icon::{LOOKS, Look, colors_in};
+        // Its looks.txt says what art/design.json does: a design changed and not rendered isn't what's built.
+        let design = Design::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../art/design.json"));
+        let ours = design.pimpbox.looks_txt();
+        for look in Look::ALL {
+            assert_eq!(colors_in(&ours, look), colors_in(LOOKS, look), "{}: render the art again (cargo xtask art)", look.name());
+        }
+        assert_eq!(design.pimpbox.shape(), crate::pimpbox_icon::shape_in(LOOKS), "the mark's size: render the art again (cargo xtask art)");
+        let smooth = PimpboxIcon { mark_size: 0.9, mark_crisp: false, ..Default::default() };
+        assert_eq!(smooth.shape(), crate::pimpbox_icon::Shape { scale: 0.9, crisp: false });
+        let changed = PimpboxIcon { hall_ink: "#123456".into(), ..Default::default() };
+        assert_eq!(changed.colors(Look::Hall).ink, [0x12, 0x34, 0x56]);
+    }
 
     #[test]
     fn a_band_runs_across_its_face() {

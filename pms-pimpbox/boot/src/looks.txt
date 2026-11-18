@@ -1,0 +1,9 @@
+# The PIMPBOX's icon in each part of its boot animation: the mark's color (ink), then the square's (paper); and how big the mark
+# is (of the icon's height) and whether its dots are whole pixels (crisp) or not (smooth). Written by pms-art from art/design.json
+# (its "PIMPBOX icon" section); read by icon.rs, which the console draws its icons with, as it runs, and its build draws the
+# program file's icon with ("mark").
+rain #9EFF99 #000000
+flash #000000 #9EFF99
+hall #B073FF #000000
+mark #000000 #FF9A22
+size 0.75 crisp

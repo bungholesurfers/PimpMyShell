@@ -126,10 +126,14 @@ pub struct Slot {
     pub pinned: Option<String>,
     /// The one channel this set shows, and it shows nothing else.
     pub only: Option<String>,
+    /// It's one you put on the taskbar, and not one that came out by itself while more favorites were live than you had sets.
+    pub fixed: bool,
 }
 
 /// Who each set should show, given who's live, best first: the best ones that fit, and a set that's already showing one of those
-/// carries on with it, rather than two sets swapping streams.
+/// carries on with it, rather than two sets swapping streams. But for one thing: a set of yours doesn't sit empty while sets that
+/// only came out for the overflow play. When its channel ends and there's no favorite to spare, the last of those hands its
+/// stream over, and goes.
 pub fn assign(slots: &[Slot], live: &[String]) -> Vec<Option<String>> {
     // A set that's kept to a channel is out of the running, and so is its channel.
     let kept: Vec<&String> = slots.iter().filter(|s| s.on).filter_map(|s| s.only.as_ref()).collect();
@@ -139,6 +143,16 @@ pub fn assign(slots: &[Slot], live: &[String]) -> Vec<Option<String>> {
     for (i, slot) in slots.iter().enumerate().filter(|(_, s)| s.on) {
         if let Some(only) = &slot.only {
             out[i] = Some(only.clone()).filter(|h| live.contains(h));
+        }
+    }
+    let idle = |i: usize, out: &[Option<String>]| slots[i].on && slots[i].fixed && slots[i].only.is_none() && out[i].is_none();
+    // One that was picked on its remote, or is kept to its channel, keeps what it has.
+    let spare = |j: usize, out: &[Option<String>]| slots[j].on && !slots[j].fixed && slots[j].only.is_none() && out[j].is_some() && slots[j].pinned != out[j];
+    for i in 0..slots.len() {
+        if idle(i, &out)
+            && let Some(j) = (0..slots.len()).rev().find(|j| spare(*j, &out))
+        {
+            out[i] = out[j].take();
         }
     }
     out
@@ -195,33 +209,32 @@ pub struct Standing<'a> {
     pub gives_way: bool,
 }
 
-/// What a set says when nothing's going to move it.
-const STAYS: &str = "Stays on until this stream ends";
-
-/// What a set will do next, in a line, for its remote: the question it answers is "will this change by itself?".
+/// What a set will do next, in a line, for its remote: the question it answers is "will this change by itself?". `STAYS`, when
+/// nothing's going to move it.
 pub fn plan(s: &Standing) -> String {
+    use crate::lang::twatch as t;
     if let Some(only) = s.only {
         return match s.showing {
-            Some(_) => format!("Only ever shows {only}"),
-            None => format!("Only ever shows {only}: no signal until they're live"),
+            Some(_) => t::ONLY.with(&[("name", &only)]),
+            None => t::ONLY_WAITING.with(&[("name", &only)]),
         };
     }
-    let Some(showing) = s.showing else { return "Comes on when a favorite goes live".into() };
+    let Some(showing) = s.showing else { return t::COMES_ON.t().into() };
     let at = s.favorites.iter().position(|f| f == showing).unwrap_or(0);
     let rivals: Vec<&String> = s.favorites[..at].iter().filter(|f| !s.elsewhere.contains(&f.as_str())).collect();
     if s.held || s.picked {
         return match rivals.iter().find(|f| s.live.contains(f)) {
-            Some(higher) => format!("Staying here, though {higher} ranks higher and is live"),
-            None if s.held => "Stays on this channel until it ends".into(),
-            None => "You picked this. It stays until it ends".into(),
+            Some(higher) => t::STAYING.with(&[("name", higher)]),
+            None if s.held => t::HELD.t().into(),
+            None => t::PICKED.t().into(),
         };
     }
     match rivals.as_slice() {
-        [] => STAYS.into(),
-        _ if s.spare_set || !s.gives_way => STAYS.into(),
-        [one] => format!("Switches if {one} goes live"),
-        [one, two] => format!("Switches if {one} or {two} goes live"),
-        _ => "Switches if a higher favorite goes live".into(),
+        [] => t::STAYS.t().into(),
+        _ if s.spare_set || !s.gives_way => t::STAYS.t().into(),
+        [one] => t::SWITCHES_ONE.with(&[("one", one)]),
+        [one, two] => t::SWITCHES_TWO.with(&[("one", one), ("two", two)]),
+        _ => t::SWITCHES.t().into(),
     }
 }
 
@@ -244,7 +257,7 @@ mod tests {
     }
 
     fn slot(showing: Option<&str>) -> Slot {
-        Slot { on: true, showing: showing.map(str::to_string), pinned: None, only: None }
+        Slot { on: true, showing: showing.map(str::to_string), pinned: None, only: None, fixed: true }
     }
 
     #[test]
@@ -269,7 +282,7 @@ mod tests {
     fn a_set_says_whether_it_will_change_by_itself() {
         let (favorites, live) = (names(&["a", "b", "c", "d"]), names(&["c"]));
         assert_eq!(plan(&standing(&favorites, &live, None)), "Comes on when a favorite goes live");
-        assert_eq!(plan(&standing(&favorites, &live, Some("a"))), STAYS, "it's the best");
+        assert_eq!(plan(&standing(&favorites, &live, Some("a"))), crate::lang::twatch::STAYS.t(), "it's the best");
         assert_eq!(plan(&standing(&favorites, &live, Some("b"))), "Switches if a goes live");
         assert_eq!(plan(&standing(&favorites, &live, Some("c"))), "Switches if a or b goes live");
         assert_eq!(plan(&standing(&favorites, &live, Some("d"))), "Switches if a higher favorite goes live");
@@ -280,8 +293,8 @@ mod tests {
         let (favorites, live) = (names(&["a", "b", "c"]), names(&["a", "c"]));
         let elsewhere = ["a"];
         assert_eq!(plan(&Standing { elsewhere: &elsewhere, ..standing(&favorites, &live, Some("c")) }), "Switches if b goes live", "a's on another set");
-        assert_eq!(plan(&Standing { spare_set: true, ..standing(&favorites, &live, Some("c")) }), STAYS, "a spare set would take it");
-        assert_eq!(plan(&Standing { gives_way: false, ..standing(&favorites, &live, Some("c")) }), STAYS, "another set gives way first");
+        assert_eq!(plan(&Standing { spare_set: true, ..standing(&favorites, &live, Some("c")) }), crate::lang::twatch::STAYS.t(), "a spare set would take it");
+        assert_eq!(plan(&Standing { gives_way: false, ..standing(&favorites, &live, Some("c")) }), crate::lang::twatch::STAYS.t(), "another set gives way first");
     }
 
     #[test]
@@ -390,6 +403,27 @@ mod tests {
     fn more_sets_show_the_next_best_without_swapping() {
         let got = assign(&[slot(Some("b")), slot(None), slot(None)], &names(&["a", "b", "c", "d"]));
         assert_eq!(got, [Some("b".to_string()), Some("a".to_string()), Some("c".to_string())]);
+    }
+
+    #[test]
+    fn a_set_of_yours_doesnt_sit_empty_while_one_that_came_by_itself_plays() {
+        let came = |showing: Option<&str>| Slot { fixed: false, ..slot(showing) };
+        let some = |h: &str| Some(h.to_string());
+        // Yours had a channel that ended, and three that came out for the overflow are playing: the last of them hands over.
+        let got = assign(&[slot(None), came(Some("b")), came(Some("c")), came(Some("d"))], &names(&["b", "c", "d"]));
+        assert_eq!(got, [some("d"), some("b"), some("c"), None]);
+        // And from then on it stays as it is.
+        let got = assign(&[slot(Some("d")), came(Some("b")), came(Some("c")), came(None)], &names(&["b", "c", "d"]));
+        assert_eq!(got, [some("d"), some("b"), some("c"), None]);
+        // One that was picked on its remote keeps what it has: the one before it hands over instead.
+        let picked = Slot { pinned: Some("d".into()), ..came(Some("d")) };
+        let got = assign(&[slot(None), came(Some("b")), came(Some("c")), picked], &names(&["b", "c", "d"]));
+        assert_eq!(got, [some("c"), some("b"), None, some("d")]);
+        // With a favorite to spare, yours takes that, and nothing moves.
+        assert_eq!(assign(&[slot(None), came(Some("b"))], &names(&["a", "b"])), [some("a"), some("b")]);
+        // A set of yours that's switched off isn't waiting for anything.
+        let off = Slot { on: false, ..slot(None) };
+        assert_eq!(assign(&[off, came(Some("b"))], &names(&["b"])), [None, some("b")]);
     }
 
     #[test]

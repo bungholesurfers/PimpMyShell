@@ -24,6 +24,7 @@ pub mod logfile;
 mod props;
 mod rings;
 mod ripple;
+mod said;
 mod server;
 mod stage;
 mod toast;
@@ -67,6 +68,28 @@ fn log(msg: impl AsRef<str>) {
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panic here would abort explorer; never let poisoning escalate.
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Runs what a handler does. XAML calls a handler through an `extern "system"` function, and a panic that got back out of
+/// one would end Explorer there and then. So the body of every handler goes through here (`cargo xtask check` sees that it
+/// does): a panic stops here, the log says where the handler is, and the event's told that all went well.
+#[track_caller]
+pub(crate) fn guard(body: impl FnOnce() -> windows_core::Result<()>) -> windows_core::Result<()> {
+    let at = std::panic::Location::caller();
+    std::panic::catch_unwind(AssertUnwindSafe(body)).unwrap_or_else(|_| {
+        // Not from a test: that would be a line in the log of the PimpMyShell that's really running.
+        if !cfg!(test) {
+            log(format!("the handler at {}:{} panicked; Explorer carries on", at.file(), at.line()));
+        }
+        Ok(())
+    })
+}
+
+/// Has a panic say what it was in tap.log, and where. One that's caught (`guard`, `run_on_ui`, a command) is only known
+/// to have happened otherwise: what a panic prints goes nowhere, inside Explorer.
+fn log_panics() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| std::panic::set_hook(Box::new(|info| log(format!("panic: {}", info.to_string().replace('\n', " "))))));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -196,7 +219,7 @@ pub(crate) fn run_on_ui<R: Send + 'static>(f: impl FnOnce(&Ctx) -> R + Send + 's
     }
     let (tx, rx) = mpsc::channel::<Result<R, String>>();
     let job = Mutex::new(Some((f, tx)));
-    let handler = DispatchedHandler::new(move || {
+    let handler = DispatchedHandler::new(move || crate::guard(|| {
         if let (Some((f, tx)), Some(ctx)) = (lock(&job).take(), CTX.get()) {
             // A panic unwinding into XAML would take explorer down with it.
             ON_UI.set(true);
@@ -205,7 +228,7 @@ pub(crate) fn run_on_ui<R: Send + 'static>(f: impl FnOnce(&Ctx) -> R + Send + 's
             let _ = tx.send(r);
         }
         Ok(())
-    });
+    }));
     ctx.dispatcher.RunAsync(CoreDispatcherPriority::Normal, &handler).map_err(|e| format!("RunAsync: {e}"))?;
     rx.recv_timeout(Duration::from_secs(5)).map_err(|_| "UI thread didn't run the command within 5s".to_string())?
 }
@@ -252,7 +275,7 @@ pub(crate) fn reset(ctx: &Ctx) -> String {
         ("meters", meters::command(ctx, &["clear".to_string()])),
         ("toast", toast::off()),
         ("tooltips", { tooltip::off(); Ok("off".into()) }),
-        ("alert", alert::off(ctx)),
+        ("alert", alert::tear_down(ctx)),
         ("ripple", ripple::off(ctx).map(|()| "ripple off".into())),
         ("buttonglow", glow::off(ctx)),
         ("backdrop", backdrop::disable(ctx)),
@@ -270,6 +293,7 @@ pub(crate) fn detach() -> Result<String, String> {
     let teardown = run_on_ui(|ctx| {
         let done = reset(ctx);
         meters::drop_spare_bars();
+        stage::drop_spares();
         backdrop::forget();
         done
     });
@@ -296,6 +320,7 @@ impl IObjectWithSite_Impl for Tap_Impl {
             *lock(&self.site) = None;
             return Ok(());
         };
+        log_panics();
         log("attached to Explorer's XAML (SetSite)");
         let service: IVisualTreeService3 = site.cast()?;
         let diag: IXamlDiagnostics = site.cast()?;
@@ -425,5 +450,17 @@ pub(crate) fn themed(c: windows::UI::Color) -> windows::UI::Color {
         windows::UI::Color { R: 0x1C, G: 0x1C, B: 0x1C, ..c }
     } else {
         c
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn a_handler_that_panics_tells_xaml_all_went_well() {
+        assert!(guard(|| panic!("as a handler might")).is_ok(), "the panic stops here");
+        assert!(guard(|| Err(E_FAIL.into())).is_err(), "an error is still the handler's own to give");
+        assert!(guard(|| Ok(())).is_ok());
     }
 }

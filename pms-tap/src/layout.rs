@@ -95,7 +95,7 @@ pub fn ensure_tracking(ctx: &Ctx) -> R<()> {
     }
     // LayoutUpdated fires for any layout pass in the tree, so one subscription is enough.
     let anchor = element(ctx, resolve_elem("TaskbarFrame")?)?;
-    let handler = EventHandler::<IInspectable>::new(|_, _| {
+    let handler = EventHandler::<IInspectable>::new(|_, _| crate::guard(|| {
         // A panic unwinding into XAML would abort explorer.
         let r = std::panic::catch_unwind(|| CTX.get().map(recompute));
         match r {
@@ -104,7 +104,7 @@ pub fn ensure_tracking(ctx: &Ctx) -> R<()> {
             _ => {}
         }
         Ok(())
-    });
+    }));
     let token = anchor.LayoutUpdated(&handler).map_err(|e| e.to_string())?;
     TRACKER.with_borrow_mut(|t| *t = Some(Tracker { anchor, token, elements: HashMap::new() }));
     recompute(ctx)

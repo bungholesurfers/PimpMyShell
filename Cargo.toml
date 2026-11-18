@@ -2,12 +2,12 @@
 resolver = "3"
 # GPL, and a workspace of its own: see its Cargo.toml.
 exclude = ["pms-pimpbox"]
-members = ["pms-recon", "pms-tap", "pms-xaml", "pms-screen", "pms-twatch", "pms", "pms-gui", "pms-art", "pms-res", "pms-ui", "xtask"]
+members = ["pms-recon", "pms-tap", "pms-xaml", "pms-screen", "pms-twatch", "pms", "pms-gui", "pms-art", "pms-res", "pms-ui", "pms-lang", "pms-spawn", "pms-fetch", "xtask"]
 
 # One version for every crate - PimpMyShell's, which each exe and the TAP carry in their version resource, the
 # installer is named for, and the release's tag must match (cargo xtask, release.yml).
 [workspace.package]
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 license = "MIT"
 

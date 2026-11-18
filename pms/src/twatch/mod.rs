@@ -1,6 +1,6 @@
 //! Twatch TV: a `screen` meter with `set = "twatch"`, a flat-screen set that keeps an eye on your favorite Twitch channels and
 //! plays the best one that's live, as live video, or as a picture now and then if that's what you'd rather have. With `more_sets`
-//! it can also bring out one or two more sets while more favorites are live, which go away again afterwards, and a button says
+//! it can also bring out more sets while more favorites are live (three, unless you say), which go away again afterwards, and a button says
 //! when there's a favorite no set can show. Off the mains, or short of memory, it shows pictures in place of video, and goes back
 //! when that's over.
 //!
@@ -35,19 +35,25 @@ use live::{Slot, Watch};
 use player::{Pace, Player, Quality, Said, Tier, Why};
 
 /// The most sets that can come and go, beside the one you put there.
-pub const MOST_MORE_SETS: u32 = 2;
-/// The most sets of all, past which nothing suggests another.
-const MOST_SETS: usize = 6;
+pub const MOST_MORE_SETS: u32 = 9;
+/// The most sets of all, past which nothing suggests another: one of yours, and as many more as can come by themselves.
+const MOST_SETS: usize = 1 + MOST_MORE_SETS as usize;
 /// The buttons beside the sets, which are screens with no meter of their own in the file.
 const MORE_CELL: &str = "Twatch More";
 const AUTO_CELL: &str = "Twatch Auto";
 pub const CELL_SET: &str = "twatch cell";
+/// The keys on the A's remote for more and fewer of the sets that come by themselves.
+const MORE_OR_FEWER: [Button; 2] = [Button::MoreSets, Button::FewerSets];
+/// How long what the A's remote asked for is what it shows, while the settings catch up.
+const WANTED_FOR: Duration = Duration::from_secs(5);
 /// How long the button for another set stays wide enough to say why it's there.
 const ANNOUNCED: Duration = Duration::from_secs(8);
 /// How long before a favorite that went live is news again, if it drops out and comes back.
 const TOLD_AGAIN: Duration = Duration::from_secs(30 * 60);
 /// The highest qualities there are to choose from, lowest first.
 pub const QUALITIES: [&str; 5] = ["360p", "480p", "720p", "720p60", "1080p60"];
+/// The most frames a second a set can be told to show (`frame_rate`): 0 is every one the stream has.
+pub const FRAME_RATES: [&str; 3] = ["0", "30", "15"];
 /// What a set looks at when it has nothing moving.
 const QUIET_FPS: u32 = 10;
 /// How long a set with nobody to show, and nobody touching it, stays on, and for how long before that it says so.
@@ -99,13 +105,16 @@ static NO_STREAMLINK: Mutex<(bool, bool)> = Mutex::new((false, false));
 /// so that losing it again is news.
 const TOLD_NO_STREAMLINK: &str = "streamlink-told.txt";
 /// What's been asked for that only the daemon can do.
-static ASKED: Mutex<Asked> = Mutex::new(Asked { add_set: false, removed: Vec::new(), quality: 0, volume: 0, went_live: Vec::new() });
+static ASKED: Mutex<Asked> = Mutex::new(Asked { add_set: false, more_sets: None, removed: Vec::new(), quality: 0, volume: 0, went_live: Vec::new() });
 
 /// What the sets have asked of the daemon.
 #[derive(Default)]
 pub struct Asked {
     /// One more set, for good.
     pub add_set: bool,
+    /// How many sets may come by themselves, and whether they do, as the A beside the sets and its remote last said. Each click
+    /// there starts from what the one before it asked for, so that clicks quicker than the daemon all count.
+    pub more_sets: Option<(u32, bool)>,
     /// Sets to take off the taskbar, by name, and whether each is one that's always there (as opposed to coming and going).
     pub removed: Vec<(String, bool)>,
     /// How many steps to move the highest quality, up or down.
@@ -175,13 +184,33 @@ fn is_twatch(m: &MeterSpec) -> bool {
 pub fn remove_set(config: &mut Config, name: &str, fixed: bool) {
     if fixed {
         config.meters.retain(|m| !(is_twatch(m) && m.label == name));
-    } else if let Some(t) = config.twatch.as_mut() {
+    } else {
+        // With nothing said about Twatch TV there are still the usual few that come and go: one fewer than that, then.
+        let t = config.twatch.get_or_insert_with(Default::default);
         t.more_sets = t.more_sets.min(MOST_MORE_SETS).saturating_sub(1);
     }
 }
 
-fn more_sets(config: &Config) -> u32 {
-    config.twatch.as_ref().map_or(0, |t| t.more_sets.min(MOST_MORE_SETS))
+/// How many sets may come and go now: what the settings say, or the usual where they say nothing about Twatch TV at all, and none
+/// while that's switched off.
+pub fn more_sets(config: &Config) -> u32 {
+    if more_sets_on(config) { more_sets_kept(config) } else { 0 }
+}
+
+/// How many sets the settings have come and go, whether that's switched on or not.
+fn more_sets_kept(config: &Config) -> u32 {
+    config.twatch.as_ref().map_or_else(|| crate::config::Twatch::default().more_sets, |t| t.more_sets).min(MOST_MORE_SETS)
+}
+
+/// Whether sets come and go at all.
+pub fn more_sets_on(config: &Config) -> bool {
+    config.twatch.as_ref().is_none_or(|t| t.more_sets_on)
+}
+
+/// How many sets may come by themselves, and whether they do, as the A beside the sets says. How many is kept while they're off.
+pub fn set_more_sets(config: &mut Config, how_many: u32, on: bool) {
+    let t = config.twatch.get_or_insert_with(Default::default);
+    (t.more_sets, t.more_sets_on) = (how_many.min(MOST_MORE_SETS), on);
 }
 
 /// The names sets can have that the ones in the file don't, in order.
@@ -270,8 +299,9 @@ struct Setup {
     best: Quality,
     top: String,
     notify: bool,
-    /// How many more sets come by themselves.
+    /// How many more sets come by themselves, and whether they do now: off, none come, and the A beside the sets says so.
     more: u32,
+    more_on: bool,
     /// Sets stay on what they're showing when a higher favorite goes live, until you say otherwise.
     stay: bool,
     /// How often each favorite is looked at, and at most how much longer each wait can be.
@@ -282,6 +312,10 @@ struct Setup {
     metered: bool,
     /// How loud the sets are, 0 to 100.
     volume: u32,
+    /// At most how many frames a second a set shows: 0, every one there is.
+    fps: u32,
+    /// Whether the players are in efficiency mode (pms_spawn's `power`).
+    power: u32,
     /// When a set shows in Windows' media controls.
     media: MediaControls,
     busy: bool,
@@ -380,9 +414,32 @@ fn setup(config: &Config, resting: bool, battery: bool, busy: bool, dark: bool) 
     // Nothing in the file can make it hammer Twitch.
     let check = Duration::from_secs(u64::from(mine.check_seconds.clamp(FASTEST_CHECK, 3600)));
     let check_extra = Duration::from_secs(u64::from(mine.check_extra_seconds.min(3600)));
-    let (pictures, more) = (Pictures::parse(&mine.pictures), more_sets(config));
+    let (pictures, more, more_on) = (Pictures::parse(&mine.pictures), more_sets_kept(config), more_sets_on(config));
     let best = Quality::parse(&mine.top_quality).unwrap_or(Quality::USUAL);
-    Setup { sets, favorites: live::tidy(&mine.favorites), pictures, best, top: mine.top_quality, notify: mine.notify_live, more, stay: mine.higher_favorite == "stay", check, check_extra, battery, metered: false, volume: mine.volume.min(100), media: MediaControls::parse(&mine.media_controls), busy, resting, dark, pressure: Pressure::default() }
+    Setup { sets, favorites: live::tidy(&mine.favorites), pictures, best, top: mine.top_quality, notify: mine.notify_live, more, more_on, stay: mine.higher_favorite == "stay", check, check_extra, battery, metered: false, volume: mine.volume.min(100), fps: if mine.frame_rate == 0 { 0 } else { mine.frame_rate.clamp(5, 60) }, power: crate::efficiency::flags_in(config, crate::efficiency::Part::Twatch), media: MediaControls::parse(&mine.media_controls), busy, resting, dark, pressure: Pressure::default() }
+}
+
+/// What the A beside the sets says in its remote: whether `n` sets come by themselves (`on`), and what selecting it does.
+fn automatic_says(n: u32, on: bool) -> String {
+    use crate::lang::twatch as t;
+    let says = match (on, n == 1) {
+        (true, true) => t::AUTO_ON_ONE.t().to_string(),
+        (true, false) => t::AUTO_ON.with(&[("n", &n)]),
+        (false, true) => t::AUTO_OFF_ONE.t().to_string(),
+        (false, false) => t::AUTO_OFF.with(&[("n", &n)]),
+    };
+    if n == MOST_MORE_SETS { format!("{says}\n{}", t::AUTO_MOST.with(&[("n", &n)])) } else { says }
+}
+
+/// What the A beside the sets tells its remote: what it's for, and (`sets`) how many sets may come by themselves, whether they do,
+/// and the fewest and most it can be set to; then (`sets_words`) what the remote calls those, and on and off.
+fn automatic_info(more: u32, on: bool) -> String {
+    use crate::lang::twatch as t;
+    let clean = |text: &str| text.replace(['\t', '\n', '\r'], " ");
+    let words = [t::AUTO_HOW_MANY.t(), t::AUTO_SWITCH.t(), t::AUTO_YES.t(), t::AUTO_NO.t()].map(clean).join("\t");
+    // What it says is a few short lines: each new one goes as a line separator, which the remote turns back into a new line.
+    let says = automatic_says(more, on).replace('\n', "\u{2028}");
+    format!("how\t{}\nsets\t{more}\t{}\t1\t{MOST_MORE_SETS}\nsets_words\t{words}\n", clean(&says), u8::from(on))
 }
 
 /// What comes back from the slow work.
@@ -437,7 +494,6 @@ struct Set {
     fixed: bool,
     /// Out of sight, for one that comes and goes.
     hidden: bool,
-    feed_name: String,
     on: bool,
     muted: bool,
     /// It stays on what it's showing, whatever else goes live, until that ends.
@@ -454,6 +510,19 @@ struct Set {
     video_off: bool,
     /// How loud its player's been told to be.
     volume_told: Option<u32>,
+    /// At most how many frames a second its player's been told to take.
+    fps_told: Option<u32>,
+    /// Whether its player's been put in efficiency mode, or taken out (pms_spawn's `power`).
+    power_set: Option<u32>,
+    /// Its player's surface, offered to Explorer through the screen (`offer_surface`): the offer's number (0, none). While
+    /// Explorer's showing it (`direct`), the video goes there straight from the player's GPU, and all that's drawn here is what
+    /// goes over it, on nothing, whenever that changes (`over_drawn`).
+    surface_offer: u64,
+    direct: bool,
+    over_drawn: Option<(bool, bool, u32, u32)>,
+    /// What's up is only what goes over the video, see-through elsewhere: with the video gone, that's a hole in the taskbar, so
+    /// it isn't a picture to keep up while dozing.
+    see_through: bool,
     /// Whether its player's been told to be in Windows' media controls.
     media_told: Option<bool>,
     /// It has somebody to play, as video, and there's no Streamlink to do it.
@@ -517,7 +586,7 @@ fn kept(text: &str, name: &str, stay: bool) -> (bool, bool, bool, Option<String>
 }
 
 impl Set {
-    fn new(name: &str, fixed: bool, index: usize, stay: bool) -> Result<Set, String> {
+    fn new(name: &str, fixed: bool, stay: bool) -> Result<Set, String> {
         let screen = Screen::create(name)?;
         let (on, muted, held, only) = kept(&std::fs::read_to_string(state_file()).unwrap_or_default(), name, stay);
         let now = Instant::now();
@@ -528,7 +597,6 @@ impl Set {
             screen,
             fixed,
             hidden: !fixed,
-            feed_name: format!("twatch-{}-{index}", std::process::id()),
             on: on || !fixed,
             muted,
             held,
@@ -536,6 +604,12 @@ impl Set {
             wants_video: false,
             evicted: None,
             volume_told: None,
+            fps_told: None,
+            power_set: None,
+            surface_offer: 0,
+            direct: false,
+            over_drawn: None,
+            see_through: false,
             media_told: None,
             needs_streamlink: false,
             needs_player: false,
@@ -579,10 +653,62 @@ impl Set {
         self.shown = 0;
         self.video_off = false;
         self.volume_told = None;
+        self.fps_told = None;
+        self.power_set = None;
+        self.withdraw_surface();
         self.media_told = None;
         self.still = None;
         self.still_at = None;
         self.drawn = None;
+    }
+
+    /// Takes back the player's surface, if it was offered: Explorer stops showing it, and the picture comes the usual way.
+    fn withdraw_surface(&mut self) {
+        if self.surface_offer != 0 {
+            self.screen.offer_surface(0, 0);
+        }
+        self.surface_offer = 0;
+        self.go_direct(false);
+    }
+
+    /// The player says it has a surface (`handle`, 0 none): Explorer's offered it, through the set's screen.
+    fn offer_surface(&mut self, handle: u64) {
+        let Feed::Playing(player) = &self.feed else { return };
+        if handle == 0 {
+            return self.withdraw_surface();
+        }
+        let pid = player.pid();
+        self.go_direct(false);
+        self.surface_offer = self.screen.offer_surface(pid, handle);
+    }
+
+    /// What Explorer made of the offer, as far as it's said: the video goes straight there while it's showing it, and the usual
+    /// way when it isn't (it couldn't, or it's a new TAP that hasn't taken it up yet).
+    fn follow_surface(&mut self) {
+        if self.surface_offer == 0 {
+            return;
+        }
+        match self.screen.answer(self.surface_offer) {
+            Some(true) => self.go_direct(true),
+            Some(false) => {
+                crate::log(format!("{}: Explorer couldn't show the video straight from the player, so it goes the usual way", self.name));
+                self.surface_offer = 0;
+                self.go_direct(false);
+            }
+            None => self.go_direct(false),
+        }
+    }
+
+    fn go_direct(&mut self, direct: bool) {
+        if self.direct == direct {
+            return;
+        }
+        self.direct = direct;
+        self.over_drawn = None;
+        self.drawn = None;
+        if let Feed::Playing(player) = &mut self.feed {
+            player.tell(&format!("direct {}", u8::from(direct)));
+        }
     }
 
     /// On to `who`.
@@ -704,7 +830,9 @@ impl Set {
             && let Some(screen) = player.screen()
         {
             screen.want(w, h);
-            if let Some(n) = screen.latest(self.shown, w, h, &mut px) {
+            // Straight to Explorer, the frames are only counted here.
+            let n = if self.direct { Some(screen.frames()).filter(|n| *n != self.shown) } else { screen.latest(self.shown, w, h, &mut px) };
+            if let Some(n) = n {
                 // The channel's panel goes up with the first picture, not while there's nothing to see.
                 if self.shown == 0 {
                     self.number = NUMBER;
@@ -714,19 +842,34 @@ impl Set {
                 fresh = true;
             }
         }
+        // What's up stays up until there's a new picture, unless it was only what goes over video that's gone: then the set's
+        // own screen goes up meanwhile (tuning, as it is), not a see-through hole.
         if self.dozing {
-            if !self.has_picture() {
+            if self.has_picture() {
+                self.dozing = false;
+            } else if !self.see_through {
                 self.px = px;
                 return;
             }
-            self.dozing = false;
         }
         let handle = self.showing.clone().unwrap_or_default();
+        let over_video = !booting && matches!(self.feed, Feed::Playing(_)) && self.shown != 0 && self.direct;
         let mut c = Canvas { w: w as usize, h: h as usize, px: &mut px };
         let send = if booting {
             look::boot(&mut c, self.boot, BOOT);
             self.drawn = None;
             true
+        } else if over_video {
+            // Only what goes over the video, on nothing (Explorer shows the video under it), and only when that changes.
+            let over = (self.number > 0, self.lowered(), w, h);
+            if self.over_drawn == Some(over) {
+                false
+            } else {
+                self.over_drawn = Some(over);
+                c.px.fill(0);
+                self.dress(&mut c, &handle);
+                true
+            }
         } else if matches!(self.feed, Feed::Playing(_)) && self.shown != 0 {
             if fresh {
                 self.dress(&mut c, &handle);
@@ -735,8 +878,10 @@ impl Set {
         } else {
             let scene = self.scene(idle);
             // Idle, with nobody to show (not on its way to someone): its little logo goes round, so every frame is new. Left that way,
-            // nobody touching it, it says it's about to go to standby, then does.
-            self.bouncing = matches!(scene, Scene::Standby(word) if word != "TUNING");
+            // nobody touching it, it says it's about to go to standby, then does. Only where it's seen: one that comes and goes, out
+            // of sight with nobody to show, would otherwise go to standby every few minutes, which turns it off, and an off set is
+            // shown (black, then put away) until it's turned on again for not being called for, out of sight, and round it goes.
+            self.bouncing = seen && matches!(scene, Scene::Standby(word) if word != "TUNING");
             let quiet = if self.bouncing { self.quiet_since.get_or_insert_with(Instant::now).elapsed() } else { Duration::ZERO };
             if !self.bouncing {
                 self.quiet_since = None;
@@ -784,6 +929,7 @@ impl Set {
         };
         if send {
             self.screen.publish(w, h, &px);
+            self.see_through = over_video;
         }
         self.px = px;
     }
@@ -798,33 +944,37 @@ impl Set {
         }
     }
 
-    /// The quality line for the remote.
-    fn quality(&self, setup: &Setup) -> String {
+    /// The quality line for the remote, and why the quality's lower than it could be, if it is: the set's light says that too,
+    /// and the remote says it in the light's colour.
+    fn quality(&self, setup: &Setup) -> (String, String) {
+        use crate::lang::twatch as t;
+        let just = |line: String| (line, String::new());
         if setup.battery {
-            return "On battery, so pictures only".into();
+            return just(t::ON_BATTERY.t().into());
         }
         if setup.metered {
-            return "The connection is metered, so pictures only".into();
+            return just(t::METERED.t().into());
         }
         if let Some(why) = self.evicted {
             let short = if why.starts_with('V') { "VRAM" } else { "RAM" };
-            let then = if setup.pictures == Pictures::Always { "It'll stay on pictures" } else { "Video comes back when there's room" };
-            return format!("Evicted, as {short} is low. {then}");
+            let then = if setup.pictures == Pictures::Always { t::EVICTED_STAYS } else { t::EVICTED_BACK };
+            return just(t::EVICTED.with(&[("memory", &short), ("then", &then.t())]));
         }
         if setup.pictures == Pictures::Always {
-            return String::new();
+            return just(String::new());
         }
         if setup.shows(self.wants_video) == Shows::Pictures {
-            return "Click the TwaTV for video".into();
+            return just(t::CLICK_FOR_VIDEO.t().into());
         }
-        let Some(pace) = &self.pace else { return String::new() };
-        let now = pace.playing(self.rate).map_or_else(|| "Live".to_string(), Tier::name);
-        match pace.why {
-            Some(Why::Busy) => format!("{now}, lowered: this PC is busy"),
-            Some(Why::Stalling) => format!("{now}, lowered: the stream keeps stalling"),
-            None if pace.below(self.rate, Instant::now()) => format!("{now}, lowered: the network can't keep up"),
-            None => now,
-        }
+        let Some(pace) = &self.pace else { return just(String::new()) };
+        let now = pace.playing(self.rate).map_or_else(|| t::LIVE.t().to_string(), Tier::name);
+        let why = match pace.why {
+            Some(Why::Busy) => t::LOWERED_BUSY.t(),
+            Some(Why::Stalling) => t::LOWERED_STALLING.t(),
+            None if pace.below(self.rate, Instant::now()) => t::LOWERED_NETWORK.t(),
+            None => "",
+        };
+        (now, why.to_string())
     }
 }
 
@@ -834,8 +984,8 @@ fn look(handle: &str) -> Result<bool, String> {
         return Ok(list.split(',').any(|h| h == handle));
     }
     let url = format!("{PREVIEWS}live_user_{handle}-320x180.jpg");
-    let response = crate::wads::agent(crate::net::Use::Live, Duration::from_secs(10), 0).head(&url).call().map_err(|e| e.to_string())?;
-    match response.status().as_u16() {
+    let got = crate::fetch::fetch(crate::net::Use::Live, crate::fetch::Kind::Head, &url, Duration::from_secs(10), 0, 0)?;
+    match got.status {
         200 => Ok(true),
         301 | 302 | 404 => Ok(false),
         other => Err(format!("{url}: {other}")),
@@ -846,30 +996,31 @@ fn look(handle: &str) -> Result<bool, String> {
 fn still(handle: &str) -> Result<Option<Picture>, String> {
     let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let url = format!("{PREVIEWS}live_user_{handle}-320x180.jpg?t={time}");
-    let response = crate::wads::agent(crate::net::Use::Live, Duration::from_secs(20), 0).get(&url).call().map_err(|e| e.to_string())?;
-    if response.status().as_u16() != 200 {
+    // Fetched and decoded by pms-fetch.exe, away from here: what comes back is plain pixels.
+    let got = crate::fetch::fetch(crate::net::Use::Live, crate::fetch::Kind::Jpeg, &url, Duration::from_secs(20), 0, 4 << 20)?;
+    if got.status != 200 {
         return Ok(None);
     }
-    let bytes = response.into_body().read_to_vec().map_err(|e| e.to_string())?;
-    let mut decoder = jpeg_decoder::Decoder::new(bytes.as_slice());
-    let pixels = decoder.decode().map_err(|e| e.to_string())?;
-    let info = decoder.info().ok_or("no size")?;
-    let rgb = match info.pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => pixels,
-        jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|v| [*v; 3]).collect(),
-        other => return Err(format!("a picture in {other:?}")),
-    };
-    Ok(Some((rgb, info.width as usize, info.height as usize)))
+    if got.width == 0 || got.body.len() != got.width * got.height * 3 {
+        return Err("a picture that isn't the size it says".into());
+    }
+    Ok(Some((got.body, got.width, got.height)))
 }
 
-/// Asks about `handle`, and reads its renditions.
-fn find(handle: &str) -> (Answer, Vec<Tier>) {
+/// Asks about `handle`, and reads its renditions: for the TwaTV `label` says, as a somebody of its own through the proxy (a
+/// net::Session, made for this), which the stream it finds carries on to its player.
+fn find(handle: &str, label: &str) -> (Answer, Vec<Tier>) {
+    let session = crate::net::Session::new(label);
     let asked = match std::env::var("PMS_TWATCH_SOURCE") {
-        Ok(master) => Answer::Live(Stream { master, title: format!("{handle}, from a test stream"), category: "Testing".into() }),
-        Err(_) => streamlink::ask(handle),
+        Ok(master) => Answer::Live(Stream { master, title: format!("{handle}, from a test stream"), category: "Testing".into(), session: Some(session.clone()) }),
+        Err(_) => streamlink::ask(handle, Some(&session)),
     };
     let tiers = match &asked {
-        Answer::Live(stream) => crate::wads::agent(crate::net::Use::Video, Duration::from_secs(15), 3).get(&stream.master).call().ok().and_then(|r| r.into_body().read_to_string().ok()).map_or_else(Vec::new, |text| player::tiers(&text)),
+        Answer::Live(stream) => crate::fetch::fetch_as(crate::net::Use::Video, &session, crate::fetch::Kind::Get, &stream.master, Duration::from_secs(15), 3, 1 << 20)
+            .ok()
+            .filter(|got| got.status == 200)
+            .and_then(|got| String::from_utf8(got.body).ok())
+            .map_or_else(Vec::new, |text| player::tiers(&text)),
         _ => Vec::new(),
     };
     (asked, tiers)
@@ -889,8 +1040,9 @@ struct Running {
     streamlink: Option<(bool, Instant)>,
     /// Whether the player, pms-twatch.exe, is here, as of that look.
     player_here: bool,
-    /// The proxy the video goes through, as players were last started with it.
+    /// The proxy the video goes through, and whether the player's sandboxed, as players were last started.
     video_proxy: Option<String>,
+    video_sandboxed: bool,
     /// When the last look at who's live went out.
     last_look: Option<Instant>,
     streamlink_version: Option<String>,
@@ -906,6 +1058,9 @@ struct Running {
     /// How many favorites are live with no set to show them, and until when the button says so.
     left_out: usize,
     announced_until: Option<Instant>,
+    /// How many sets may come by themselves and whether they do, as the A's remote last asked, and when: shown until the settings
+    /// have it too.
+    more_wanted: Option<(u32, bool, Instant)>,
 }
 
 /// A button beside the sets.
@@ -913,6 +1068,8 @@ struct Cell {
     name: &'static str,
     screen: Screen,
     clicks: u32,
+    /// How many times its remote's keys for more and fewer sets had been pressed (the A's).
+    pressed: [u32; 2],
     /// How many it said, whether it said so in words, the size, and how far it had faded.
     drawn: Option<(usize, bool, u32, u32, u8)>,
     px: Vec<u8>,
@@ -933,7 +1090,7 @@ impl Running {
         }
         for (index, (name, fixed)) in setup.sets.iter().enumerate() {
             if !self.sets.iter().any(|s| s.name == *name) {
-                match Set::new(name, *fixed, index, setup.stay) {
+                match Set::new(name, *fixed, setup.stay) {
                     Ok(set) => self.sets.insert(index.min(self.sets.len()), set),
                     Err(e) => crate::log(format!("Twatch TV `{name}`: {e}")),
                 }
@@ -959,7 +1116,7 @@ impl Running {
         if self.cells.is_empty() {
             for name in [MORE_CELL, AUTO_CELL] {
                 match Screen::create(name) {
-                    Ok(screen) => self.cells.push(Cell { name, clicks: screen.clicks(), screen, drawn: None, px: Vec::new(), small_since: None }),
+                    Ok(screen) => self.cells.push(Cell { name, clicks: screen.clicks(), pressed: MORE_OR_FEWER.map(|b| screen.presses(b)), screen, drawn: None, px: Vec::new(), small_since: None }),
                     Err(e) => crate::log(format!("Twatch TV `{name}`: {e}")),
                 }
             }
@@ -1023,10 +1180,12 @@ impl Running {
                 match asked {
                     Answer::Live(stream) => {
                         let pace = Pace::new(tiers, setup.best, Instant::now());
-                        match Player::start(&stream.master, &s.feed_name, &pace, set, id, events) {
+                        match Player::start(&stream.master, stream.session.as_ref(), &pace, set, id, events) {
                             Ok(mut player) => {
                                 player.tell(&format!("mute {}", u8::from(s.muted)));
                                 player.tell(&format!("volume {}", setup.volume));
+                                player.tell(&format!("fps {}", setup.fps));
+                                s.fps_told = Some(setup.fps);
                                 let who = s.showing.clone().unwrap_or_default();
                                 let what = if stream.title.is_empty() { who } else { format!("{who}: {}", stream.title) };
                                 player.tell(&format!("title {}", what.replace(['\r', '\n'], " ")));
@@ -1097,6 +1256,7 @@ impl Running {
                     Said::Buffering => {}
                     Said::Rate(rate) => s.rate = rate,
                     Said::Note(note) => crate::log(format!("{}: {note}", s.name)),
+                    Said::Surface(handle) => s.offer_surface(handle),
                     Said::Failed(why) => s.trouble(&format!("the player: {why}")),
                     Said::Ended => {
                         let who = s.showing.clone();
@@ -1199,14 +1359,34 @@ impl Running {
                 }
             }
         }
+        let mut automatic = (false, 0);
         for cell in &mut self.cells {
-            if cell.screen.clicks() != cell.clicks {
-                cell.clicks = cell.screen.clicks();
-                if cell.name == MORE_CELL {
+            let clicks = cell.screen.clicks();
+            let switches = clicks.wrapping_sub(cell.clicks);
+            cell.clicks = clicks;
+            if cell.name == MORE_CELL {
+                if switches > 0 {
                     ask(|a| a.add_set = true);
-                } else {
-                    crate::tray::open_settings_on("twatch");
                 }
+                continue;
+            }
+            // The A, and the keys on its remote: every click and press counts, however quickly they come. Two clicks are no switch.
+            let pressed = MORE_OR_FEWER.map(|b| cell.screen.presses(b));
+            let steps = i64::from(pressed[0].wrapping_sub(cell.pressed[0])) - i64::from(pressed[1].wrapping_sub(cell.pressed[1]));
+            cell.pressed = pressed;
+            automatic = (switches % 2 == 1, steps);
+        }
+        if automatic != (false, 0) {
+            let (switch, steps) = automatic;
+            let (more, on) = self.automatic(setup);
+            // One at the fewest: with none the A would go, from under the pointer. None at all is what switching them off is for.
+            let more = if steps == 0 { more } else { (i64::from(more) + steps).clamp(1, i64::from(MOST_MORE_SETS)) as u32 };
+            let wanted = (more, on != switch);
+            if wanted != self.automatic(setup) {
+                self.more_wanted = Some((wanted.0, wanted.1, Instant::now()));
+                ask(|a| a.more_sets = Some(wanted));
+                // Said at once, for the remote that asked.
+                self.tell_cells(setup, Instant::now());
             }
         }
         // One sound at a time.
@@ -1256,10 +1436,17 @@ impl Running {
     /// Once a second: who to look at, who goes where, and how each stream is doing.
     fn think(&mut self, setup: &Setup, now: Instant) {
         // The video's to go another way: what's playing starts again, that way.
+        // Or the player's sandbox was switched on or off: likewise.
         let proxy = crate::net::proxy_for(crate::net::Use::Video);
-        if proxy != self.video_proxy {
-            crate::log(format!("Twatch TV: the video goes {} now", if proxy.is_some() { "through the proxy" } else { "without a proxy" }));
+        let sandboxed = crate::sandbox::wanted(crate::sandbox::Helper::Twatch);
+        if proxy != self.video_proxy || sandboxed != self.video_sandboxed {
+            if proxy != self.video_proxy {
+                crate::log(format!("Twatch TV: the video goes {} now", if proxy.is_some() { "through the proxy" } else { "without a proxy" }));
+            } else {
+                crate::log(format!("Twatch TV: the players start again, {}", if sandboxed { "sandboxed" } else { "out of their sandbox" }));
+            }
             self.video_proxy = proxy;
+            self.video_sandboxed = sandboxed;
             for s in &mut self.sets {
                 if matches!(s.feed, Feed::Playing(_) | Feed::Asking) {
                     s.dozing |= s.has_picture();
@@ -1278,7 +1465,7 @@ impl Running {
             self.look_around(setup, now);
             let live = self.live();
             // A set on standby counts as on: it's to come on again for somebody.
-            let slots: Vec<Slot> = self.sets.iter().map(|s| Slot { on: s.on || s.slept, showing: s.showing.clone(), pinned: s.pinned.clone().or_else(|| s.showing.clone().filter(|_| s.held)), only: s.only.clone() }).collect();
+            let slots: Vec<Slot> = self.sets.iter().map(|s| Slot { fixed: s.fixed, on: s.on || s.slept, showing: s.showing.clone(), pinned: s.pinned.clone().or_else(|| s.showing.clone().filter(|_| s.held)), only: s.only.clone() }).collect();
             let who = live::assign(&slots, &live);
             // A set you've turned off is room already, and it's for you to turn it on again.
             let room_for_more = self.sets.len() < MOST_SETS && self.sets.iter().all(|s| s.on);
@@ -1352,6 +1539,15 @@ impl Running {
                             player.tell(&format!("volume {}", setup.volume));
                             s.volume_told = Some(setup.volume);
                         }
+                        if s.fps_told != Some(setup.fps) {
+                            player.tell(&format!("fps {}", setup.fps));
+                            s.fps_told = Some(setup.fps);
+                        }
+                        // Started as the settings were then: as they are now, from now on.
+                        if s.power_set != Some(setup.power) {
+                            player.power(setup.power);
+                            s.power_set = Some(setup.power);
+                        }
                         let media = setup.media.shows(s.muted);
                         if s.media_told != Some(media) {
                             player.tell(&format!("media {}", u8::from(media)));
@@ -1365,9 +1561,18 @@ impl Running {
         self.tell_cells(setup, now);
     }
 
-    /// Says which buttons there are and what they do.
+    /// How many sets may come by themselves, and whether they do: what the A's remote last asked for, until the settings say so too
+    /// (or a moment's gone by and they still don't: it wasn't saved, or something else changed them), and the settings otherwise.
+    fn automatic(&self, setup: &Setup) -> (u32, bool) {
+        let settings = (setup.more, setup.more_on);
+        self.more_wanted.filter(|(more, on, at)| (*more, *on) != settings && at.elapsed() < WANTED_FOR).map_or(settings, |(more, on, _)| (more, on))
+    }
+
+    /// Says which buttons there are and what they do. The A stays while sets coming by themselves are switched off, as that's
+    /// where they're switched on again.
     fn tell_cells(&mut self, setup: &Setup, now: Instant) {
-        let shown = [(self.left_out > 0).then_some(MORE_CELL), (setup.more > 0 && !setup.resting).then_some(AUTO_CELL)];
+        let (more, more_on) = self.automatic(setup);
+        let shown = [(self.left_out > 0).then_some(MORE_CELL), (more > 0 && !setup.resting).then_some(AUTO_CELL)];
         if let Ok(mut cells) = CELLS.lock() {
             *cells = shown.into_iter().flatten().collect();
         }
@@ -1378,14 +1583,13 @@ impl Running {
         };
         let left_out = left_out.join(", ");
         for cell in &self.cells {
-            let (small, what) = if cell.name == MORE_CELL {
-                let them = if self.left_out == 1 { "more favorite is" } else { "more favorites are" };
-                (!announcing, format!("{} {them} live: {left_out}. Select to add a TwaTV for good", self.left_out))
+            let (small, info) = if cell.name == MORE_CELL {
+                let says = if self.left_out == 1 { crate::lang::twatch::MORE_LIVE_ONE } else { crate::lang::twatch::MORE_LIVE };
+                (!announcing, format!("how\t{}\n", says.with(&[("n", &self.left_out), ("names", &left_out)]).replace(['\t', '\n', '\r'], " ")))
             } else {
-                let them = if setup.more == 1 { "one more TwaTV comes" } else { "more TwaTVs come" };
-                (true, format!("When more favorites go live, {them} by themselves, up to {}. Select to change that", setup.more))
+                (true, automatic_info(more, more_on))
             };
-            cell.screen.set_info(&format!("how\t{what}\n"));
+            cell.screen.set_info(&info);
             cell.screen.set_status(Status { tv_on: true, collapsed: small, modern: true, note: true, ..Status::default() });
         }
     }
@@ -1400,8 +1604,8 @@ impl Running {
     }
 
     /// Draws the buttons, when there's something new to draw.
-    fn draw_cells(&mut self, now: Instant) {
-        let (announcing, left_out) = (self.announcing(now), self.left_out);
+    fn draw_cells(&mut self, setup: &Setup, now: Instant) {
+        let (announcing, left_out, more_on) = (self.announcing(now), self.left_out, self.automatic(setup).1);
         for cell in &mut self.cells {
             let Some((w, h)) = cell.screen.wanted() else { continue };
             let more = cell.name == MORE_CELL;
@@ -1412,7 +1616,8 @@ impl Running {
                 cell.small_since = None;
             }
             let step = (now.duration_since(since).as_secs_f32() / PLUS_FADE.as_secs_f32() * PLUS_FADE_STEPS).min(PLUS_FADE_STEPS) as u8;
-            let key = (if more { left_out } else { 0 }, more && announcing, w, h, step);
+            // For the A, the first is whether it's on.
+            let key = (if more { left_out } else { usize::from(more_on) }, more && announcing, w, h, step);
             if cell.drawn == Some(key) {
                 continue;
             }
@@ -1422,7 +1627,7 @@ impl Running {
             if more {
                 look::more(&mut c, announcing.then_some(left_out), f32::from(step) / PLUS_FADE_STEPS);
             } else {
-                look::automatic(&mut c);
+                look::automatic(&mut c, more_on);
             }
             cell.screen.publish(w, h, &cell.px);
         }
@@ -1439,6 +1644,7 @@ impl Running {
 
     /// Says how things stand, to the remotes and the meters.
     fn tell(&mut self, setup: &Setup) {
+        use crate::lang::twatch as t;
         let list: String = self.watches.iter().map(|w| format!("fav\t{}\t{}\n", w.handle, u8::from(w.live))).collect();
         let (favorites, live) = (setup.favorites.as_slice(), self.live());
         let checked = self.watches.iter().filter_map(|w| w.looked).max().map(|t| t.elapsed().as_secs());
@@ -1461,47 +1667,51 @@ impl Running {
                 gives_way: s.showing.as_deref().and_then(rank) == lowest,
             };
             let plan = live::plan(&standing);
-            let plan = if s.auto_muted && s.muted && s.showing.is_some() { format!("{plan}. Muted, as it changed channel by itself") } else { plan };
+            let plan = if s.auto_muted && s.muted && s.showing.is_some() { t::AUTO_MUTED.with(&[("plan", &plan)]) } else { plan };
             let (title, category) = s.stream.as_ref().map_or((String::new(), String::new()), |t| (t.title.clone(), t.category.clone()));
-            let waiting = s.only.as_ref().filter(|_| s.on && s.showing.is_none()).map(|only| format!("Waiting for {only}"));
+            let waiting = s.only.as_ref().filter(|_| s.on && s.showing.is_none()).map(|only| t::WAITING.with(&[("name", only)]));
+            // Whether it's showing live, which the remote's light says: the words are the language's.
+            let live = matches!(&s.feed, Feed::Playing(_) | Feed::Stills) && s.has_picture() && waiting.is_none() && s.on && !s.needs_streamlink && !s.needs_player;
             let state = match &s.feed {
                 _ if waiting.is_some() => waiting.as_deref().unwrap_or_default(),
-                _ if !s.on && s.slept => "Standby: it comes back on when a favorite goes live",
-                _ if !s.on => "Off",
+                _ if !s.on && s.slept => t::STANDBY.t(),
+                _ if !s.on => t::OFF.t(),
                 // What's missing is said below, with the way to get it.
-                _ if s.needs_streamlink || s.needs_player => "Live, not playing",
-                Feed::Trouble => "No signal",
-                Feed::Asking => "Tuning: asking Streamlink for the stream",
+                _ if s.needs_streamlink || s.needs_player => t::NOT_PLAYING.t(),
+                Feed::Trouble => t::NO_SIGNAL.t(),
+                Feed::Asking => t::ASKING.t(),
                 Feed::Playing(_) | Feed::Stills => {
                     if s.has_picture() {
-                        "Live"
+                        t::LIVE.t()
                     } else {
-                        "Tuning"
+                        t::TUNING.t()
                     }
                 }
-                Feed::Nothing if setup.favorites.is_empty() => "No favorites yet",
-                Feed::Nothing if s.showing.is_some() => "Tuning",
-                Feed::Nothing => "Nobody's live",
+                Feed::Nothing if setup.favorites.is_empty() => t::NO_FAVORITES.t(),
+                Feed::Nothing if s.showing.is_some() => t::TUNING.t(),
+                Feed::Nothing => t::NOBODY_LIVE.t(),
             };
             // Where the picture comes from, while there's one, and what's missing, while video is wanted and can't be had.
             let via = match &s.feed {
-                Feed::Playing(_) if s.has_picture() => format!("Live video through Streamlink {}", self.streamlink_version.as_deref().unwrap_or_default()),
-                Feed::Stills if s.has_picture() => "A new picture every minute, from Twitch's previews".to_string(),
+                Feed::Playing(_) if s.has_picture() => t::VIA_STREAMLINK.with(&[("version", &self.streamlink_version.as_deref().unwrap_or_default())]),
+                Feed::Stills if s.has_picture() => t::VIA_PREVIEWS.t().to_string(),
                 _ => String::new(),
             };
+            let showing = s.showing.as_deref().unwrap_or_default();
             let warn = if s.needs_player {
-                format!("{} is live, but the player, {}, is missing: installing PimpMyShell again puts it back", s.showing.as_deref().unwrap_or_default(), crate::parts::TWATCH)
+                t::NO_PLAYER.with(&[("name", &showing), ("player", &crate::parts::TWATCH)])
             } else if !no_streamlink || setup.favorites.is_empty() || setup.shows(true) != Shows::Video {
                 String::new()
             } else if s.needs_streamlink {
-                format!("{} is live, but live video needs Streamlink, which isn't installed", s.showing.as_deref().unwrap_or_default())
+                t::NO_STREAMLINK_LIVE.with(&[("name", &showing)])
             } else {
-                "Live video needs Streamlink, which isn't installed".to_string()
+                t::NO_STREAMLINK.t().to_string()
             };
             let clean = |t: &str| t.replace(['\t', '\n', '\r'], " ");
-            let now = format!("now\t{}\t{}\t{}\t{}\t{}\n", s.showing.as_deref().or(s.only.as_deref()).unwrap_or(""), clean(&title), clean(&category), s.quality(setup), state);
+            let (quality, lowered) = s.quality(setup);
+            let now = format!("now\t{}\t{}\t{}\t{}\t{}\nlive\t{}\nlow\t{}\n", s.showing.as_deref().or(s.only.as_deref()).unwrap_or(""), clean(&title), clean(&category), clean(&quality), clean(state), u8::from(live), clean(&lowered));
             let seen = checked.map_or(String::new(), |ago| format!("seen\t{ago}\n"));
-            s.screen.set_info(&format!("{now}how\t{plan}\nvia\t{via}\nwarn\t{warn}\ntop\t{}\nvol\t{}%\n{seen}{list}", setup.top, setup.volume));
+            s.screen.set_info(&format!("{now}how\t{}\nvia\t{}\nwarn\t{}\ntop\t{}\nvol\t{}%\n{seen}{list}", clean(&plan), clean(&via), clean(&warn), setup.top, setup.volume));
             // A set's shuffle light is its hold: the one says it'll wander off, and the other that it won't.
             s.screen.set_status(Status { tv_on: s.on, collapsed: s.small && !s.on, modern: true, muted: s.muted, shuffle: !s.follows(), only: s.only.is_some(), ..Status::default() });
         }
@@ -1523,6 +1733,7 @@ impl Running {
     fn draw(&mut self, dt: i64, idle: &'static str) {
         let usual = self.sets.iter().find_map(|s| s.screen.wanted());
         for s in &mut self.sets {
+            s.follow_surface();
             // A set still out of sight has to have its picture ready for when it's shown.
             let seen = s.screen.wanted().is_some() && !s.hidden;
             if let Some(size) = s.screen.wanted().or(usual) {
@@ -1556,7 +1767,8 @@ fn feed(s: &mut Set, index: usize, setup: &Setup, pictures: bool, has_streamlink
             s.feed = Feed::Asking;
             let id = s.id;
             std::thread::spawn(move || {
-                let (asked, tiers) = find(&handle);
+                // Its login's labelled by which TwaTV it is, counted from 1, for the settings to say.
+                let (asked, tiers) = find(&handle, &(index + 1).to_string());
                 let _ = events.send(Event::Found { set: index, id, asked, tiers });
             });
             return;
@@ -1592,7 +1804,7 @@ fn run(stop: &AtomicBool, setup: &Mutex<Option<Setup>>, events: Sender<Event>, i
         }
     });
     let now = Instant::now();
-    let mut group = Running { sets: Vec::new(), watches: Vec::new(), events, looks, streamlink: None, player_here: true, last_look: None, video_proxy: crate::net::proxy_for(crate::net::Use::Video), streamlink_version: None, stay: None, newer: None, looking_for_newer: false, best: None, cells: Vec::new(), left_out: 0, announced_until: None };
+    let mut group = Running { sets: Vec::new(), watches: Vec::new(), events, looks, streamlink: None, player_here: true, last_look: None, video_proxy: crate::net::proxy_for(crate::net::Use::Video), video_sandboxed: crate::sandbox::wanted(crate::sandbox::Helper::Twatch), streamlink_version: None, stay: None, newer: None, looking_for_newer: false, best: None, cells: Vec::new(), left_out: 0, announced_until: None, more_wanted: None };
     let (mut last, mut thought) = (now, now - Duration::from_secs(5));
     while !stop.load(Ordering::Relaxed) {
         let began = Instant::now();
@@ -1611,9 +1823,10 @@ fn run(stop: &AtomicBool, setup: &Mutex<Option<Setup>>, events: Sender<Event>, i
         let idle = group.idle(&setup, began);
         if !setup.resting {
             group.draw(dt, idle);
-            group.draw_cells(began);
+            group.draw_cells(&setup, began);
         }
-        let moving = group.sets.iter().any(|s| matches!(s.feed, Feed::Playing(_)) || (s.on && s.boot > 0)) || group.fading(began);
+        // Video that goes to Explorer straight from its player needs nothing of this but a look now and then.
+        let moving = group.sets.iter().any(|s| matches!(s.feed, Feed::Playing(_)) && !s.direct || (s.on && s.boot > 0)) || group.fading(began);
         // A set going round with its logo, and nothing playing: frames enough for that to glide, and no more.
         let bouncing = group.sets.iter().any(|s| s.bouncing);
         let rate = match (moving, setup.busy) {
@@ -1690,7 +1903,7 @@ mod tests {
 
     #[test]
     fn a_set_back_from_the_dark_keeps_its_picture_until_there_is_a_new_one() {
-        let mut s = Set::new(&format!("twatch-dozing-{}", std::process::id()), true, 0, false).unwrap();
+        let mut s = Set::new(&format!("twatch-dozing-{}", std::process::id()), true, false).unwrap();
         s.showing = Some("crab".into());
         s.feed = Feed::Stills;
         s.still = Some((vec![0; 3], 1, 1));
@@ -1708,8 +1921,42 @@ mod tests {
     }
 
     #[test]
+    fn a_set_whose_video_went_straight_to_explorer_tunes_while_it_dozes_rather_than_leaving_a_hole() {
+        let mut s = Set::new(&format!("twatch-hole-{}", std::process::id()), true, false).unwrap();
+        (s.on, s.boot) = (true, 0);
+        s.showing = Some("crab".into());
+        // What was last up was only what goes over the video, which has gone with its player.
+        s.see_through = true;
+        s.dozing = true;
+        s.draw(16, (2, 2), "NOBODY LIVE", true);
+        assert!(matches!(s.drawn, Some((Scene::Standby("TUNING"), ..))), "its own screen goes up");
+        assert!(s.dozing && !s.see_through, "and stays up, as any picture does, until there's a new one");
+        s.draw(16, (2, 2), "NOBODY LIVE", true);
+        assert!(s.dozing);
+    }
+
+    #[test]
+    fn only_a_set_that_is_seen_goes_to_standby_for_having_nobody_to_show() {
+        let long_ago = || Instant::now().checked_sub(SLEEPS_AFTER + Duration::from_secs(1)).unwrap();
+        // One that came by itself, out of sight with nobody to show: it stays on, however long, and doesn't count the time.
+        let mut auto = Set::new(&format!("twatch-auto-quiet-{}", std::process::id()), false, false).unwrap();
+        (auto.on, auto.boot, auto.quiet_since) = (true, 0, Some(long_ago()));
+        for _ in 0..3 {
+            auto.draw(16, (2, 2), "NOBODY LIVE", false);
+        }
+        assert!(auto.on && !auto.slept && auto.quiet_since.is_none(), "it'd be shown, off, and then turned on again: round it goes");
+        // One that's seen: to standby, as ever.
+        let mut fixed = Set::new(&format!("twatch-fixed-quiet-{}", std::process::id()), true, false).unwrap();
+        (fixed.on, fixed.boot) = (true, 0);
+        fixed.draw(16, (2, 2), "NOBODY LIVE", true);
+        fixed.quiet_since = Some(long_ago());
+        fixed.draw(16, (2, 2), "NOBODY LIVE", true);
+        assert!(!fixed.on && fixed.slept);
+    }
+
+    #[test]
     fn a_set_with_nothing_up_has_no_picture_to_keep() {
-        let mut s = Set::new(&format!("twatch-no-picture-{}", std::process::id()), true, 0, false).unwrap();
+        let mut s = Set::new(&format!("twatch-no-picture-{}", std::process::id()), true, false).unwrap();
         s.feed = Feed::Asking;
         s.doze();
         assert!(matches!(s.feed, Feed::Nothing) && !s.dozing);
@@ -1720,9 +1967,48 @@ mod tests {
     #[test]
     fn more_sets_go_right_after_the_one_thats_there() {
         let labels = |c: Config| c.meters.iter().map(|m| m.label.clone()).collect::<Vec<_>>();
-        assert_eq!(labels(with_more_sets(&config(SET)).unwrap()), ["RAM", "Twatch TV", MORE_CELL, AUTO_CELL, "TV"], "the buttons are always ready");
+        assert_eq!(labels(with_more_sets(&config(&format!("{SET}[twatch]\nmore_sets = 0\n"))).unwrap()), ["RAM", "Twatch TV", MORE_CELL, AUTO_CELL, "TV"], "the buttons are always ready");
         let c = with_more_sets(&config(&format!("{SET}[twatch]\nmore_sets = 2\n"))).unwrap();
         assert_eq!(labels(c), ["RAM", "Twatch TV", "Twatch TV 2", "Twatch TV 3", MORE_CELL, AUTO_CELL, "TV"]);
+    }
+
+    #[test]
+    fn the_a_switches_sets_coming_by_themselves_and_keeps_how_many() {
+        let labels = |c: Config| c.meters.iter().map(|m| m.label.clone()).collect::<Vec<_>>();
+        let mut c = config(&format!("{SET}[twatch]\nmore_sets = 2\n"));
+        set_more_sets(&mut c, 2, false);
+        assert_eq!((more_sets(&c), c.twatch.as_ref().unwrap().more_sets), (0, 2), "off: none come, and the two are kept");
+        assert_eq!(setup(&c, false, false, false, false).sets, [("Twatch TV".to_string(), true)]);
+        assert_eq!(labels(with_more_sets(&c).unwrap()), ["RAM", "Twatch TV", MORE_CELL, AUTO_CELL, "TV"], "the A is still there, to switch them on");
+        let off = setup(&c, false, false, false, false);
+        assert_eq!((off.more, off.more_on), (2, false), "the A shows while there's a number to come back to");
+        set_more_sets(&mut c, 2, true);
+        assert_eq!(more_sets(&c), 2, "on again, as many as before");
+        assert_eq!(labels(with_more_sets(&c).unwrap()), ["RAM", "Twatch TV", "Twatch TV 2", "Twatch TV 3", MORE_CELL, AUTO_CELL, "TV"]);
+        // With nothing said about Twatch TV, it's the usual three that go, and come back.
+        let mut c = config(SET);
+        let kept = more_sets_kept(&c);
+        set_more_sets(&mut c, kept, false);
+        assert_eq!((more_sets(&c), more_sets_kept(&c), more_sets_on(&c)), (0, 3, false));
+        // And the A's remote can't go past the most there can be.
+        set_more_sets(&mut c, 99, true);
+        assert_eq!(more_sets(&c), MOST_MORE_SETS);
+        assert_eq!(config(&format!("{SET}[twatch]\nmore_sets_on = false\n")).twatch.map(|t| (t.more_sets, t.more_sets_on)), Some((3, false)), "and from the file");
+    }
+
+    #[test]
+    fn the_a_says_what_selecting_it_does() {
+        let (on, off) = (automatic_says(4, true), automatic_says(4, false));
+        assert!(on.contains('4') && off.contains('4') && on != off, "how many, either way, and which way it is: {on} / {off}");
+        assert_ne!(automatic_says(1, true), automatic_says(1, false));
+    }
+
+    #[test]
+    fn the_a_tells_its_remote_how_many_and_whether_and_what_to_call_them() {
+        let info = automatic_info(4, false);
+        let fields = |name: &str| info.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix('\t')).map(|v| v.split('\t').count());
+        assert!(info.lines().any(|l| l == format!("sets\t4\t0\t1\t{MOST_MORE_SETS}")), "{info}");
+        assert_eq!((fields("how"), fields("sets_words")), (Some(1), Some(4)), "one text, and four words: {info}");
     }
 
     #[test]
@@ -1751,13 +2037,14 @@ mod tests {
     }
 
     #[test]
-    fn there_are_never_more_than_three() {
-        let c = config(&format!("{SET}[twatch]\nmore_sets = 9\n"));
-        assert_eq!(setup(&c, false, false, false, false).sets.len(), 1, "from the file, too many is none: the usual");
+    fn there_are_never_more_than_nine_more() {
+        assert_eq!(setup(&config(SET), false, false, false, false).sets.len(), 4, "the usual: three more");
+        let c = config(&format!("{SET}[twatch]\nmore_sets = 99\n"));
+        assert_eq!(setup(&c, false, false, false, false).sets.len(), 4, "from the file, too many is the usual");
         let mut c = config(SET);
-        c.twatch.get_or_insert_with(Default::default).more_sets = 9;
-        assert_eq!(setup(&c, false, false, false, false).sets.len(), 3);
-        assert_eq!(setup(&c, false, false, false, false).sets[2], ("Twatch TV 3".to_string(), false));
+        c.twatch.get_or_insert_with(Default::default).more_sets = 99;
+        assert_eq!(setup(&c, false, false, false, false).sets.len(), 10);
+        assert_eq!(setup(&c, false, false, false, false).sets[9], ("Twatch TV 10".to_string(), false));
     }
 
     #[test]
@@ -1795,6 +2082,11 @@ mod tests {
         remove_set(&mut c, "Twatch TV", true);
         assert!(!c.meters.iter().any(is_twatch));
         assert_eq!(c.twatch.as_ref().unwrap().more_sets, 1, "its settings stay");
+        // With no settings for it at all, the usual three come and go: taking one of those away leaves two.
+        let mut c = config(SET);
+        assert_eq!((c.twatch.is_none(), more_sets(&c)), (true, 3));
+        remove_set(&mut c, "Twatch TV 2", false);
+        assert_eq!(more_sets(&c), 2);
     }
 
     #[test]

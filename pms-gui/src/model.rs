@@ -10,9 +10,17 @@ use pms::config::{self, Agg, Config, CounterSpec, Exprs, Max, MeterSpec, Toasts}
 use pms::update::Status;
 
 use crate::copy;
+use pms::lang::settings as s;
 
 /// How long edits settle before they're saved.
 pub const SAVE_AFTER: Duration = Duration::from_millis(500);
+/// And how long once a favorite's been moved. Taking one a few places up or down is a run of steps, and every save is a new
+/// order for the sets to go by: one save for the run, not one for each step.
+pub const ORDER_SETTLES: Duration = Duration::from_secs(3);
+/// What's said while a new order waits to be saved.
+const ORDER_WAITS: s::Id = s::MODEL_ORDER_WAITS;
+/// What marks the row of the settings window that's doing the listing.
+const HERE: s::Id = s::MODEL_HERE;
 /// What the settings window is called, which is how another start of this program finds it.
 pub const WINDOW_TITLE: &str = "PimpMyShell Settings";
 
@@ -70,17 +78,17 @@ pub enum Section {
 impl Section {
     pub fn name(self) -> &'static str {
         match self {
-            Section::Taskbar => "Taskbar",
-            Section::Performance => "Power & performance",
-            Section::Updates => "Software update",
-            Section::Meters => "Meters",
-            Section::Counters => "Performance counters",
-            Section::Backdrop => "Background",
-            Section::StartGlow => "Start button",
-            Section::AppGlow => "App buttons",
-            Section::Twatch => "How it plays",
-            Section::Hotmic => "Hot Mic",
-            Section::Toasts => "Notification Toast",
+            Section::Taskbar => s::SECTION_TASKBAR.t(),
+            Section::Performance => s::SECTION_PERFORMANCE.t(),
+            Section::Updates => s::SECTION_UPDATES.t(),
+            Section::Meters => s::SECTION_METERS.t(),
+            Section::Counters => s::SECTION_COUNTERS.t(),
+            Section::Backdrop => s::SECTION_BACKDROP.t(),
+            Section::StartGlow => s::SECTION_START_GLOW.t(),
+            Section::AppGlow => s::SECTION_APP_GLOW.t(),
+            Section::Twatch => s::SECTION_TWATCH.t(),
+            Section::Hotmic => s::SECTION_HOTMIC.t(),
+            Section::Toasts => s::SECTION_TOASTS.t(),
         }
     }
 }
@@ -115,11 +123,13 @@ pub struct Running {
     pub cpu: Option<f32>,
     /// Its own memory, in bytes.
     pub memory: u64,
-    /// How much of the graphics card it's using, as a percentage, and how many bytes of the card's own memory: none where
-    /// Windows doesn't say.
-    pub gpu: Option<(f32, u64)>,
+    /// How much of the graphics card it's using, which of its engines, and how many bytes of the card's own memory: none
+    /// where Windows doesn't say.
+    pub gpu: Option<pms::procs::GpuUse>,
     /// What it is, where its name doesn't say enough.
     pub about: &'static str,
+    /// The sandbox it's in, as its own token says: None where it can't be asked.
+    pub sandbox: Option<pms::sandbox::Sandbox>,
 }
 
 pub struct Model {
@@ -139,6 +149,8 @@ pub struct Model {
     pub proxy_note: Arc<Mutex<String>>,
     /// What came of trying each use's way out, by its place in `pms::net::USES`.
     pub use_notes: Arc<Mutex<Vec<String>>>,
+    /// Which of those tries didn't work.
+    pub use_failed: Arc<Mutex<Vec<bool>>>,
     pub wad_job: Arc<Mutex<WadJob>>,
     /// Fetching Streamlink.
     pub streamlink_job: Arc<Mutex<WadJob>>,
@@ -148,6 +160,8 @@ pub struct Model {
     /// What's on disk, to notice edits; and when the last edit happened.
     pub saved: String,
     pub edited_at: Option<Instant>,
+    /// How long edits settle before the next save: `SAVE_AFTER`, or `ORDER_SETTLES` once a favorite's been moved.
+    settle: Duration,
     /// The config as it stood at the last look, while it's waiting to be saved: any change starts the wait again, so that it's
     /// after the edits stop, and not during them, that it's saved.
     typed: Option<String>,
@@ -181,8 +195,8 @@ pub struct Model {
     disk: Option<String>,
 }
 
-const SAVES: &str = "Changes save automatically";
-const NOT_SAVING: &str = "Nothing here is saved until your settings file is fixed";
+const SAVES: s::Id = s::MODEL_SAVES;
+const NOT_SAVING: s::Id = s::MODEL_NOT_SAVING;
 
 /// What's on disk now, to tell when that changes: the settings, and the favorites and network settings beside them.
 fn on_disk(path: &std::path::Path) -> Option<String> {
@@ -200,10 +214,13 @@ impl Model {
         }
         let path_read = path.clone();
         let (config, message, problem) = match config::load(&path) {
-            Ok(c) => (c, (SAVES.to_string(), false), None),
-            Err(_) if !path.exists() => (example(), ("You don't have a settings file yet. Your first change creates it".to_string(), false), None),
-            Err(e) => (example(), (NOT_SAVING.to_string(), true), Some(pms::problem::Problem::of(&path, &e))),
+            Ok(c) => (c, (SAVES, false), None),
+            Err(_) if !path.exists() => (example(), (s::MODEL_NO_FILE_YET, false), None),
+            Err(e) => (example(), (NOT_SAVING, true), Some(pms::problem::Problem::of(&path, &e))),
         };
+        // In the language the settings have, from the first thing said.
+        pms::speak(&config.language);
+        let message = (message.0.t().to_string(), message.1);
         let counters = config.counters.iter().map(|(name, spec)| counter_row(name, spec)).collect();
         let mut gui = Model {
             path,
@@ -215,6 +232,7 @@ impl Model {
             proxy_text: String::new(),
             proxy_note: Arc::default(),
             use_notes: Arc::new(Mutex::new(vec![String::new(); pms::net::USES.len()])),
+            use_failed: Arc::new(Mutex::new(vec![false; pms::net::USES.len()])),
             typed: None,
             checked: None,
             wad_job: Arc::default(),
@@ -223,6 +241,7 @@ impl Model {
             counters,
             saved: String::new(),
             edited_at: None,
+            settle: SAVE_AFTER,
             message,
             problem,
             daemon_running: false,
@@ -242,6 +261,7 @@ impl Model {
         // Compare against the config as the editor states it, so opening isn't an edit.
         gui.saved = config::comparable(&gui.current()).unwrap_or_default();
         gui.note_watchlist();
+        gui.speak();
         gui.poll_daemon();
         gui
     }
@@ -264,15 +284,16 @@ impl Model {
         let graphics = self.gpus.as_mut().map(pms::procs::Gpus::look);
         self.cards_in_use = self.gpus.as_ref().and_then(pms::procs::Gpus::in_use);
         let running = |p: &pms::procs::Proc, about: &'static str| Running {
-            name: p.name.clone(),
+            name: if p.pid == std::process::id() { format!("{} {}", p.name, HERE.t()) } else { p.name.clone() },
             depth: p.depth,
             cpu: before.0.iter().find(|(pid, _)| *pid == p.pid).map(|(_, busy)| pms::procs::share(*busy, p.busy, apart)),
             memory: p.private,
             // One that isn't using a card at all is using none of it: which is known, where the counters are.
-            gpu: graphics.as_ref().map(|g| g.get(&p.pid).copied().unwrap_or_default()),
+            gpu: graphics.as_ref().map(|g| g.get(&p.pid).cloned().unwrap_or_default()),
             about,
+            sandbox: pms::sandbox::of_process(p.pid),
         };
-        let theirs: Vec<(pms::procs::Proc, &'static str)> = [pms::procs::shell().map(|p| (p, "")), pms::procs::dwm().map(|p| (p, pms::procs::DWM_IS))].into_iter().flatten().collect();
+        let theirs: Vec<(pms::procs::Proc, &'static str)> = [pms::procs::shell().map(|p| (p, "")), pms::procs::dwm().map(|p| (p, pms::procs::DWM_IS.t()))].into_iter().flatten().collect();
         self.procs = now.iter().map(|p| running(p, "")).collect();
         self.theirs = theirs.iter().map(|(p, about)| running(p, about)).collect();
         self.procs_before = (now.iter().chain(theirs.iter().map(|(p, _)| p)).map(|p| (p.pid, p.busy)).collect(), Instant::now());
@@ -306,7 +327,10 @@ impl Model {
         let config = self.current();
         let Ok(text) = config::comparable(&config) else { return };
         if text == self.saved {
-            (self.edited_at, self.typed) = (None, None);
+            (self.edited_at, self.typed, self.settle) = (None, None, SAVE_AFTER);
+            if self.message.0 == ORDER_WAITS.t() {
+                self.message = (SAVES.t().to_string(), false);
+            }
             return;
         }
         if self.typed.as_ref().is_some_and(|typed| *typed != text) {
@@ -314,14 +338,14 @@ impl Model {
         }
         self.typed = Some(text.clone());
         let at = *self.edited_at.get_or_insert_with(Instant::now);
-        if at.elapsed() < SAVE_AFTER {
+        if at.elapsed() < self.settle {
             return;
         }
-        (self.edited_at, self.typed) = (None, None);
+        (self.edited_at, self.typed, self.settle) = (None, None, SAVE_AFTER);
         // Only what a sampler goes by can be wrong for one, and making one takes a moment.
         if !self.checked.as_ref().is_some_and(|c| pms::meters::same_sampler(c, &config)) {
             if let Err(e) = pms::meters::Sampler::new(&config) {
-                self.message = (format!("Your change wasn't saved: {e}"), true);
+                self.message = (s::MODEL_NOT_SAVED.with(&[("why", &e)]), true);
                 self.saved = text; // don't retry until the next edit
                 return;
             }
@@ -341,16 +365,16 @@ impl Model {
                 self.disk = on_disk(&self.path);
                 // What wasn't a setting isn't in the file any more.
                 self.config.issues.clear();
-                let saved = if self.daemon_running { "Saved" } else { "Saved. Start PimpMyShell to see your changes" };
+                let saved = if self.daemon_running { s::MODEL_SAVED.t() } else { s::MODEL_SAVED_START.t() };
                 self.message = (saved.to_string(), false);
             }
-            Err(e) => self.message = (format!("We couldn't save your settings: {e}"), true),
+            Err(e) => self.message = (s::MODEL_COULDNT_SAVE.with(&[("why", &e)]), true),
         }
     }
 
     /// Saves now, without waiting for edits to settle.
     pub fn save_now(&mut self) {
-        self.edited_at = Some(Instant::now() - SAVE_AFTER);
+        (self.edited_at, self.settle) = (Some(Instant::now() - SAVE_AFTER), SAVE_AFTER);
         self.autosave();
     }
 
@@ -402,10 +426,10 @@ impl Model {
         // Its own files in its own folder, by name: nothing else that might be there, and no folder with anything in it.
         let kept = pms::wads::shaders();
         self.message = match pms::wads::clear_shaders_in(&kept) {
-            Ok(0) => ("There were no compiled shaders to clear".to_string(), false),
-            Ok(_) => ("Compiled shaders cleared".to_string(), false),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ("There were no compiled shaders to clear".to_string(), false),
-            Err(e) => (format!("We couldn't clear {}: {e}", pms::shown(&kept)), true),
+            Ok(0) => (s::MODEL_NO_SHADERS.t().to_string(), false),
+            Ok(_) => (s::MODEL_SHADERS_CLEARED.t().to_string(), false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (s::MODEL_NO_SHADERS.t().to_string(), false),
+            Err(e) => (s::MODEL_COULDNT_CLEAR.with(&[("what", &pms::shown(&kept)), ("why", &e)]), true),
         };
     }
 
@@ -436,6 +460,24 @@ impl Model {
     }
 
     /// Its settings.
+    pub fn sandboxes(&mut self) -> &mut pms::config::Sandboxes {
+        self.config.sandbox.get_or_insert_with(Default::default)
+    }
+
+    /// Which processes are in efficiency mode.
+    pub fn efficiency(&mut self) -> &mut pms::config::Efficiency {
+        self.config.efficiency.get_or_insert_with(Default::default)
+    }
+
+    pub fn demos(&mut self) -> &mut pms::config::Demos {
+        self.config.demos.get_or_insert_with(Default::default)
+    }
+
+    /// Number One's settings, on the TV page.
+    pub fn iss(&mut self) -> &mut pms::config::Iss {
+        self.config.iss.get_or_insert_with(Default::default)
+    }
+
     pub fn twatch(&mut self) -> &mut pms::config::Twatch {
         self.config.twatch.get_or_insert_with(Default::default)
     }
@@ -452,7 +494,7 @@ impl Model {
         let Some(text) = &self.favorites_text else { return };
         let (good, bad) = pms::twatch::live::parse_list(text);
         if !bad.is_empty() {
-            self.favorites_note = format!("Nothing's been saved. These can't be channel names: {}", bad.join(", "));
+            self.favorites_note = s::MODEL_BAD_NAMES.with(&[("names", &bad.join(", "))]);
             return;
         }
         self.twatch().favorites = good;
@@ -465,11 +507,47 @@ impl Model {
         self.favorites_note.clear();
     }
 
+    /// From now on this window says things in the language the settings have.
+    pub fn speak(&self) {
+        pms::speak(&self.config.language);
+    }
+
+    /// Two favorites change places: a step up or down the list.
+    pub fn swap_favorites(&mut self, a: usize, b: usize) {
+        let favorites = &mut self.twatch().favorites;
+        if a != b && a < favorites.len() && b < favorites.len() {
+            favorites.swap(a, b);
+            self.order_changed();
+        }
+    }
+
+    /// The favorites in the order they were dragged into: taken only if it's the same channels, each as often.
+    pub fn reorder_favorites(&mut self, order: Vec<String>) {
+        let favorites = &mut self.twatch().favorites;
+        let sorted = |list: &[String]| {
+            let mut list = list.to_vec();
+            list.sort();
+            list
+        };
+        if *favorites != order && sorted(favorites) == sorted(&order) {
+            *favorites = order;
+            self.order_changed();
+        }
+    }
+
+    /// A favorite's been moved: there may be more moves to come, so saving waits longer than it does for anything else.
+    fn order_changed(&mut self) {
+        self.settle = ORDER_SETTLES;
+        if self.problem.is_none() {
+            self.message = (ORDER_WAITS.t().to_string(), false);
+        }
+    }
+
     /// Adds what's been typed to the end of the favorites, if it can be a channel.
     pub fn add_favorite(&mut self) {
         let (good, bad) = pms::twatch::live::parse_list(&self.new_favorite);
         if !bad.is_empty() {
-            self.favorites_note = format!("That can't be a channel name: {}", bad.join(", "));
+            self.favorites_note = s::MODEL_BAD_NAME.with(&[("names", &bad.join(", "))]);
             return;
         }
         let favorites = &mut self.twatch().favorites;
@@ -493,7 +571,7 @@ impl Model {
             *shared.lock().unwrap() = match pms::streamlink::install(&progress) {
                 Ok(fetched) => {
                     if !fetched {
-                        *note.lock().unwrap() = "That's the newest there is.".into();
+                        *note.lock().unwrap() = s::MODEL_NEWEST.t().into();
                     }
                     WadJob::Idle
                 }
@@ -529,7 +607,7 @@ impl Model {
     pub fn apply_proxy(&mut self) {
         let typed = self.proxy_text.trim().to_string();
         if let Err(e) = (!typed.is_empty()).then(|| pms::net::check(&typed)).transpose() {
-            *self.proxy_note.lock().unwrap() = format!("Not applied: {e}");
+            *self.proxy_note.lock().unwrap() = s::MODEL_NOT_APPLIED.with(&[("why", &e)]);
             return;
         }
         // A proxy that nothing goes through protects nothing: one applied with every switch off switches them all on.
@@ -537,7 +615,7 @@ impl Model {
         self.network().proxy = typed.clone();
         let said = if !typed.is_empty() && none_on {
             self.all_through_proxy(true);
-            "Everything below now goes through it. Switch off whatever shouldn't."
+            s::MODEL_ALL_THROUGH.t()
         } else {
             ""
         };
@@ -547,31 +625,33 @@ impl Model {
 
     /// Whether anything is switched on to go through the proxy.
     pub fn uses_proxy(&self) -> bool {
-        self.config.network.as_ref().is_some_and(|n| n.live_checks || n.streams || n.updates || n.downloads)
+        self.config.network.as_ref().is_some_and(|n| n.live_checks || n.iss || n.streams || n.updates || n.downloads)
     }
 
     /// Tries the proxy that's applied, on a thread of its own: one small request to GitHub, which every update check makes too.
     pub fn test_proxy(&self) {
         let note = self.proxy_note.clone();
         let Some(proxy) = self.config.network.as_ref().map(|n| n.proxy.clone()).filter(|p| !p.is_empty()) else {
-            *note.lock().unwrap() = "There's no proxy to try.".into();
+            *note.lock().unwrap() = s::MODEL_NO_PROXY.t().into();
             return;
         };
-        *note.lock().unwrap() = "Trying...".into();
+        *note.lock().unwrap() = s::MODEL_TRYING.t().into();
+        // Which helpers are sandboxed goes along: following this mustn't take the settings' own pms-fetch out of its sandbox.
+        let sandbox = self.config.sandbox.clone();
         std::thread::spawn(move || {
-            let config = pms::config::parse(&format!("[network]\nproxy = \"{}\"\n", proxy.replace(['"', '\\'], ""))).ok();
+            let config = pms::config::parse(&format!("[network]\nproxy = \"{}\"\n", proxy.replace(['"', '\\'], ""))).ok().map(|c| pms::config::Config { sandbox, ..c });
             let said = match config {
                 Some(config) => {
                     let began = Instant::now();
                     pms::net::follow(&config);
-                    let agent = pms::net::agent(pms::net::Use::Updates, Duration::from_secs(20), 0, "PimpMyShell (proxy test)");
-                    match agent.head(pms::update::STABLE_URL).call() {
-                        Ok(r) if r.status().is_success() => format!("It works: the proxy reached GitHub in {} ms.", began.elapsed().as_millis()),
-                        Ok(r) => format!("The proxy answered, but GitHub said {}.", r.status()),
-                        Err(e) => format!("That didn't work: {e}"),
+                    // By way of pms-fetch.exe, as the real thing goes: in its sandbox, if it has one.
+                    match pms::fetch::fetch(pms::net::Use::Updates, pms::fetch::Kind::Head, pms::update::STABLE_URL, Duration::from_secs(20), 0, 0) {
+                        Ok(got) if (200..300).contains(&got.status) => s::MODEL_PROXY_WORKS.with(&[("ms", &began.elapsed().as_millis())]),
+                        Ok(got) => s::MODEL_PROXY_ANSWERED.with(&[("status", &got.status)]),
+                        Err(e) => s::MODEL_DIDNT_WORK.with(&[("why", &e)]),
                     }
                 }
-                None => "That address can't be used.".into(),
+                None => s::MODEL_BAD_ADDRESS.t().into(),
             };
             *note.lock().unwrap() = said;
         });
@@ -580,18 +660,20 @@ impl Model {
     /// Every use through the proxy, or none.
     pub fn all_through_proxy(&mut self, on: bool) {
         let n = self.network();
-        (n.live_checks, n.streams, n.updates, n.downloads) = (on, on, on, on);
+        (n.live_checks, n.iss, n.streams, n.updates, n.downloads) = (on, on, on, on, on);
     }
 
     /// Tries the way use number `at` goes out, as the settings now have it, on a thread of its own.
     pub fn try_use(&self, at: usize) {
         let Some((what, ..)) = pms::net::USES.get(at).copied() else { return };
         pms::net::follow(&self.config);
-        let notes = self.use_notes.clone();
-        notes.lock().unwrap()[at] = "Trying...".into();
+        let (notes, failed) = (self.use_notes.clone(), self.use_failed.clone());
+        notes.lock().unwrap()[at] = s::MODEL_TRYING.t().into();
+        failed.lock().unwrap()[at] = false;
         std::thread::spawn(move || {
-            let said = pms::net::try_out(what).unwrap_or_else(|e| e);
-            notes.lock().unwrap()[at] = said;
+            let tried = pms::net::try_out(what);
+            failed.lock().unwrap()[at] = tried.is_err();
+            notes.lock().unwrap()[at] = tried.unwrap_or_else(|e| e);
         });
     }
 
@@ -616,15 +698,15 @@ impl Model {
     pub fn start_daemon(&mut self) {
         let exe = std::env::current_exe().map(|p| p.with_file_name("pmsd.exe"));
         self.message = match exe.and_then(|exe| std::process::Command::new(exe).arg(&self.path).spawn()) {
-            Ok(_) => ("Starting PimpMyShell…".into(), false),
-            Err(e) => (format!("We couldn't start PimpMyShell: {e}"), true),
+            Ok(_) => (s::MODEL_STARTING.t().into(), false),
+            Err(e) => (s::MODEL_COULDNT_START.with(&[("why", &e)]), true),
         };
     }
 
     /// Asks the daemon to stop (it puts the stock taskbar back).
     pub fn stop_daemon(&mut self) {
         self.message = match pms::daemon::stop() {
-            Ok(_) => ("Stopping PimpMyShell…".into(), false),
+            Ok(_) => (s::MODEL_STOPPING.t().into(), false),
             Err(e) => (e, true),
         };
     }
@@ -633,8 +715,8 @@ impl Model {
     pub fn set_autostart(&mut self, on: bool) {
         let args = if on { vec!["on".to_string(), self.path.display().to_string()] } else { vec!["off".to_string()] };
         self.message = match pms::daemon::autostart(&args) {
-            Ok(_) if on => ("PimpMyShell will start when you sign in".into(), false),
-            Ok(_) => ("PimpMyShell won't start when you sign in".into(), false),
+            Ok(_) if on => (s::MODEL_WILL_START.t().into(), false),
+            Ok(_) => (s::MODEL_WONT_START.t().into(), false),
             Err(e) => (e, true),
         };
         self.poll_daemon();
@@ -646,28 +728,26 @@ impl Model {
 
     /// The classic (egui) window in this one's place, on the same config: once edits are saved.
     pub fn open_classic(&mut self) {
-        self.edited_at = Some(std::time::Instant::now() - SAVE_AFTER);
-        self.autosave();
+        self.save_now();
         match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--egui").arg(&self.path).spawn()) {
             Ok(_) => std::process::exit(0),
-            Err(e) => self.message = (format!("We couldn't open the classic window: {e}"), true),
+            Err(e) => self.message = (s::MODEL_NO_CLASSIC.with(&[("why", &e)]), true),
         }
     }
 
     /// The new (WinUI 3) window in this one's place, on the same config: once edits are saved.
     pub fn open_new(&mut self) {
-        self.edited_at = Some(std::time::Instant::now() - SAVE_AFTER);
-        self.autosave();
+        self.save_now();
         match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--winui").arg(&self.path).spawn()) {
             Ok(_) => std::process::exit(0),
-            Err(e) => self.message = (format!("We couldn't open the new settings window: {e}"), true),
+            Err(e) => self.message = (s::MODEL_NO_NEW.with(&[("why", &e)]), true),
         }
     }
 
     /// The welcome, again, in a window of its own.
     pub fn open_welcome(&mut self) {
         if let Err(e) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--welcome").arg(&self.path).spawn()) {
-            self.message = (format!("We couldn't open the welcome window: {e}"), true);
+            self.message = (s::MODEL_NO_WELCOME.with(&[("why", &e)]), true);
         }
     }
 
@@ -702,7 +782,7 @@ impl Model {
             Ok(()) => {
                 self.follow_disk();
             }
-            Err(e) => self.message = (format!("That didn't work: {e}"), true),
+            Err(e) => self.message = (s::MODEL_DIDNT_WORK.with(&[("why", &e)]), true),
         }
     }
 
@@ -711,15 +791,15 @@ impl Model {
         match config::reset(&self.path) {
             Ok(()) => {
                 self.follow_disk();
-                self.message = ("Settings are back to their defaults. What they were is kept beside them, in pms.toml.before-reset".to_string(), false);
+                self.message = (s::MODEL_RESET_ALL_DONE.t().to_string(), false);
             }
-            Err(e) => self.message = (format!("That didn't work: {e}"), true),
+            Err(e) => self.message = (s::MODEL_DIDNT_WORK.with(&[("why", &e)]), true),
         }
     }
 
     pub fn restart_explorer(&mut self) {
         self.message = match pms::explorer::ask() {
-            Ok(()) => ("Restarting Explorer. Your taskbar comes back in a few seconds".to_string(), false),
+            Ok(()) => (s::MODEL_RESTARTING_EXPLORER.t().to_string(), false),
             Err(e) => (e, true),
         };
     }
@@ -727,8 +807,8 @@ impl Model {
     /// Says which lines of the watchlist were skipped, unless the favorites are being edited.
     fn note_watchlist(&mut self) {
         if self.favorites_text.is_none() {
-            let bad: Vec<String> = config::watchlist_trouble(&self.path).into_iter().map(|(n, text)| format!("line {n}: {text}")).collect();
-            self.favorites_note = if bad.is_empty() { String::new() } else { format!("Skipped, as they can't be channels: {}", bad.join(", ")) };
+            let bad: Vec<String> = config::watchlist_trouble(&self.path).into_iter().map(|(n, text)| s::MODEL_WATCHLIST_LINE.with(&[("line", &n), ("text", &text)])).collect();
+            self.favorites_note = if bad.is_empty() { String::new() } else { s::MODEL_SKIPPED.with(&[("lines", &bad.join(", "))]) };
         }
     }
 
@@ -815,13 +895,14 @@ impl Model {
             // Twatch TV's pictures are on this page too, without making a Twatch TV section where there isn't one.
             Section::Performance => {
                 (c.max_fps, c.battery_fps, c.rest_for_games, c.rest_when_covered) = (b.max_fps, b.battery_fps, b.rest_for_games, b.rest_when_covered);
+                c.efficiency = b.efficiency;
                 if let Some(t) = c.twatch.as_mut() {
                     let d = b.twatch.unwrap_or_default();
                     (t.pictures, t.metered_pictures) = (d.pictures, d.metered_pictures);
                 }
             }
             // Whether to check at all is consent, not a setting: only its owner changes that.
-            Section::Updates => c.update_channel = b.update_channel,
+            Section::Updates => (c.update_channel, c.update_warn) = (b.update_channel, b.update_warn),
             Section::Meters => c.meters = b.meters,
             Section::Counters => *counters = self.baseline_rows(),
             Section::Backdrop => c.backdrop = b.backdrop,
@@ -873,13 +954,13 @@ impl Model {
         let mut kept = Vec::new();
         match section {
             Section::Updates if c.update_check.is_some() => kept.push(copy::setting("update_check").0),
-            Section::Twatch if c.twatch.as_ref().is_some_and(|t| !t.favorites.is_empty()) => kept.push("Your favorites"),
+            Section::Twatch if c.twatch.as_ref().is_some_and(|t| !t.favorites.is_empty()) => kept.push(s::MODEL_YOUR_FAVORITES.t()),
             Section::Hotmic if c.hotmic.as_ref().is_some_and(|h| !h.ignore.is_empty()) => kept.push(copy::setting("hotmic.ignore").0),
             Section::Toasts => match &c.toasts {
                 Some(t) => {
                     let d = self.baseline.toasts.clone().unwrap_or_default();
                     if !t.enabled {
-                        kept.push("Notifications in the taskbar being off");
+                        kept.push(s::MODEL_TOASTS_OFF.t());
                     }
                     if t.confirm_clicks != d.confirm_clicks {
                         kept.push(copy::setting("toasts.confirm_clicks").0);
@@ -888,7 +969,7 @@ impl Model {
                         kept.push(copy::setting("toasts.ignore").0);
                     }
                 }
-                None => kept.push("Notifications in the taskbar being off"),
+                None => kept.push(s::MODEL_TOASTS_OFF.t()),
             },
             _ => {}
         }
@@ -897,16 +978,14 @@ impl Model {
 
     /// What the confirmation says: what goes, and what stays.
     pub fn warning(&self, section: Section) -> String {
-        let all = format!("Everything else in {} goes back to its default.", section.name());
+        let kept = self.kept(section);
+        let all = if kept.is_empty() { s::MODEL_RESET_EVERYTHING } else { s::MODEL_RESET_EVERYTHING_ELSE }.with(&[("section", &section.name())]);
         let all = match section {
-            Section::Meters => format!("{all} Meters you added are removed, and meters you removed come back."),
-            Section::Counters => format!("{all} Counters you added are removed, and meters that read them may stop working."),
+            Section::Meters => format!("{all} {}", s::MODEL_RESET_METERS.t()),
+            Section::Counters => format!("{all} {}", s::MODEL_RESET_COUNTERS.t()),
             _ => all,
         };
-        match self.kept(section).as_slice() {
-            [] => all.replace("Everything else", "Everything"),
-            kept => format!("This won't change: {}.\n\n{all}", kept.join(", ")),
-        }
+        if kept.is_empty() { all } else { s::MODEL_RESET_KEEPS.with(&[("kept", &kept.join(", ")), ("rest", &all)]) }
     }
 
     /// Puts `section` back as it ships, saves that, and says what it left alone.
@@ -917,8 +996,8 @@ impl Model {
         (self.config, self.counters) = (config, counters);
         self.save_now();
         if !self.message.1 {
-            let done = format!("{} reset", section.name());
-            self.message = (if kept.is_empty() { done } else { format!("{done}. Not changed: {}", kept.join(", ")) }, false);
+            let done = s::MODEL_SECTION_RESET.with(&[("section", &section.name())]);
+            self.message = (if kept.is_empty() { done } else { s::MODEL_NOT_CHANGED.with(&[("done", &done), ("kept", &kept.join(", "))]) }, false);
         }
     }
 
@@ -936,12 +1015,12 @@ impl Model {
             Ok(c) => c,
             Err(e) => {
                 self.problem = Some(pms::problem::Problem::of(&self.path, &e));
-                self.message = (NOT_SAVING.to_string(), true);
+                self.message = (NOT_SAVING.t().to_string(), true);
                 return false;
             }
         };
         if self.problem.take().is_some() {
-            self.message = (SAVES.to_string(), false);
+            self.message = (SAVES.t().to_string(), false);
         }
         self.note_watchlist();
         // Only comments or spacing changed: nothing to take in.
@@ -955,9 +1034,9 @@ impl Model {
         self.saved = config::comparable(&self.current()).unwrap_or_default();
         self.edited_at = None;
         self.message = if unsaved {
-            ("Your settings file changed outside this window, so we loaded it. Make your last change again".to_string(), true)
+            (s::MODEL_CHANGED_OUTSIDE.t().to_string(), true)
         } else {
-            ("Your settings file changed, so we loaded it".to_string(), false)
+            (s::MODEL_CHANGED.t().to_string(), false)
         };
         false
     }
@@ -1109,7 +1188,7 @@ impl Model {
             .iter()
             .map(|e| {
                 let id = config::issue_setting(e);
-                let then = if config::issue_is_unknown(e) { "It's left out." } else { "It's back to its default for now." };
+                let then = if config::issue_is_unknown(e) { s::MODEL_LEFT_OUT.t() } else { s::MODEL_BACK_TO_DEFAULT.t() };
                 let words = format!("{}\n{then}", pms::problem::Problem::of(&self.path, e).words());
                 (id.clone(), config::settings_page(&id), words)
             })
@@ -1258,6 +1337,42 @@ mod tests {
         std::thread::sleep(SAVE_AFTER / 2);
         m.autosave();
         assert!(std::fs::read_to_string(&m.path).unwrap().contains("theme = \"light\""));
+        std::fs::remove_file(&m.path).unwrap();
+    }
+
+    #[test]
+    fn a_favorite_moved_is_saved_once_the_moving_stops_or_the_window_goes() {
+        let mut m = on_file("order");
+        let saved = |m: &Model| std::fs::read_to_string(config::watchlist_path(&m.path)).map(|text| config::read_watchlist(&text).0).unwrap_or_default();
+        m.twatch().favorites = vec!["crab".into(), "lobster".into(), "shrimp".into()];
+        m.save_now();
+        assert_eq!(saved(&m), ["crab", "lobster", "shrimp"]);
+        // A step down, and another: long enough apart for anything else to have been saved between them, and it isn't.
+        m.swap_favorites(0, 1);
+        m.autosave();
+        std::thread::sleep(SAVE_AFTER * 3 / 2);
+        m.autosave();
+        assert_eq!(saved(&m), ["crab", "lobster", "shrimp"], "there may be more moves to come");
+        m.swap_favorites(1, 2);
+        m.autosave();
+        assert_eq!(m.twatch().favorites, ["lobster", "shrimp", "crab"]);
+        // The window closing doesn't lose it.
+        m.save_now();
+        assert_eq!(saved(&m), ["lobster", "shrimp", "crab"]);
+        // What's dragged into place is taken if it's the same channels, and only then; and anything after a save waits no
+        // longer than it ever did.
+        m.reorder_favorites(vec!["crab".into(), "lobster".into()]);
+        m.reorder_favorites(vec!["crab".into(), "lobster".into(), "prawn".into()]);
+        assert_eq!(m.twatch().favorites, ["lobster", "shrimp", "crab"]);
+        m.reorder_favorites(vec!["crab".into(), "lobster".into(), "shrimp".into()]);
+        assert_eq!(m.twatch().favorites, ["crab", "lobster", "shrimp"]);
+        m.save_now();
+        m.twatch().favorites.pop();
+        m.autosave();
+        std::thread::sleep(SAVE_AFTER * 3 / 2);
+        m.autosave();
+        assert_eq!(saved(&m), ["crab", "lobster"]);
+        let _ = std::fs::remove_file(config::watchlist_path(&m.path));
         std::fs::remove_file(&m.path).unwrap();
     }
 

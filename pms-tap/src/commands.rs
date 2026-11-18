@@ -31,6 +31,7 @@ const HELP: &str = r#"commands:
   batch "<cmd>" "<cmd>" ..          run them all in one UI-thread job (one layout pass)
   theme light|dark                  the shell's mode; our ink follows it
   pace <fps>                        frame rate of the long-running animations; 0 = smooth
+  lang <code>                       the language what's on screen says (en_US, en_RN, ...)
   dwm hostbackdrop on|off           the taskbar windows' DWM host backdrop brush
 
   alert broad <#AARRGGBB> [ms] [low] [high]
@@ -129,6 +130,8 @@ fn dispatch(args: &[String]) -> R<String> {
         }
         // pace <fps>: the long-running animations' frame rate (pace.rs).
         "pace" => crate::pace::command(rest),
+        // lang <code>: what's on screen is said in that language (said.rs).
+        "lang" => crate::said::command(rest),
         // theme light|dark: the shell's mode; our ink follows it.
         "theme" => {
             let light = rest.first().map(String::as_str) == Some("light");

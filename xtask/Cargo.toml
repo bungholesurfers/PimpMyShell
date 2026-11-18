@@ -4,3 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
+
+[dependencies]
+# For `cargo xtask lang`: how far along each language is.
+pms-lang = { path = "../pms-lang" }

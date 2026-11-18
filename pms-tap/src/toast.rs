@@ -32,10 +32,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pms_xaml::{
-    Border, ColumnDefinition, CornerRadius, ElementCompositionPreview, FontFamily, FrameworkElement, Grid, GridLength, GridUnitType,
-    HorizontalAlignment, LineStackingStrategy, LoadedImageSurface, Orientation, Pointer, PointerEventHandler, PointerRoutedEventArgs,
-    Rectangle, SolidColorBrush, StackPanel, TappedEventHandler, TextBlock, TextTrimming, Thickness, UIElement, VerticalAlignment, Visibility,
+    Border, ColumnDefinition, CornerRadius, ElementCompositionPreview, FrameworkElement, Grid, GridLength, GridUnitType,
+    HorizontalAlignment, ImageBrush, LineStackingStrategy, Orientation, Pointer, PointerEventHandler, PointerRoutedEventArgs,
+    Rectangle, SolidColorBrush, Stretch, TappedEventHandler, TextBlock, TextTrimming, Thickness, UIElement, VerticalAlignment,
+    Visibility,
 };
+use pms_xaml::BitmapImage;
 use windows::Foundation::{IReference, PropertyValue, TimeSpan, TypedEventHandler};
 use windows::Storage::Streams::IRandomAccessStream;
 use windows::UI::Color;
@@ -44,7 +46,7 @@ use windows::UI::Text::FontWeight;
 use windows::Win32::System::WinRT::{BSOS_DEFAULT, CreateRandomAccessStreamOverStream};
 use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
-use windows_core::{HSTRING, IInspectable, Interface};
+use windows_core::{HSTRING, IInspectable, Interface, Weak};
 use windows_numerics::{Vector2, Vector3};
 
 use crate::commands::{R, resolve_elem};
@@ -56,6 +58,8 @@ use crate::{Ctx, lock};
 const TEXT_W: f32 = 380.0;
 const MIN_W: f32 = 220.0;
 const EDGE_MARGIN: f32 = 8.0;
+/// The most cards there can be in the deck: the daemon keeps to 8 (DECK_MAX), and this is for a card it lost track of.
+const MOST_CARDS: usize = 10;
 const LOGO: f64 = 32.0;
 const BADGE: f64 = 14.0;
 const IMAGE_W: f64 = 64.0;
@@ -138,16 +142,18 @@ struct Ask {
 }
 
 /// A card's way of asking: clicking what has an `Ask` turns its insides into the question and its answers. The daemon
-/// hears `<id> asking`, so that the card stays, and then the answer as an ordinary click, or `close` for no.
+/// hears `<id> asking`, so that the card stays, and then the answer as an ordinary click, or `close` for no. Its elements are held
+/// weakly: the card's handlers hold it, and its panel's buttons' handlers too, and anything they held strongly that holds them
+/// back would keep the card, and all that's in it, for good.
 #[derive(Clone)]
 struct Asker {
     id: u32,
     asks: Arc<Vec<Ask>>,
-    normal: UIElement,
-    panel: UIElement,
-    question: TextBlock,
-    detail: TextBlock,
-    countdown: Rectangle,
+    normal: windows_core::Weak<UIElement>,
+    panel: windows_core::Weak<UIElement>,
+    question: windows_core::Weak<TextBlock>,
+    detail: windows_core::Weak<TextBlock>,
+    countdown: windows_core::Weak<Rectangle>,
     /// What's being asked about.
     pending: Arc<Mutex<Option<String>>>,
     quiet: Arc<AtomicBool>,
@@ -170,11 +176,14 @@ impl Asker {
     }
 
     fn ask(&self, ask: &Ask) -> R<()> {
-        self.question.SetText(&HSTRING::from(&ask.question)).map_err(w)?;
-        self.detail.SetText(&HSTRING::from(&ask.detail)).map_err(w)?;
-        self.normal.SetVisibility(Visibility::Collapsed).map_err(w)?;
-        self.panel.SetVisibility(Visibility::Visible).map_err(w)?;
-        let bar = visual(&ui(&self.countdown)?)?;
+        let gone = || "the card's gone".to_string();
+        let (question, detail) = (self.question.upgrade().ok_or_else(gone)?, self.detail.upgrade().ok_or_else(gone)?);
+        let (normal, panel, countdown) = (self.normal.upgrade().ok_or_else(gone)?, self.panel.upgrade().ok_or_else(gone)?, self.countdown.upgrade().ok_or_else(gone)?);
+        question.SetText(&HSTRING::from(&ask.question)).map_err(w)?;
+        detail.SetText(&HSTRING::from(&ask.detail)).map_err(w)?;
+        normal.SetVisibility(Visibility::Collapsed).map_err(w)?;
+        panel.SetVisibility(Visibility::Visible).map_err(w)?;
+        let bar = visual(&ui(&countdown)?)?;
         let _ = bar.StopAnimation(&HSTRING::from("Scale"));
         bar.SetScale(Vector3 { X: 0.0, Y: 1.0, Z: 1.0 }).map_err(w)?;
         *lock(&self.pending) = Some(ask.what.clone());
@@ -216,6 +225,8 @@ struct Card {
     fill: Color,
     fill_back: Color,
 }
+
+
 
 struct Toast {
     host: Grid,
@@ -426,7 +437,7 @@ fn build_host(ctx: &Ctx) -> R<Toast> {
     let tray: UIElement = element(ctx, tray_h)?.cast().map_err(w)?;
     let parent = crate::layout::grid_above(ctx, tray_h)?;
 
-    let host = Grid::new().map_err(w)?;
+    let host = crate::stage::grid()?;
     host.SetHorizontalAlignment(HorizontalAlignment::Left).map_err(w)?;
     host.SetVerticalAlignment(VerticalAlignment::Stretch).map_err(w)?;
     host.SetIsHitTestVisible(false).map_err(w)?;
@@ -469,31 +480,63 @@ fn tray_parts(ctx: &Ctx, tray: &UIElement) -> (Vec<UIElement>, Option<UIElement>
     }
 }
 
-fn surface(bytes: &[u8]) -> R<LoadedImageSurface> {
+/// A picture for XAML to draw, from the image in `bytes` (a PNG, or anything WIC reads).
+pub(crate) fn bitmap(bytes: &[u8]) -> R<BitmapImage> {
     let stream = unsafe { SHCreateMemStream(Some(bytes)) }.ok_or("SHCreateMemStream failed")?;
     let stream: IRandomAccessStream = unsafe { CreateRandomAccessStreamOverStream(&stream, BSOS_DEFAULT) }.map_err(w)?;
-    LoadedImageSurface::StartLoadFromStream(&stream).map_err(w)
+    let b = BitmapImage::new().map_err(w)?;
+    b.SetSource(&stream).map_err(w)?;
+    Ok(b)
 }
 
 /// Fills `brush` with the picture at `path`, scaled for a `width`×`height`-pixel frame (thumb.rs), on a thread of its
-/// own; the picture shows once it's ready. One WIC can't scale goes in as it is, for the brush to scale.
-fn fill_later(brush: CompositionSurfaceBrush, path: String, width: u32, height: u32, fit: Fit) {
+/// own; the picture shows once it's ready, and the brush is kept for cards that show the same picture (`key`). One WIC can't
+/// scale goes in as it is, for the brush to scale. Meanwhile the brush waits in FILLING (a weak reference to it won't do: its
+/// peer goes as soon as nothing of ours holds it, and the reference with it, though the Border still shows the brush).
+fn fill_later(brush: ImageBrush, path: String, width: u32, height: u32, fit: Fit, key: Option<PictureKey>) {
+    let ticket = NEXT_FILL.replace(NEXT_FILL.get().wrapping_add(1));
+    FILLING.with_borrow_mut(|f| f.push((ticket, brush)));
     std::thread::spawn(move || {
         let scaled = crate::thumb::png(&path, width, height, fit);
         crate::meters::on_ui(move || {
+            let Some(brush) = FILLING.with_borrow_mut(|f| f.iter().position(|(t, _)| *t == ticket).map(|i| f.remove(i).1)) else { return };
             let loaded = scaled
                 .or_else(|e| {
                     crate::log(format!("toast picture: couldn't scale it, so loading it full size: {e}"));
                     std::fs::read(&path).map_err(|e| format!("{path}: {e}"))
                 })
-                .and_then(|bytes| surface(&bytes));
-            // The brush holds the surface from here on.
-            match loaded.and_then(|s| brush.SetSurface(&s).map_err(w)) {
-                Ok(()) => {}
+                .and_then(|bytes| bitmap(&bytes));
+            match loaded.and_then(|b| brush.SetImageSource(&b).map_err(w)) {
+                Ok(()) => {
+                    if let Some(key) = key {
+                        PICTURES.with_borrow_mut(|p| {
+                            if p.len() >= KEPT_PICTURES {
+                                p.remove(0);
+                            }
+                            p.push((key, brush));
+                        });
+                    }
+                }
                 Err(e) => crate::log(format!("toast picture: {e}")),
             }
         });
     });
+}
+
+/// How many pictures made for cards are kept for the next card that shows the same one.
+const KEPT_PICTURES: usize = 32;
+
+/// A picture made for a card: the file (its path, size and time), the pixels it was made for, whether it fills its frame.
+type PictureKey = (String, u64, Option<std::time::SystemTime>, u32, u32, bool);
+
+thread_local! {
+    /// Brushes whose pictures are being made, by ticket (`fill_later`).
+    static FILLING: RefCell<Vec<(u64, ImageBrush)>> = const { RefCell::new(Vec::new()) };
+    static NEXT_FILL: Cell<u64> = const { Cell::new(0) };
+    /// The pictures' brushes for the last few cards, oldest first: the same picture again (an app's icon, card after card) is
+    /// drawn with the same brush. Each picture drawn anew costs the graphics driver a little, for good (NVIDIA's: 184 bytes a
+    /// time, 2026-11-16), and the decoding too.
+    static PICTURES: RefCell<Vec<(PictureKey, ImageBrush)>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Clone, Copy)]
@@ -503,50 +546,43 @@ enum Clip {
     Rounded(f32),
 }
 
-/// A fixed-size element showing an image file, optionally clipped to a circle or rounded rect. `px` is pixels per DIP.
-fn picture(path: &str, width: f64, height: f64, clip: Clip, px: f64) -> R<Grid> {
+/// A fixed-size element showing an image file, optionally clipped to a circle or rounded rect. `px` is pixels per DIP. XAML draws
+/// it, a Border's picture brush, as XAML frees it: a sprite of ours hung on the element, with its brush and surface, stayed in
+/// Explorer for good, Close() or not (2026-11-16, ~12 KB each card with an icon).
+fn picture(path: &str, width: f64, height: f64, clip: Clip, px: f64) -> R<Border> {
     // A file that isn't there leaves its column out (the picture itself comes later).
-    if !std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?.is_file() {
+    let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
         return Err(format!("{path}: not a file"));
     }
-    let g = Grid::new().map_err(w)?;
-    g.SetWidth(width).map_err(w)?;
-    g.SetHeight(height).map_err(w)?;
-    g.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
-    let c = ElementCompositionPreview::GetElementVisual(&g).map_err(w)?.Compositor().map_err(w)?;
-    let b = c.CreateSurfaceBrush().map_err(w)?;
+    let b = Border::new().map_err(w)?;
+    b.SetWidth(width).map_err(w)?;
+    b.SetHeight(height).map_err(w)?;
+    b.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
+    b.SetCornerRadius(radius(match clip {
+        Clip::None => 0.0,
+        Clip::Circle => width.min(height) / 2.0,
+        Clip::Rounded(r) => f64::from(r),
+    }))
+    .map_err(w)?;
     // Thumbnails fill their frame; logos and icons fit inside it.
     let fit = if width != height { Fit::Cover } else { Fit::Contain };
-    b.SetStretch(match fit {
-        Fit::Cover => CompositionStretch::UniformToFill,
-        Fit::Contain => CompositionStretch::Uniform,
-    })
-    .map_err(w)?;
-    fill_later(b.clone(), path.to_owned(), (width * px).round() as u32, (height * px).round() as u32, fit);
-    let sprite = c.CreateSpriteVisual().map_err(w)?;
-    sprite.SetBrush(&b).map_err(w)?;
-    let size = Vector2 { X: width as f32, Y: height as f32 };
-    sprite.SetSize(size).map_err(w)?;
-    let geometry: Option<CompositionGeometry> = match clip {
-        Clip::None => None,
-        Clip::Circle => {
-            let e = c.CreateEllipseGeometry().map_err(w)?;
-            e.SetCenter(Vector2 { X: size.X / 2.0, Y: size.Y / 2.0 }).map_err(w)?;
-            e.SetRadius(Vector2 { X: size.X / 2.0, Y: size.Y / 2.0 }).map_err(w)?;
-            Some(e.cast().map_err(w)?)
-        }
-        Clip::Rounded(r) => {
-            let rr = c.CreateRoundedRectangleGeometry().map_err(w)?;
-            rr.SetSize(size).map_err(w)?;
-            rr.SetCornerRadius(Vector2 { X: r, Y: r }).map_err(w)?;
-            Some(rr.cast().map_err(w)?)
-        }
-    };
-    if let Some(geo) = geometry {
-        sprite.SetClip(&c.CreateGeometricClipWithGeometry(&geo).map_err(w)?).map_err(w)?;
+    let (pw, ph) = ((width * px).round() as u32, (height * px).round() as u32);
+    let key: PictureKey = (path.to_owned(), meta.len(), meta.modified().ok(), pw, ph, matches!(fit, Fit::Cover));
+    if let Some(made) = PICTURES.with_borrow(|p| p.iter().find(|(k, _)| *k == key).map(|(_, brush)| brush.clone())) {
+        b.SetBackground(&made).map_err(w)?;
+        return Ok(b);
     }
-    ElementCompositionPreview::SetElementChildVisual(&g, &sprite).map_err(w)?;
-    Ok(g)
+    let brush = ImageBrush::new().map_err(w)?;
+    brush
+        .SetStretch(match fit {
+            Fit::Cover => Stretch::UniformToFill,
+            Fit::Contain => Stretch::Uniform,
+        })
+        .map_err(w)?;
+    b.SetBackground(&brush).map_err(w)?;
+    fill_later(brush, path.to_owned(), pw, ph, fit, Some(key));
+    Ok(b)
 }
 
 fn text(s: &str, size: f64, line: f64, weight: u16, color: Color) -> R<TextBlock> {
@@ -566,10 +602,10 @@ fn text(s: &str, size: f64, line: f64, weight: u16, color: Color) -> R<TextBlock
 fn on_hover(e: &UIElement, f: impl Fn(bool) + Clone + Send + 'static) -> R<()> {
     for entered in [true, false] {
         let f = f.clone();
-        let h = PointerEventHandler::new(move |_, _| {
+        let h = PointerEventHandler::new(move |_, _| crate::guard(|| {
             f(entered);
             Ok(())
-        });
+        }));
         if entered { e.PointerEntered(&h) } else { e.PointerExited(&h) }.map_err(w)?;
     }
     Ok(())
@@ -590,7 +626,7 @@ fn hoverable(b: &Border, normal: Color, hover: Color) -> R<()> {
 /// Tapped -> queue `<id> <name>` for the daemon; stops the tap from also reaching the card. Not after a drag.
 fn on_tap(e: &UIElement, id: u32, name: &str) -> R<()> {
     let name = name.to_string();
-    e.Tapped(&TappedEventHandler::new(move |_, args| {
+    e.Tapped(&TappedEventHandler::new(move |_, args| crate::guard(|| {
         if let Some(a) = args.as_ref() {
             let _ = a.SetHandled(true);
         }
@@ -598,7 +634,7 @@ fn on_tap(e: &UIElement, id: u32, name: &str) -> R<()> {
             clicked(id, &name);
         }
         Ok(())
-    }))
+    })))
     .map(drop)
     .map_err(w)
 }
@@ -606,7 +642,7 @@ fn on_tap(e: &UIElement, id: u32, name: &str) -> R<()> {
 /// As `on_tap`, for what the card may ask about first.
 fn on_tap_asking(e: &UIElement, asker: &Asker, what: &str) -> R<()> {
     let (asker, what) = (asker.clone(), what.to_string());
-    e.Tapped(&TappedEventHandler::new(move |_, args| {
+    e.Tapped(&TappedEventHandler::new(move |_, args| crate::guard(|| {
         if let Some(a) = args.as_ref() {
             let _ = a.SetHandled(true);
         }
@@ -614,14 +650,14 @@ fn on_tap_asking(e: &UIElement, asker: &Asker, what: &str) -> R<()> {
             asker.tapped(&what);
         }
         Ok(())
-    }))
+    })))
     .map(drop)
     .map_err(w)
 }
 
 /// A tap on `e`, for what isn't a click on the card.
 fn on_press(e: &UIElement, f: impl Fn() + Send + 'static) -> R<()> {
-    e.Tapped(&TappedEventHandler::new(move |_, args| {
+    e.Tapped(&TappedEventHandler::new(move |_, args| crate::guard(|| {
         if let Some(a) = args.as_ref() {
             let _ = a.SetHandled(true);
         }
@@ -629,19 +665,26 @@ fn on_press(e: &UIElement, f: impl Fn() + Send + 'static) -> R<()> {
             f();
         }
         Ok(())
-    }))
+    })))
     .map(drop)
     .map_err(w)
 }
 
 /// What a card turns into to ask: the question and what it's about, *Shut up, computer*, NO and YES. Hidden until then.
-fn ask_panel(id: u32, c: &Content, normal: UIElement, countdown: Rectangle) -> R<(Grid, Asker)> {
-    let panel = Grid::new().map_err(w)?;
+fn ask_panel(id: u32, c: &Content, normal: UIElement, countdown: Rectangle) -> R<(Option<Grid>, Asker)> {
+    // Only a card that asks has one. Built and never put in the tree, with handlers on its buttons, a panel is never freed: XAML
+    // keeps an element whose peer has handlers until it leaves the tree, and this one never entered it (2026-11-16, Explorer's
+    // heap: every card's panel was still there, YES button and all).
+    if c.asks.is_empty() {
+        let none = Asker { id, asks: Arc::default(), normal: Weak::new(), panel: Weak::new(), question: Weak::new(), detail: Weak::new(), countdown: Weak::new(), pending: Arc::default(), quiet: Arc::default() };
+        return Ok((None, none));
+    }
+    let panel = crate::stage::grid()?;
     panel.SetColumnSpacing(10.0).map_err(w)?;
     for star in [true, false, false, false] {
         column(&panel, star)?;
     }
-    let lines = StackPanel::new().map_err(w)?;
+    let lines = crate::stage::stack_panel()?;
     lines.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
     lines.SetMargin(Thickness { Left: 0.0, Top: 0.0, Right: 0.0, Bottom: 3.0 }).map_err(w)?;
     let question = text("", 12.5, 15.0, 600, if c.pimped { GOLD } else { TEXT })?;
@@ -651,25 +694,30 @@ fn ask_panel(id: u32, c: &Content, normal: UIElement, countdown: Rectangle) -> R
     put(&panel, &ui(&lines)?, 0)?;
 
     let quiet = Arc::new(AtomicBool::new(false));
-    let hush = StackPanel::new().map_err(w)?;
+    let hush = crate::stage::stack_panel()?;
     hush.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
-    let label = text("\u{2610} SHUT UP, COMPUTER", 9.5, 12.0, 600, TEXT_DIM)?;
-    let note = text("PIMP HAND!", 9.0, 11.0, 700, PIMP_HAND)?;
+    let hushed = crate::said::t::QUIET.t();
+    let label = text(&format!("\u{2610} {hushed}"), 9.5, 12.0, 600, TEXT_DIM)?;
+    let note = text(crate::said::t::QUIET_NOTE.t(), 9.0, 11.0, 700, PIMP_HAND)?;
     note.SetHorizontalAlignment(HorizontalAlignment::Right).map_err(w)?;
     ui(&note)?.SetOpacity(0.0).map_err(w)?;
     hush.Children().map_err(w)?.Append(&ui(&label)?).map_err(w)?;
     hush.Children().map_err(w)?.Append(&ui(&note)?).map_err(w)?;
-    let (on, shown, tick) = (quiet.clone(), ui(&note)?, label.clone());
+    let (on, shown, tick) = (quiet.clone(), ui(&note)?.downgrade().map_err(w)?, label.downgrade().map_err(w)?);
     let hush_el = ui(&hush)?;
     on_press(&hush_el, move || {
         let now = !on.fetch_xor(true, Ordering::Relaxed);
-        let _ = tick.SetText(&HSTRING::from(if now { "\u{2611} SHUT UP, COMPUTER" } else { "\u{2610} SHUT UP, COMPUTER" }));
-        let _ = shown.SetOpacity(if now { 1.0 } else { 0.0 });
+        if let Some(tick) = tick.upgrade() {
+            let _ = tick.SetText(&HSTRING::from(format!("{} {hushed}", if now { '\u{2611}' } else { '\u{2610}' })));
+        }
+        if let Some(shown) = shown.upgrade() {
+            let _ = shown.SetOpacity(if now { 1.0 } else { 0.0 });
+        }
     })?;
     put(&panel, &hush_el, 1)?;
 
-    let no = button("NO")?;
-    let yes = button("YES")?;
+    let no = button(crate::said::t::NO.t())?;
+    let yes = button(crate::said::t::YES.t())?;
     yes.SetBackground(&brush(if c.pimped { GOLD_RIM } else { PROGRESS })?).map_err(w)?;
     if let Ok(t) = yes.Child().and_then(|t| t.cast::<TextBlock>()) {
         t.SetForeground(&brush(Color { A: 0xFF, R: 0, G: 0, B: 0 })?).map_err(w)?;
@@ -679,12 +727,22 @@ fn ask_panel(id: u32, c: &Content, normal: UIElement, countdown: Rectangle) -> R
     let panel_el = ui(&panel)?;
     panel_el.SetVisibility(Visibility::Collapsed).map_err(w)?;
     let asks = c.asks.iter().map(|a| Ask { what: a.what.clone(), question: a.question.clone(), detail: a.detail.clone() }).collect();
-    let asker = Asker { id, asks: Arc::new(asks), normal, panel: panel_el, question, detail, countdown, pending: Arc::default(), quiet };
+    let asker = Asker {
+        id,
+        asks: Arc::new(asks),
+        normal: normal.downgrade().map_err(w)?,
+        panel: panel_el.downgrade().map_err(w)?,
+        question: question.downgrade().map_err(w)?,
+        detail: detail.downgrade().map_err(w)?,
+        countdown: countdown.downgrade().map_err(w)?,
+        pending: Arc::default(),
+        quiet,
+    };
     let answering = asker.clone();
     on_press(&ui(&no)?, move || answering.answer(false))?;
     let answering = asker.clone();
     on_press(&ui(&yes)?, move || answering.answer(true))?;
-    Ok((panel, asker))
+    Ok((Some(panel), asker))
 }
 
 fn column(g: &Grid, star: bool) -> R<()> {
@@ -740,14 +798,15 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
     let card_el = ui(&card)?;
     // Hover brightens the card, unless it has stepped behind another (the pointer leaves it as one comes on top).
     let behind = Arc::new(AtomicBool::new(false));
-    let (target, back) = (card.clone(), behind.clone());
+    // Weak, as hoverable's: the card holds this handler.
+    let (target, back) = (card.downgrade().map_err(w)?, behind.clone());
     on_hover(&card_el, move |entered| {
         let now = if back.load(Ordering::Relaxed) { fill_back } else if entered { fill_hover } else { fill };
-        if let Ok(b) = brush(now) {
-            let _ = target.SetBackground(&b);
+        if let (Some(card), Ok(b)) = (target.upgrade(), brush(now)) {
+            let _ = card.SetBackground(&b);
         }
     })?;
-    let grid = Grid::new().map_err(w)?;
+    let grid = crate::stage::grid()?;
     grid.SetColumnSpacing(10.0).map_err(w)?;
     let countdown = Rectangle::new().map_err(w)?;
     let (panel, asker) = ask_panel(id, c, ui(&grid)?, countdown.clone())?;
@@ -778,11 +837,11 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
     }
 
     // Column 1: header (badge + app · attribution), title, body.
-    let lines = StackPanel::new().map_err(w)?;
+    let lines = crate::stage::stack_panel()?;
     lines.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
     // Keep the bottom 3 DIPs for the countdown bar.
     lines.SetMargin(Thickness { Left: 0.0, Top: 0.0, Right: 0.0, Bottom: 3.0 }).map_err(w)?;
-    let header = StackPanel::new().map_err(w)?;
+    let header = crate::stage::stack_panel()?;
     header.SetOrientation(Orientation::Horizontal).map_err(w)?;
     header.SetSpacing(5.0).map_err(w)?;
     if let (Some(_), Some(icon)) = (&c.logo, &c.icon)
@@ -817,7 +876,7 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
 
     // Column 3: buttons.
     if !c.buttons.is_empty() {
-        let row = StackPanel::new().map_err(w)?;
+        let row = crate::stage::stack_panel()?;
         row.SetOrientation(Orientation::Horizontal).map_err(w)?;
         row.SetSpacing(6.0).map_err(w)?;
         row.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
@@ -840,7 +899,7 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
     close.SetBackground(&brush(TRANSPARENT)?).map_err(w)?;
     close.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
     let glyph = text("\u{E8BB}", 10.0, 12.0, 400, TEXT_DIM)?;
-    glyph.SetFontFamily(&FontFamily::CreateInstanceWithName(&HSTRING::from("Segoe Fluent Icons, Segoe MDL2 Assets")).map_err(w)?).map_err(w)?;
+    glyph.SetFontFamily(&crate::stage::font("Segoe Fluent Icons, Segoe MDL2 Assets")?).map_err(w)?;
     glyph.SetHorizontalAlignment(HorizontalAlignment::Center).map_err(w)?;
     close.SetChild(&ui(&glyph)?).map_err(w)?;
     hoverable(&close, TRANSPARENT, BUTTON_HOVER)?;
@@ -868,10 +927,10 @@ fn build_card(id: u32, c: &Content, px: f64) -> R<Built> {
     countdown.SetRadiusX(1.0).map_err(w)?;
     countdown.SetRadiusY(1.0).map_err(w)?;
 
-    let outer = Grid::new().map_err(w)?;
+    let outer = crate::stage::grid()?;
     outer.Children().map_err(w)?.Append(&ui(&grid)?).map_err(w)?;
-    if !c.asks.is_empty() {
-        outer.Children().map_err(w)?.Append(&ui(&panel)?).map_err(w)?;
+    if let Some(panel) = &panel {
+        outer.Children().map_err(w)?.Append(&ui(panel)?).map_err(w)?;
     }
     outer.Children().map_err(w)?.Append(&ui(&countdown)?).map_err(w)?;
     card.SetChild(&ui(&outer)?).map_err(w)?;
@@ -886,10 +945,10 @@ fn make_card(id: u32, c: &Content, host: &Grid) -> R<Card> {
     // Pictures are scaled for the pixels they cover.
     let px = host.XamlRoot().and_then(|r| r.RasterizationScale()).unwrap_or(1.0).max(0.5);
     let b = build_card(id, c, px)?;
-    let slot = Grid::new().map_err(w)?;
+    let slot = crate::stage::grid()?;
     let mut glow = None;
     if let Some(color) = b.glow {
-        let g: FrameworkElement = crate::ripple::glow(LOGO, color)?.cast().map_err(w)?;
+        let g: FrameworkElement = crate::ripple::glow(LOGO, color, px)?.cast().map_err(w)?;
         g.SetHorizontalAlignment(HorizontalAlignment::Left).map_err(w)?;
         g.SetVerticalAlignment(VerticalAlignment::Center).map_err(w)?;
         g.SetMargin(Thickness { Left: 8.0, Top: 0.0, Right: 0.0, Bottom: 0.0 }).map_err(w)?;
@@ -935,7 +994,8 @@ fn sheen(card: &UIElement, v: &Visual) -> R<()> {
     for (at, a) in [(0.0, 0x00), (0.5, 0x58), (1.0, 0x00)] {
         stops.Append(&c.CreateColorGradientStopWithOffsetAndColor(at, Color { A: a, R: 0xFF, G: 0xF0, B: 0xC0 }).map_err(w)?).map_err(w)?;
     }
-    let band = c.CreateSpriteVisual().map_err(w)?;
+    // One used before, if there's one: a sprite once on screen is never freed; `unbuild` gives it back as the card goes.
+    let band = crate::stage::sprite(&c)?;
     band.SetBrush(&gradient).map_err(w)?;
     band.SetRelativeSizeAdjustment(Vector2 { X: 0.3, Y: 1.0 }).map_err(w)?;
     let across = c.CreateVector3KeyFrameAnimation().map_err(w)?;
@@ -959,7 +1019,7 @@ fn show(ctx: &Ctx, id: u32, c: Content) -> R<String> {
     let card = make_card(id, &c, &host)?;
     let slot = ui(&card.slot)?;
     let color = card.color;
-    let (was_shown, replaced) = TOAST.with_borrow_mut(|s| -> R<(bool, Option<Card>)> {
+    let (was_shown, replaced, overflow) = TOAST.with_borrow_mut(|s| -> R<(bool, Option<Card>, Vec<Card>)> {
         let t = s.as_mut().ok_or("toast vanished")?;
         if !t.shown {
             // Whether the clock shows is decided as each toast comes (it can be switched on and off meanwhile).
@@ -983,10 +1043,13 @@ fn show(ctx: &Ctx, id: u32, c: Content) -> R<String> {
         let replaced = t.deck.iter().position(|d| d.id == id).map(|i| t.deck.remove(i));
         t.host.Children().map_err(w)?.Append(&slot).map_err(w)?;
         t.deck.push(card);
-        Ok((std::mem::replace(&mut t.shown, true), replaced))
+        // The daemon keeps the deck to DECK_MAX; but a card it gave up on (its `show` timed out, and ran after) is one it never
+        // drops. So the deck has a limit here too, a little above the daemon's: past it, the oldest go.
+        let overflow = t.deck.drain(..t.deck.len().saturating_sub(MOST_CARDS)).collect();
+        Ok((std::mem::replace(&mut t.shown, true), replaced, overflow))
     })?;
-    if let Some(old) = replaced {
-        leave(&old, Exit::Fade)?;
+    for old in replaced.iter().chain(&overflow) {
+        leave(old, Exit::Fade)?;
     }
     // A card coming in on top ends a drag of the one before, which springs back as it steps behind.
     if let Some(d) = DRAG.with_borrow_mut(Option::take).filter(|d| d.moving) {
@@ -1202,11 +1265,11 @@ fn leave(card: &Card, exit: Exit) -> R<()> {
     batch.End().map_err(w)?;
     let slot = card.slot.clone();
     batch
-        .Completed(&TypedEventHandler::<IInspectable, CompositionBatchCompletedEventArgs>::new(move |_, _| {
+        .Completed(&TypedEventHandler::<IInspectable, CompositionBatchCompletedEventArgs>::new(move |_, _| crate::guard(|| {
             let slot = slot.clone();
             crate::meters::on_ui(move || detach(&slot));
             Ok(())
-        }))
+        })))
         .map_err(w)?;
     Ok(())
 }
@@ -1286,7 +1349,7 @@ fn draggable(card: &UIElement, host: &Grid, id: u32) -> R<()> {
         p.Position().ok().map(|p| p.X)
     }
     let h = host.clone();
-    card.PointerPressed(&PointerEventHandler::new(move |_, a| {
+    card.PointerPressed(&PointerEventHandler::new(move |_, a| crate::guard(|| {
         if let (Some(x), Some(pointer)) = (at(&h, a.as_ref()), a.as_ref().and_then(|a| a.Pointer().ok())) {
             DRAGGED.set(false);
             let front = TOAST.with_borrow(|s| s.as_ref().and_then(|t| t.deck.last()).is_some_and(|c| c.id == id));
@@ -1295,10 +1358,10 @@ fn draggable(card: &UIElement, host: &Grid, id: u32) -> R<()> {
             }
         }
         Ok(())
-    }))
+    })))
     .map_err(w)?;
     let (h, el) = (host.clone(), card.downgrade().map_err(w)?);
-    card.PointerMoved(&PointerEventHandler::new(move |_, a| {
+    card.PointerMoved(&PointerEventHandler::new(move |_, a| crate::guard(|| {
         let Some(x) = at(&h, a.as_ref()) else {
             // Let go somewhere we didn't hear of.
             if let Some(d) = DRAG.with_borrow_mut(|d| d.take_if(|d| d.id == id)).filter(|d| d.moving) {
@@ -1332,10 +1395,10 @@ fn draggable(card: &UIElement, host: &Grid, id: u32) -> R<()> {
             let _ = a.SetHandled(true);
         }
         Ok(())
-    }))
+    })))
     .map_err(w)?;
     let el = card.downgrade().map_err(w)?;
-    let up = PointerEventHandler::new(move |_, _| {
+    let up = PointerEventHandler::new(move |_, _| crate::guard(|| {
         let Some(d) = DRAG.with_borrow_mut(|d| d.take_if(|d| d.id == id)) else { return Ok(()) };
         if d.moving {
             if let Some(card) = el.upgrade() {
@@ -1344,7 +1407,7 @@ fn draggable(card: &UIElement, host: &Grid, id: u32) -> R<()> {
             release(d.id, d.tx, speed(&d.samples), true);
         }
         Ok(())
-    });
+    }));
     card.PointerReleased(&up).map_err(w)?;
     card.PointerCanceled(&up).map_err(w)?;
     card.PointerCaptureLost(&up).map_err(w)?;

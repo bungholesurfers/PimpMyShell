@@ -18,7 +18,11 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use rodio::buffer::SamplesBuffer;
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
+use rodio::Player;
+// The device itself only with the `sound` feature: without it there's no device to open (cpal, and the COM it needs, which
+// brings user32 with it, aren't built in).
+#[cfg(feature = "sound")]
+use rodio::{DeviceSinkBuilder, MixerDeviceSink};
 
 pub(crate) use sfx::{decode_doom_sfx, PannedSource};
 
@@ -40,6 +44,7 @@ pub(crate) struct AudioState {
     /// The device-bound sink.  Held only to keep the audio device open for
     /// the lifetime of the engine; the mixer below is what we actually push
     /// samples through.
+    #[cfg(feature = "sound")]
     pub(crate) _device_sink: MixerDeviceSink,
     /// Cloned handle to the device sink's mixer.  Cheap to clone (it is an
     /// `Arc` internally) and shared across all per-channel `Player`s and the
@@ -61,6 +66,12 @@ impl AudioState {
     /// device (e.g. no audio hardware, audio daemon not running).  On success
     /// the eight channel slots are empty (`player == None`) and music
     /// playback is idle.
+    #[cfg(not(feature = "sound"))]
+    pub(crate) fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Err("built without sound (the `sound` feature)".into())
+    }
+
+    #[cfg(feature = "sound")]
     pub(crate) fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let device_sink = DeviceSinkBuilder::open_default_sink()?;
         let mixer = device_sink.mixer().clone();

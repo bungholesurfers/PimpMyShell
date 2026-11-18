@@ -3,7 +3,9 @@
 use eframe::egui::{self, Color32, RichText};
 
 /// A knob, as on an amp: these go to eleven. It turns through 270 degrees, 0 to 11 standing for `min` to `max`,
-/// dragged up or down (or with the wheel); a double click puts it back to 0. Its number shows beside it.
+/// dragged up or down; a double click puts it back to 0. Its number shows beside it. The wheel doesn't turn it: the wheel
+/// scrolls the page it's on, and a knob that turned as the page scrolled past it would change things nobody meant to. What it
+/// says when hovered is the caller's (pms-gui's is in lang/).
 pub fn knob(ui: &mut egui::Ui, value: &mut f32, min: f32, max: f32) -> egui::Response {
     let size = 30.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click_and_drag());
@@ -12,13 +14,6 @@ pub fn knob(ui: &mut egui::Ui, value: &mut f32, min: f32, max: f32) -> egui::Res
     let mut t = before;
     if response.dragged() {
         t = (t - response.drag_delta().y / 160.0 + response.drag_delta().x / 320.0).clamp(0.0, 1.0);
-    }
-    if response.hovered() {
-        // The wheel as it turned, not smoothed: a notch is a step.
-        let scroll: f32 = ui.input(|i| i.raw.events.iter().map(|e| if let egui::Event::MouseWheel { delta, .. } = e { delta.y } else { 0.0 }).sum());
-        if scroll != 0.0 {
-            t = (t + scroll.signum() / 44.0).clamp(0.0, 1.0);
-        }
     }
     if response.double_clicked() {
         t = 0.0;
@@ -45,5 +40,5 @@ pub fn knob(ui: &mut egui::Ui, value: &mut f32, min: f32, max: f32) -> egui::Res
     p.circle_filled(c, r - 4.0, face);
     p.line_segment([at(t, 0.15), at(t, 0.62)], egui::Stroke::new(2.0_f32, Color32::WHITE));
     ui.label(RichText::new(format!("{:.1}", t * 11.0)).monospace());
-    response.on_hover_text("drag up or down, or scroll; double click for 0 - and yes, it goes to eleven")
+    response
 }

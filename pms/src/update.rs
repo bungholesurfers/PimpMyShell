@@ -22,6 +22,8 @@ use crate::{signing, version};
 /// Where the releases live.
 pub const REPO: &str = "bungholesurfers/PimpMyShell";
 /// The latest release's page; the latest channel reads its tag off where this redirects (a HEAD request).
+/// Where the project lives.
+pub const PROJECT_PAGE: &str = "https://github.com/bungholesurfers/PimpMyShell";
 pub const RELEASES_PAGE: &str = "https://github.com/bungholesurfers/PimpMyShell/releases/latest";
 /// What the stable channel reads first: the tag of the version it moves copies to.
 pub const STABLE_URL: &str = "https://raw.githubusercontent.com/bungholesurfers/PimpMyShell/main/update/stable.txt";
@@ -33,7 +35,7 @@ pub const RELEASE_FILES: &str = "https://github.com/bungholesurfers/PimpMyShell/
 /// version newer than the running one does a check go on, to the release's manifest (`<tag>/pms-update.json`, its signature,
 /// then the installer).
 pub fn addresses() -> String {
-    format!("Stable reads {STABLE_URL}\nLatest reads {RELEASES_PAGE}\nNew versions come from {RELEASE_FILES}")
+    crate::lang::update::ADDRESSES.with(&[("stable", &STABLE_URL), ("latest", &RELEASES_PAGE), ("files", &RELEASE_FILES)])
 }
 
 /// The only hosts a request, or a redirect, may go to.
@@ -181,12 +183,16 @@ pub fn next_check() -> u64 {
         return unix_now() + 5;
     }
     let first = unix_now() + random_secs(FIRST);
-    let last = std::fs::read_to_string(pms_tap::data_dir().join(CHECKED)).ok().and_then(|t| t.trim().parse::<u64>().ok());
-    // A time in the future (a clock set back) counts as no time at all.
-    match last.filter(|&t| t <= unix_now()) {
+    match last_worked() {
         Some(t) => first.max(t + random_secs(EVERY)),
         None => first,
     }
+}
+
+/// When a check last worked (unix seconds), if one ever has. A time in the future (a clock set back) counts as no time at all.
+pub fn last_worked() -> Option<u64> {
+    let last = std::fs::read_to_string(pms_tap::data_dir().join(CHECKED)).ok().and_then(|t| t.trim().parse::<u64>().ok());
+    last.filter(|&t| t <= unix_now())
 }
 
 /// Notes that a check worked, now.
@@ -217,7 +223,7 @@ fn download(source: &Source, tag: &str, m: &signing::Manifest, progress: &dyn Fn
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let part = dir.join(format!("{}.part", m.installer));
     let path = dir.join(&m.installer);
-    let mut reader = source.open(&release_url(tag, &m.installer), m.size)?;
+    let mut reader = source.open(&release_url(tag, &m.installer), m.size, progress)?;
     let mut file = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
     let mut hash = Sha256::new();
     let (mut done, mut buf) = (0u64, vec![0u8; 64 * 1024]);
@@ -314,9 +320,9 @@ pub fn install(path: &Path, version: &str, sha256: &str, settings_open: bool) ->
     started
 }
 
-/// Where the files come from: GitHub, or a folder (PMS_UPDATE_SOURCE).
+/// Where the files come from: GitHub, by way of pms-fetch.exe (fetch.rs), or a folder (PMS_UPDATE_SOURCE).
 enum Source {
-    Web(ureq::Agent),
+    Web,
     Folder(PathBuf),
 }
 
@@ -324,27 +330,27 @@ impl Source {
     fn new() -> Self {
         match std::env::var_os("PMS_UPDATE_SOURCE") {
             Some(dir) => Source::Folder(PathBuf::from(dir)),
-            None => Source::Web(agent()),
+            None => Source::Web,
         }
     }
 
     fn fetch(&self, url: &str, limit: u64) -> Result<Vec<u8>, String> {
         use std::io::Read;
         let mut out = Vec::new();
-        self.open(url, limit)?.read_to_end(&mut out).map_err(|e| format!("reading {}: {e}", host(url)))?;
+        self.open(url, limit, &|_, _| {})?.read_to_end(&mut out).map_err(|e| format!("reading {}: {e}", host(url)))?;
         Ok(out)
     }
 
     fn latest(&self) -> Result<String, String> {
         match self {
-            Source::Web(agent) => latest_tag(agent),
+            Source::Web => latest_tag(),
             Source::Folder(_) => String::from_utf8(self.fetch("latest.txt", MAX_TAG)?).map_err(|_| "latest.txt is not text".into()),
         }
     }
 
-    fn open(&self, url: &str, limit: u64) -> Result<Box<dyn std::io::Read + Send>, String> {
+    fn open(&self, url: &str, limit: u64, progress: &dyn Fn(u64, u64)) -> Result<Box<dyn std::io::Read + Send>, String> {
         match self {
-            Source::Web(agent) => get(agent, url, limit),
+            Source::Web => get(url, limit, progress).map(|bytes| Box::new(std::io::Cursor::new(bytes)) as Box<dyn std::io::Read + Send>),
             Source::Folder(dir) => {
                 use std::io::Read;
                 let path = dir.join(url.rsplit('/').next().unwrap_or_default());
@@ -372,44 +378,38 @@ pub fn allowed(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Redirects are followed by hand (`get`), each one checked.
-fn agent() -> ureq::Agent {
-    crate::net::agent(crate::net::Use::Updates, std::time::Duration::from_secs(600), 0, &format!("PimpMyShell/{} (update check)", version::CURRENT))
+/// Where a redirect from `url` to `location` goes.
+fn redirected(url: &str, location: &[u8]) -> Result<String, String> {
+    let location = std::str::from_utf8(location).ok().filter(|l| !l.is_empty()).ok_or(format!("{} redirected nowhere", host(url)))?;
+    Ok(if location.starts_with('/') { format!("https://{}{location}", host(url)) } else { location.to_string() })
 }
 
-/// GET `url`, following up to five redirects by hand, each checked by `allowed`.
-fn get(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Box<dyn std::io::Read + Send>, String> {
+/// GET `url`, by way of pms-fetch.exe, following up to five redirects by hand, each checked by `allowed`. At most `limit` bytes.
+fn get(url: &str, limit: u64, progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>, String> {
     let mut url = url.to_string();
     for _ in 0..=5 {
         allowed(&url)?;
-        let response = agent.get(&url).call().map_err(|e| format!("{}: {e}", host(&url)))?;
-        let status = response.status().as_u16();
-        if (300..400).contains(&status) {
-            let location = response.headers().get("location").and_then(|l| l.to_str().ok()).ok_or(format!("{} redirected nowhere", host(&url)))?;
-            url = if location.starts_with('/') { format!("https://{}{location}", host(&url)) } else { location.to_string() };
+        let got = crate::fetch::download(crate::net::Use::Updates, &url, limit, 0, progress).map_err(|e| format!("{}: {e}", host(&url)))?;
+        if (300..400).contains(&got.status) {
+            url = redirected(&url, &got.body)?;
             continue;
         }
-        if status != 200 {
-            return Err(format!("{} answered {status}", host(&url)));
+        if got.status != 200 {
+            return Err(format!("{} answered {}", host(&url), got.status));
         }
-        if response.headers().get("content-length").and_then(|l| l.to_str().ok()).and_then(|l| l.parse::<u64>().ok()).is_some_and(|n| n > limit) {
-            return Err(format!("{} sent more than expected", host(&url)));
-        }
-        return Ok(Box::new(response.into_body().into_with_config().limit(limit.saturating_add(1)).reader()));
+        return Ok(got.body);
     }
     Err("too many redirects".into())
 }
 
-/// The newest release's tag, from where GitHub's latest-release link redirects (a HEAD request).
-fn latest_tag(agent: &ureq::Agent) -> Result<String, String> {
+/// The newest release's tag, from where GitHub's latest-release link redirects (a HEAD request, by way of pms-fetch.exe).
+fn latest_tag() -> Result<String, String> {
     allowed(RELEASES_PAGE)?;
-    let response = agent.head(RELEASES_PAGE).call().map_err(|e| format!("{}: {e}", host(RELEASES_PAGE)))?;
-    let status = response.status().as_u16();
-    if !(300..400).contains(&status) {
-        return Err(format!("{} answered {status} for the latest release", host(RELEASES_PAGE)));
+    let got = crate::fetch::fetch(crate::net::Use::Updates, crate::fetch::Kind::Head, RELEASES_PAGE, std::time::Duration::from_secs(60), 0, 0).map_err(|e| format!("{}: {e}", host(RELEASES_PAGE)))?;
+    if !(300..400).contains(&got.status) {
+        return Err(format!("{} answered {} for the latest release", host(RELEASES_PAGE), got.status));
     }
-    let location = response.headers().get("location").and_then(|l| l.to_str().ok()).ok_or("github.com named no latest release")?;
-    latest_from(location)
+    latest_from(&redirected(RELEASES_PAGE, &got.body)?)
 }
 
 fn latest_from(location: &str) -> Result<String, String> {

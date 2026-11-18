@@ -103,6 +103,9 @@ pub struct Incoming {
     pub long: bool,
     /// A kind Windows keeps on screen until it's answered (see `stays`): no time limit.
     pub sticky: bool,
+    /// How many more came from the same app while this waited, which this card stands for (they stay in the notification
+    /// center): a flood of them is a few cards, not one each.
+    pub more: u32,
     /// Packaged apps resolve ms-appx/ms-appdata URIs and activators through their package.
     package: Option<Package>,
 }
@@ -132,8 +135,15 @@ impl Incoming {
             progress: None,
             long: true,
             sticky: false,
+            more: 0,
             package: None,
         }
+    }
+
+    /// A notification from `aumid`, for tests: nothing on it but that.
+    #[cfg(test)]
+    pub fn test(id: u32, aumid: &str) -> Incoming {
+        Incoming { aumid: aumid.into(), app: aumid.into(), long: false, logo: None, ..Incoming::own(id, "", "", None) }
     }
 
     /// `toast show` arguments for the TAP.
@@ -141,11 +151,17 @@ impl Incoming {
     pub fn command(&self, ms: u32, pimped: bool, asks: &[String]) -> String {
         let q = crate::quote;
         let path = |p: &Option<PathBuf>| p.as_ref().map_or(String::new(), |p| p.display().to_string());
+        // The ones it stands for are said where the app's own small print goes, after it.
+        let attribution = match (self.more, self.attribution.is_empty()) {
+            (0, _) => self.attribution.clone(),
+            (more, true) => crate::lang::toasts::MORE.with(&[("n", &more)]),
+            (more, false) => format!("{} \u{b7} {}", self.attribution, crate::lang::toasts::MORE.with(&[("n", &more)])),
+        };
         let mut fields = vec![
             format!("id={}", self.id),
             format!("ms={ms}"),
             format!("app={}", self.app),
-            format!("attribution={}", self.attribution),
+            format!("attribution={attribution}"),
             format!("title={}", self.title),
             format!("body={}", self.body),
             format!("icon={}", path(&self.icon)),
@@ -233,7 +249,8 @@ impl Listener {
         }
         let mut now = self.current()?;
         (self.mark, self.asked) = (mark, Some(std::time::Instant::now()));
-        now.sort_by_key(|n| n.Id().unwrap_or(0));
+        // Each id asked for once: with a thousand notifications, asking for each one's over and over as they're compared adds up.
+        now.sort_by_cached_key(|n| n.Id().unwrap_or(0));
         let mut out = Vec::new();
         let mut ids = HashSet::new();
         for n in now {
@@ -245,6 +262,12 @@ impl Listener {
         }
         self.seen = ids;
         Ok(out)
+    }
+
+    /// How many notifications the notification center held when it was last looked at: each ask of the listener costs Windows
+    /// more the more there are (see `mark`), so the daemon asks less often then.
+    pub fn held(&self) -> usize {
+        self.mark.map_or(self.seen.len(), |m| usize::try_from(m.1).unwrap_or(0))
     }
 
     /// Whether notification `id` was still there at the last poll (an app takes back a call that ended).
@@ -289,6 +312,7 @@ impl Listener {
             progress: None,
             long: false,
             sticky: false,
+            more: 0,
             package,
         };
         if let Err(err) = payload(id).and_then(|(xml, data)| t.read_payload(&xml, &data)) {
@@ -607,6 +631,8 @@ pub struct Plan {
     /// The line under the question: what this is about.
     pub about: String,
     pub rows: Vec<(String, String)>,
+    /// The program a link opens in, for the one line a card has room for.
+    pub opens_in: Option<String>,
 }
 
 /// Launch arguments for reading. Apps often pack them as `key`, `value` on lines of their own (Firefox does): those
@@ -623,10 +649,9 @@ fn readable(args: &str) -> String {
 impl Plan {
     /// The one line a card has room for: what it opens, and the program by its file name.
     fn line(&self) -> String {
-        let mut rows = self.rows.iter();
-        let first = rows.next().map_or("", |(_, v)| v.as_str());
-        match rows.find(|(label, _)| label == "Opens in") {
-            Some((_, exe)) => format!("{first} · {}", exe.rsplit('\\').next().unwrap_or(exe)),
+        let first = self.rows.first().map_or("", |(_, v)| v.as_str());
+        match &self.opens_in {
+            Some(exe) => format!("{first} · {}", exe.rsplit('\\').next().unwrap_or(exe)),
             None => first.to_string(),
         }
     }
@@ -644,33 +669,35 @@ impl Incoming {
 
 /// None: it has nothing to ask about (a dismiss).
 pub fn plan(t: &Incoming, args: &str, kind: Activation) -> Option<Plan> {
-    let row = |label: &str, value: String| (label.to_string(), value);
-    let arguments = || Some(args).filter(|a| !a.is_empty()).map(|a| row("Arguments", readable(a)));
-    let open_app = format!("Open {}?", t.app);
-    let from = format!("From {}", t.app);
+    use crate::lang::toasts as says;
+    let row = |label: says::Id, value: String| (label.t().to_string(), value);
+    let arguments = || Some(args).filter(|a| !a.is_empty()).map(|a| row(says::ARGUMENTS, readable(a)));
+    let open_app = says::OPEN_APP.with(&[("app", &t.app)]);
+    let from = says::FROM.with(&[("app", &t.app)]);
     // The question names the app, so what's left to say is which notification this is.
     let about = if t.title.is_empty() || t.title == t.app { from.clone() } else { t.title.clone() };
     match kind {
         Activation::Dismiss => None,
         Activation::Protocol => {
-            let mut rows = vec![row("Link", args.to_string())];
-            rows.extend(handler(args).map(|exe| row("Opens in", exe)));
-            Some(Plan { question: "Open this link?".into(), about: from, rows })
+            let opens_in = handler(args);
+            let mut rows = vec![row(says::LINK, args.to_string())];
+            rows.extend(opens_in.clone().map(|exe| row(says::OPENS_IN, exe)));
+            Some(Plan { question: says::OPEN_LINK.t().into(), about: from, rows, opens_in })
         }
         Activation::App => {
             let mut rows = Vec::new();
             if let Some(clsid) = activator(t) {
-                rows.extend(server(&clsid).map(|exe| row("Program", exe)));
-                rows.push(row("Notification activator", format!("{{{clsid:?}}}")));
+                rows.extend(server(&clsid).map(|exe| row(says::PROGRAM, exe)));
+                rows.push(row(says::ACTIVATOR, format!("{{{clsid:?}}}")));
                 rows.extend(arguments());
             } else if let Some(p) = &t.package {
-                rows.push(row("App", t.aumid.clone()));
-                rows.push(row("Installed in", p.installed.display().to_string()));
+                rows.push(row(says::APP, t.aumid.clone()));
+                rows.push(row(says::INSTALLED_IN, p.installed.display().to_string()));
                 rows.extend(arguments());
             } else {
-                rows.push(row("Program", target(&t.aumid).unwrap_or_else(|| format!(r"shell:AppsFolder\{}", t.aumid))));
+                rows.push(row(says::PROGRAM, target(&t.aumid).unwrap_or_else(|| format!(r"shell:AppsFolder\{}", t.aumid))));
             }
-            Some(Plan { question: open_app, about, rows })
+            Some(Plan { question: open_app, about, rows, opens_in: None })
         }
     }
 }

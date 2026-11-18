@@ -12,7 +12,7 @@
 //! console shows its wheel meanwhile (`spinner`), to the end of whichever second that's done in. With no graphics card to draw it, there's
 //! none.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,9 @@ struct Shared {
     wanted: AtomicBool,
     /// The console's video mode: its width, and its height in the low half.
     mode: AtomicU64,
+    /// How far in it is, in seconds (an f32's bits), once it's begun; and whether it's the short one.
+    at: AtomicU32,
+    short: AtomicBool,
     /// The newest picture.
     picture: Mutex<Kept>,
 }
@@ -61,6 +64,14 @@ impl Booting {
         self.0.wanted.store(true, Ordering::Relaxed);
     }
 
+    /// The look the console's icon takes for where it's got to (pimpbox_boot::look): green on black until it's begun, as the
+    /// console comes on. Taken `ICON_LEAD` ahead, as the taskbar takes that long to show a new one.
+    pub fn look(&self) -> pimpbox_boot::Look {
+        let short = self.0.short.load(Ordering::Relaxed);
+        let at = f32::from_bits(self.0.at.load(Ordering::Relaxed));
+        pimpbox_boot::look(at + ICON_LEAD, short)
+    }
+
     /// Says how big the console's picture is, now.
     pub fn set_mode(&self, (w, h): (usize, usize)) {
         self.0.mode.store((w as u64) << 32 | h as u64, Ordering::Relaxed);
@@ -77,14 +88,17 @@ impl Booting {
 
 }
 
+/// How long the taskbar takes to show a window's new icon (measured on Windows 11: 110 to 130 ms from WM_SETICON to its
+/// button's pixels, the window answering at once), so the icon's changed that much ahead of its moment in the animation.
+const ICON_LEAD: f32 = 0.12;
+
 /// How far into the short one the notice comes: the mark and the name are up, and nothing else has started.
 const NOTICE_AT: f32 = 0.45;
 
 /// It's been drawn once to nowhere since this process started.
 static WARMED: AtomicBool = AtomicBool::new(false);
 
-fn play(name: &str, short: bool, sorry: bool, kept: Option<&std::path::Path>, shared: &Shared) -> Result<(), String> {
-    let screen = Screen::open(name)?;
+fn play(screen: &Screen, short: bool, sorry: bool, kept: Option<&std::path::Path>, shared: &Shared) -> Result<(), String> {
     let getting_ready = Instant::now();
     let boot = pimpbox_boot::fonts::boot();
     // If its shader isn't kept compiled, it's compiled now, and the console shows its wheel while it is.
@@ -139,6 +153,7 @@ fn play(name: &str, short: bool, sorry: bool, kept: Option<&std::path::Path>, sh
         if t >= length || shared.stop.load(Ordering::Relaxed) {
             break;
         }
+        shared.at.store(t.to_bits(), Ordering::Relaxed);
         // As big as the console's picture is, once there's a window to show that in. With only the taskbar to show it, it's
         // small, and the shape of the console's picture: the taskbar gets as much of that as it's the shape for.
         let mode = shared.mode.load(Ordering::Relaxed);
@@ -156,7 +171,7 @@ fn play(name: &str, short: bool, sorry: bool, kept: Option<&std::path::Path>, sh
         if let Some(since) = noticed {
             notice.over(&mut picture, size, since);
         }
-        crate::show(&screen, &picture, size, size.0 as f32 / size.1 as f32, &mut shrunk);
+        crate::show(screen, &picture, size, size.0 as f32 / size.1 as f32, &mut shrunk);
         // At its own pace, which isn't the game's.
         shown += 1;
         // Kept for the window, when there is one: nobody else wants it.
@@ -175,15 +190,23 @@ fn play(name: &str, short: bool, sorry: bool, kept: Option<&std::path::Path>, sh
     Ok(())
 }
 
-/// Starts it on the screen called `name`, which has to be there already: the short one, if `short`, and with the notice that
-/// the game fell over in it, if `sorry`. `mode` is the size of the console's picture.
-pub fn start(name: &str, mode: (usize, usize), short: bool, sorry: bool, kept: Option<std::path::PathBuf>) -> Booting {
-    let shared = Arc::new(Shared { over: AtomicBool::new(false), stop: AtomicBool::new(false), spinning: AtomicBool::new(false), wanted: AtomicBool::new(false), mode: AtomicU64::new(0), picture: Mutex::new((0, (W, H), Vec::new())) });
+/// Starts it on the console's screen: the short one, if `short`, and with the notice that the game fell over in it, if
+/// `sorry`. `mode` is the size of the console's picture.
+pub fn start(screen: Arc<Screen>, mode: (usize, usize), short: bool, sorry: bool, kept: Option<std::path::PathBuf>) -> Booting {
+    let shared = Arc::new(Shared {
+        over: AtomicBool::new(false),
+        stop: AtomicBool::new(false),
+        spinning: AtomicBool::new(false),
+        wanted: AtomicBool::new(false),
+        mode: AtomicU64::new(0),
+        at: AtomicU32::new(0f32.to_bits()),
+        short: AtomicBool::new(short),
+        picture: Mutex::new((0, (W, H), Vec::new())),
+    });
     let booting = Booting(shared.clone());
     booting.set_mode(mode);
-    let name = name.to_string();
     std::thread::spawn(move || {
-        if let Err(e) = play(&name, short, short && sorry, kept.as_deref(), &shared) {
+        if let Err(e) = play(&screen, short, short && sorry, kept.as_deref(), &shared) {
             shared.spinning.store(false, Ordering::Relaxed);
             eprintln!("pms-pimpbox: no boot animation: {e}");
         }

@@ -71,7 +71,6 @@ const MIC_CAPTION: Color = Color { A: 0xFF, R: 0xFF, G: 0x8A, B: 0x80 };
 
 const CAPTION: (f64, u16) = (10.0, 400);
 const VALUE: (f64, u16) = (13.0, 600);
-const MIC_TITLE: &str = "MICROPHONE IN USE BY";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Style {
@@ -278,12 +277,13 @@ fn snap(v: f64) -> f64 {
 /// A composition layer over a (otherwise empty) host Canvas covering the cell, placed where the
 /// host sits in z-order: after whatever is behind the bars, before the text.
 fn bar_layer(cell: &Canvas, width: f64, h: f64) -> R<ContainerVisual> {
-    let host = Canvas::new().map_err(w)?;
+    let host = crate::stage::canvas()?;
     host.SetWidth(width).map_err(w)?;
     host.SetHeight(h).map_err(w)?;
     put(cell, &host, 0.0, 0.0)?;
     let c = compositor(&host)?;
-    let layer = c.CreateContainerVisual().map_err(w)?;
+    // Pooled, as the sprites hung on the strip's elements are: a visual once on screen is never freed (stage.rs).
+    let layer = crate::stage::container(&c)?;
     ElementCompositionPreview::SetElementChildVisual(&ui(&host)?, &layer).map_err(w)?;
     Ok(layer)
 }
@@ -453,7 +453,7 @@ fn visual(e: &impl Interface) -> R<Visual> {
 }
 
 /// The taskbar's compositor, from `e` the first time: it's what most things want a visual for.
-fn compositor(e: &impl Interface) -> R<windows::UI::Composition::Compositor> {
+pub(crate) fn compositor(e: &impl Interface) -> R<windows::UI::Composition::Compositor> {
     if let Some(c) = COMPOSITOR.with_borrow(Clone::clone) {
         return Ok(c);
     }
@@ -641,7 +641,7 @@ fn strip(ctx: &Ctx) -> R<StackPanel> {
         return Ok(p);
     }
     crate::layout::ensure_tracking(ctx)?;
-    let panel = StackPanel::new().map_err(w)?;
+    let panel = crate::stage::stack_panel()?;
     panel.SetOrientation(Orientation::Horizontal).map_err(w)?;
     stage::stage(ctx)?.Children().map_err(w)?.Append(&ui(&panel)?).map_err(w)?;
     STRIP.with_borrow_mut(|s| *s = Some(Strip { panel: panel.clone(), meters: Vec::new(), mic: None, mic_first: false, height_mode: 0.875, bar_mode: 1.0, fit: None, pending_sep: false, panel_glides: false, zone_h: 0.0 }));
@@ -687,12 +687,12 @@ fn measure(t: &TextBlock) -> R<f64> {
 /// A value text block in the meter's value font.
 fn value_block(s: &str, font: &str) -> R<TextBlock> {
     let t = text_block(s, VALUE.0, VALUE.1, TEXT)?;
-    t.SetFontFamily(&pms_xaml::FontFamily::CreateInstanceWithName(&HSTRING::from(font)).map_err(w)?).map_err(w)?;
+    t.SetFontFamily(&crate::stage::font(font)?).map_err(w)?;
     Ok(t)
 }
 
 fn mic_caption() -> R<TextBlock> {
-    let t = text_block(MIC_TITLE, 9.0, 700, MIC_CAPTION)?;
+    let t = text_block(crate::said::t::MIC_TITLE.t(), 9.0, 700, MIC_CAPTION)?;
     t.SetCharacterSpacing(60).map_err(w)?;
     Ok(t)
 }
@@ -1117,14 +1117,14 @@ fn watch_scale(root: &pms_xaml::XamlRoot) {
     if SCALE_WATCH.with_borrow(Option::is_some) {
         return;
     }
-    let changed = windows::Foundation::TypedEventHandler::new(|root: windows_core::Ref<pms_xaml::XamlRoot>, _| {
+    let changed = windows::Foundation::TypedEventHandler::new(|root: windows_core::Ref<pms_xaml::XamlRoot>, _| crate::guard(|| {
         if let Some(scale) = root.as_ref().and_then(|r| r.RasterizationScale().ok())
             && scale.max(0.5) != PX.get()
         {
             on_ui(|| refit(true));
         }
         Ok(())
-    });
+    }));
     if let Ok(token) = root.Changed(&changed) {
         SCALE_WATCH.with_borrow_mut(|w| *w = Some((root.clone(), token)));
     }
@@ -1216,7 +1216,7 @@ fn squeeze(t: &TextBlock, scale: f64) -> R<()> {
 fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
     let h = cell_h(m, fit);
     let width = cell_width(m, fit);
-    let root = Canvas::new().map_err(w)?;
+    let root = crate::stage::canvas()?;
     root.SetWidth(width).map_err(w)?;
     root.SetHeight(h).map_err(w)?;
     let glow = rect(GLOW, width, h)?;
@@ -1231,7 +1231,7 @@ fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
     let (root, width) = if col > 0.0 {
         let side = text_block(&m.label, CAPTION.0, CAPTION.1, TEXT_DIM)?;
         put_sideways(&root, &side, TEXT_PAD, h)?;
-        let body = Canvas::new().map_err(w)?;
+        let body = crate::stage::canvas()?;
         body.SetWidth(width - col).map_err(w)?;
         body.SetHeight(h).map_err(w)?;
         put(&root, &body, col, 0.0)?;
@@ -1277,7 +1277,7 @@ fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
         }
         Style::Pie => {
             let d = pie_d(h);
-            let pie = Canvas::new().map_err(w)?;
+            let pie = crate::stage::canvas()?;
             let track = Ellipse::new().map_err(w)?;
             track.SetWidth(d).map_err(w)?;
             track.SetHeight(d).map_err(w)?;
@@ -1285,7 +1285,7 @@ fn build_cell(m: &Spec, fit: &Fit) -> R<MeterCell> {
             pie.Children().map_err(w)?.Append(&ui(&track)?).map_err(w)?;
             let mut wedges = Vec::new();
             for c in &m.colors {
-                let p = Path::new().map_err(w)?;
+                let p = crate::stage::path()?;
                 p.SetFill(&brush(*c)?).map_err(w)?;
                 p.SetOpacity(0.85).map_err(w)?;
                 pie.Children().map_err(w)?.Append(&ui(&p)?).map_err(w)?;
@@ -1550,7 +1550,7 @@ fn sep_cell(fit: &Fit) -> R<Rectangle> {
 }
 
 fn build_mic(m: &Mic, fit: &Fit) -> R<Canvas> {
-    let root = Canvas::new().map_err(w)?;
+    let root = crate::stage::canvas()?;
     root.SetWidth(mic_width(m, fit)).map_err(w)?;
     root.SetHeight(fit.h).map_err(w)?;
     let pad_y = if fit.h >= 44.0 { 3.0 } else { 1.0 };
@@ -1563,7 +1563,7 @@ fn build_mic(m: &Mic, fit: &Fit) -> R<Canvas> {
     let mut x = TEXT_PAD + 2.0;
     if m.muted {
         let glyph = text_block("\u{EC54}", 13.0, 400, MIC_CAPTION)?;
-        glyph.SetFontFamily(&pms_xaml::FontFamily::CreateInstanceWithName(&HSTRING::from("Segoe Fluent Icons, Segoe MDL2 Assets")).map_err(w)?).map_err(w)?;
+        glyph.SetFontFamily(&crate::stage::font("Segoe Fluent Icons, Segoe MDL2 Assets")?).map_err(w)?;
         put(&root, &glyph, x, fit.h - 17.0 - pad_y)?;
         x += MUTE_GLYPH_W * fit.text;
     }
@@ -1964,10 +1964,10 @@ fn leave(i: usize) {
         v.StartAnimation(&HSTRING::from("Opacity"), &fade).map_err(w)?;
         batch.End().map_err(w)?;
         batch
-            .Completed(&TypedEventHandler::<IInspectable, CompositionBatchCompletedEventArgs>::new(move |_, _| {
+            .Completed(&TypedEventHandler::<IInspectable, CompositionBatchCompletedEventArgs>::new(move |_, _| crate::guard(|| {
                 on_ui(finish);
                 Ok(())
-            }))
+            })))
             .map_err(w)?;
         Ok(())
     })();
@@ -1980,12 +1980,12 @@ fn leave(i: usize) {
 pub(crate) fn on_ui(f: impl FnOnce() + Send + 'static) {
     let Some(ctx) = CTX.get() else { return };
     let job = std::sync::Mutex::new(Some(f));
-    let handler = DispatchedHandler::new(move || {
+    let handler = DispatchedHandler::new(move || crate::guard(|| {
         if let Some(f) = lock(&job).take() {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         }
         Ok(())
-    });
+    }));
     let _ = ctx.dispatcher.RunAsync(CoreDispatcherPriority::Normal, &handler);
 }
 
@@ -2280,12 +2280,12 @@ fn request_frame() {
     if FRAME_REQUEST.get().is_some() {
         return;
     }
-    let handler = windows::Foundation::EventHandler::<IInspectable>::new(|_, _| {
+    let handler = windows::Foundation::EventHandler::<IInspectable>::new(|_, _| crate::guard(|| {
         if let Some(token) = FRAME_REQUEST.take() {
             let _ = pms_xaml::CompositionTarget::RemoveRendering(token);
         }
         Ok(())
-    });
+    }));
     match pms_xaml::CompositionTarget::Rendering(&handler) {
         Ok(token) => FRAME_REQUEST.set(Some(token)),
         Err(e) => crate::log(format!("request frame: {e}")),
@@ -2315,7 +2315,11 @@ pub fn tip_text(i: usize, bar: Option<usize>, device: Option<usize>) -> Option<S
         Some(match (m.spec.style, bar) {
             (Style::Cores, Some(j)) => {
                 let (user, kernel) = (v(2 * j), v(2 * j + 1));
-                format!("{}\n\nuser mode    {}\nkernel mode  {}\ntotal        {}", cpu_name(&m.spec.topo, j).replace(" · ", "\n"), pct(user), pct(kernel), pct(user + kernel))
+                use crate::said::t;
+                // In a column, as wide as the widest of the three and two more.
+                let (u, k, all) = (t::CPU_USER.t(), t::CPU_KERNEL.t(), t::CPU_TOTAL.t());
+                let wide = [u, k, all].iter().map(|l| l.chars().count()).max().unwrap_or(0) + 2;
+                format!("{}\n\n{u:<wide$}{}\n{k:<wide$}{}\n{all:<wide$}{}", cpu_name(&m.spec.topo, j).replace(" · ", "\n"), pct(user), pct(kernel), pct(user + kernel))
             }
             // Plain bars carry their own reading (NET up: 1.2 MB/s); GPU engines show their load.
             (Style::Engines, Some(j)) => match m.spec.bar_tips.get(j) {
@@ -2330,6 +2334,7 @@ pub fn tip_text(i: usize, bar: Option<usize>, device: Option<usize>) -> Option<S
 
 /// "Logical processor 5 · core 2, SMT thread 1 · E-core · L3 cache group 0", from the topology string.
 fn cpu_name(topo: &str, cpu: usize) -> String {
+    use crate::said::t;
     let (nodes, l3s) = (topo.split('|').count(), topo.split(['|', '/']).count());
     let (mut logical, mut core, mut l3) = (0, 0, 0);
     for (ni, node) in topo.split('|').enumerate() {
@@ -2337,18 +2342,18 @@ fn cpu_name(topo: &str, cpu: usize) -> String {
             for c in group.split(',') {
                 let n: usize = c.trim_start_matches('e').parse().unwrap_or(1);
                 if cpu < logical + n {
-                    let mut s = format!("Logical processor {cpu} · core {core}");
+                    let mut s = format!("{} · {}", t::CPU.with(&[("n", &cpu)]), t::CPU_CORE.with(&[("n", &core)]));
                     if n > 1 {
-                        s += &format!(", SMT thread {}", cpu - logical);
+                        s += &format!(", {}", t::CPU_THREAD.with(&[("n", &(cpu - logical))]));
                     }
                     if c.starts_with('e') {
-                        s += " · E-core";
+                        s += &format!(" · {}", t::CPU_E_CORE.t());
                     }
                     if l3s > nodes {
-                        s += &format!(" · L3 cache group {l3}");
+                        s += &format!(" · {}", t::CPU_L3.with(&[("n", &l3)]));
                     }
                     if nodes > 1 {
-                        s += &format!(" · NUMA node {ni}");
+                        s += &format!(" · {}", t::CPU_NUMA.with(&[("n", &ni)]));
                     }
                     return s;
                 }
@@ -2358,7 +2363,7 @@ fn cpu_name(topo: &str, cpu: usize) -> String {
             l3 += 1;
         }
     }
-    format!("Logical processor {cpu}")
+    t::CPU.with(&[("n", &cpu)])
 }
 
 thread_local! {
@@ -2424,10 +2429,10 @@ fn drop_bars(m: &Meter, gone: &[usize], i: usize) -> bool {
         }
         batch.End().map_err(w)?;
         batch
-            .Completed(&TypedEventHandler::<IInspectable, CompositionBatchCompletedEventArgs>::new(move |_, _| {
+            .Completed(&TypedEventHandler::<IInspectable, CompositionBatchCompletedEventArgs>::new(move |_, _| crate::guard(|| {
                 on_ui(move || land_bars(i));
                 Ok(())
-            }))
+            })))
             .map_err(w)?;
         request_frame();
         Ok(true)
@@ -2515,6 +2520,25 @@ fn land_bars(i: usize) {
 const FALL_MS: i64 = 1000;
 
 /// The theme changed: rebuild the cells in the new ink.
+/// The language has changed: the mic label, while it's up, is measured and drawn again in it. Nothing else in the strip says
+/// anything of its own (the meters' labels are the settings').
+pub(crate) fn retell() {
+    if !STRIP.with_borrow(|s| s.as_ref().is_some_and(|s| s.mic.is_some())) {
+        return;
+    }
+    match mic_caption().and_then(|c| measure(&c)) {
+        Ok(caption_w) => {
+            with_strip(|s| {
+                if let Some(m) = s.mic.as_mut() {
+                    m.caption_w = caption_w;
+                }
+            });
+            refit(true);
+        }
+        Err(e) => crate::log(format!("meters: the mic label in another language: {e}")),
+    }
+}
+
 pub fn retheme(_ctx: &Ctx) -> R<String> {
     refit(true);
     Ok(format!("theme {}", if crate::LIGHT.load(std::sync::atomic::Ordering::Relaxed) { "light" } else { "dark" }))
@@ -2594,7 +2618,7 @@ fn put_text_host(canvas: &Canvas, t: &TextBlock, x: f64, y: f64, scale: f64, wid
     if width.is_none() && t.Text().is_ok_and(|s| s.is_empty()) {
         return Ok(None);
     }
-    let host = Canvas::new().map_err(w)?;
+    let host = crate::stage::canvas()?;
     put(canvas, &host, x, y)?;
     put(canvas, t, x, y)?;
     let e = ui(t)?;
@@ -2615,7 +2639,7 @@ fn put_text_host(canvas: &Canvas, t: &TextBlock, x: f64, y: f64, scale: f64, wid
         shadow.SetOpacity(if dark { 0.75 } else { 0.9 }).map_err(w)?;
         // The text's alpha mask comes once it's on screen (an element off the tree has none): see `cast_shadows`.
         UNCAST.with_borrow_mut(|u| u.push((t.clone(), shadow.clone())));
-        let sprite = c.CreateSpriteVisual().map_err(w)?;
+        let sprite = crate::stage::sprite(&c)?;
         sprite.SetSize(size).map_err(w)?;
         sprite.SetShadow(&shadow).map_err(w)?;
         ElementCompositionPreview::SetElementChildVisual(&ui(&host)?, &sprite).map_err(w)
@@ -2667,7 +2691,7 @@ fn standing_out(now: f64, change: f64, extend: f64) -> f64 {
 /// its own (its alpha mask follows it as it changes), which `draw` keeps exactly under the slice: a slice can be translucent, and a
 /// transparent shape would leave an empty mask. It costs nothing per frame, even pulsing. Returns the shape.
 fn slice_glow(pie: &Canvas, d: f64, g: SliceGlow, color: Color) -> R<Path> {
-    let shape = Path::new().map_err(w)?;
+    let shape = crate::stage::path()?;
     shape.SetFill(&brush(Color { A: 0xFF, ..color })?).map_err(w)?;
     shape.SetIsHitTestVisible(false).map_err(w)?;
     // The mask is the element's size: the pie and what stands out of it, so that the glow lies where the slice does.
@@ -2677,7 +2701,7 @@ fn slice_glow(pie: &Canvas, d: f64, g: SliceGlow, color: Color) -> R<Path> {
     pie.Children().map_err(w)?.InsertAt(0, &ui(&shape)?).map_err(w)?;
     Canvas::SetLeft(&ui(&shape)?, -g.extend).map_err(w)?;
     Canvas::SetTop(&ui(&shape)?, -g.extend).map_err(w)?;
-    let host = Canvas::new().map_err(w)?;
+    let host = crate::stage::canvas()?;
     host.SetWidth(size).map_err(w)?;
     host.SetHeight(size).map_err(w)?;
     host.SetIsHitTestVisible(false).map_err(w)?;
@@ -2700,7 +2724,7 @@ fn slice_glow(pie: &Canvas, d: f64, g: SliceGlow, color: Color) -> R<Path> {
         shadow.StartAnimation(&HSTRING::from("Opacity"), &pulse).map_err(w)?;
     }
     UNCAST_SLICES.with_borrow_mut(|u| u.push((shape.clone(), shadow.clone())));
-    let sprite = c.CreateSpriteVisual().map_err(w)?;
+    let sprite = crate::stage::sprite(&c)?;
     sprite.SetSize(Vector2 { X: size as f32, Y: size as f32 }).map_err(w)?;
     sprite.SetShadow(&shadow).map_err(w)?;
     ElementCompositionPreview::SetElementChildVisual(&ui(&host)?, &sprite).map_err(w)?;
@@ -2725,7 +2749,7 @@ fn pie_rim(pie: &Canvas, d: f64, color: Color) -> R<Option<Glow>> {
     let glow = (|| -> R<Glow> {
         let reach = PIE_GLOW_SWELL as f64 + 2.0;
         // Behind the track and wedges, and its own size, so XAML sees something there to draw.
-        let host = Canvas::new().map_err(w)?;
+        let host = crate::stage::canvas()?;
         let size = d + 2.0 * reach;
         host.SetWidth(size).map_err(w)?;
         host.SetHeight(size).map_err(w)?;
@@ -2744,7 +2768,7 @@ fn pie_rim(pie: &Canvas, d: f64, color: Color) -> R<Option<Glow>> {
         for s in [stop(edge * 0.97, 0)?, stop(edge, 0xD0)?, mid.clone(), outer.clone()] {
             stops.Append(&s).map_err(w)?;
         }
-        let sprite = c.CreateSpriteVisual().map_err(w)?;
+        let sprite = crate::stage::sprite(&c)?;
         sprite.SetSize(Vector2 { X: size as f32, Y: size as f32 }).map_err(w)?;
         sprite.SetBrush(&brush).map_err(w)?;
         sprite.SetOpacity(0.0).map_err(w)?;

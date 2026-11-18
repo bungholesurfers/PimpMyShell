@@ -2,10 +2,27 @@
 //!
 //! One duplex byte pipe; each request and each response is a frame: u32 LE length + UTF-8.
 //! A request is a command line; arguments are whitespace-separated, `"double quotes"` group.
+//!
+//! Who may be on each end: the TAP lets in only whoever Explorer runs as (server.rs), and the daemon and the CLI only talk
+//! to a pipe that's Explorer's (`connect`, in pms).
 
 use std::io::{self, Read, Write};
 
-pub const PIPE_NAME: &str = r"\\.\pipe\pms-tap";
+/// The pipe's name up to 0.1.7: one for the whole PC, which two people signed in at once couldn't both have. Only looked
+/// for now to tell a TAP of then, still in Explorer after an update, to leave.
+pub const OLD_PIPE_NAME: &str = r"\\.\pipe\pms-tap";
+
+/// The pipe's name: one for each sign-in session, since pipes' names are the whole PC's and each session has an Explorer.
+pub fn pipe_name() -> String {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ProcessIdToSessionId(process: u32, session: *mut u32) -> i32;
+    }
+    let mut session = 0;
+    // If it can't be told, both ends say 0, and still find each other.
+    unsafe { ProcessIdToSessionId(std::process::id(), &mut session) };
+    format!(r"\\.\pipe\pms-tap-{session}")
+}
 
 pub fn write_frame(w: &mut impl Write, s: &str) -> io::Result<()> {
     w.write_all(&(s.len() as u32).to_le_bytes())?;

@@ -16,6 +16,8 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFOR
 use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, FindWindowW, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_USER};
 use windows_core::{BOOL, PCWSTR, w};
 
+use crate::lang::explorer as e;
+
 /// What the taskbar's own menu sends, for Exit Explorer.
 const EXIT_EXPLORER: u32 = WM_USER + 436;
 /// How long a copy's window can stay hidden as the copy starts: about a second here, measured. One that stays hidden longer is the
@@ -34,23 +36,65 @@ const COMES_BACK_WITHIN: Duration = Duration::from_secs(15);
 const TAPS_WORTH_IT: usize = 10;
 const MEMORY_WORTH_IT: u64 = 300 << 20;
 
-const FOLDER_OPEN: &str = "a File Explorer window is open";
-/// A way round that: folder windows in a process of their own aren't in the taskbar's, so they don't stop a restart, and they
-/// survive it.
-const SEPARATE_PROCESS: &str = " To keep folder windows open through a restart, turn on \"Launch folder windows in a separate process\" in File Explorer's options, on the View tab. It takes effect the next time Explorer starts.";
-
-/// What it says if it's asked to while something's open: a reason that reads after "because".
-pub fn blocker(windows: &[(String, bool)]) -> Option<&'static str> {
+/// What it says if it's asked to while something's open: a reason that reads after "because" (`COPYING`, `FOLDER_OPEN`,
+/// `DIALOG_OPEN`).
+pub fn blocker(windows: &[(String, bool)]) -> Option<e::Id> {
     let any = |class: &str| windows.iter().any(|(c, _)| c == class);
     // Explorer keeps the last copy's window after it's done, hidden: only one that shows is a copy going on. Minimized, it still shows.
     if windows.iter().any(|(c, visible)| c == "OperationStatusWindow" && *visible) {
-        Some("a file copy is running")
+        Some(e::COPYING)
     } else if any("CabinetWClass") || any("ExploreWClass") {
-        Some(FOLDER_OPEN)
+        Some(e::FOLDER_OPEN)
     } else if windows.iter().any(|(c, visible)| c == "#32770" && *visible) {
-        Some("one of Explorer's dialogs is open")
+        Some(e::DIALOG_OPEN)
     } else {
         None
+    }
+}
+
+/// The way round an open folder window, after why: folder windows in a process of their own aren't in the taskbar's, so they don't
+/// stop a restart, and they survive it.
+fn way_round(why: e::Id) -> String {
+    if why == e::FOLDER_OPEN { format!(" {}", e::SEPARATE_PROCESS.t()) } else { String::new() }
+}
+
+/// Why it wasn't restarted (`blocker`), as sentences of their own, in the language of now: for under a heading that says it wasn't.
+pub fn why_not(why: e::Id) -> String {
+    let said = match why {
+        e::COPYING => e::COPYING_NOW,
+        e::FOLDER_OPEN => e::FOLDER_OPEN_NOW,
+        _ => e::DIALOG_OPEN_NOW,
+    };
+    format!("{}{}", said.t(), way_round(why))
+}
+
+/// Why a restart didn't happen, or didn't finish.
+#[derive(Debug)]
+pub enum Trouble {
+    /// Something's open in it (`blocker`).
+    Busy(e::Id),
+    NoTaskbar,
+    /// Asked to leave, it didn't.
+    LeftRunning,
+    /// It left, and couldn't be started again: Windows' error.
+    NotStarted(String),
+    /// It left, and no taskbar came back.
+    NotBack,
+    /// Windows' error, as it said it.
+    Windows(String),
+}
+
+impl Trouble {
+    /// What it says, in language `language`: 0, English, for the log.
+    pub fn words(&self, language: usize) -> String {
+        match self {
+            Trouble::Busy(why) => crate::lang::fill(e::NOT_BECAUSE.of(language), &[("why", &why.of(language))]),
+            Trouble::NoTaskbar => e::NO_TASKBAR.of(language).to_string(),
+            Trouble::LeftRunning => e::LEFT_RUNNING.of(language).to_string(),
+            Trouble::NotStarted(error) => crate::lang::fill(e::NOT_STARTED.of(language), &[("error", error)]),
+            Trouble::NotBack => e::NOT_BACK.of(language).to_string(),
+            Trouble::Windows(error) => error.clone(),
+        }
     }
 }
 
@@ -79,7 +123,7 @@ fn windows_of(pid: u32) -> Vec<(String, bool)> {
 }
 
 /// Why Explorer shouldn't be restarted just now.
-pub fn busy() -> Option<&'static str> {
+pub fn busy() -> Option<e::Id> {
     blocker(&windows_of(crate::taskbar_pid()?))
 }
 
@@ -93,34 +137,34 @@ pub fn memory(pid: u32) -> u64 {
 }
 
 /// Asks Explorer to leave and starts it again, if nothing's open in it. Takes seconds: not on a thread that's doing anything else.
-pub fn restart() -> Result<(), String> {
+pub fn restart() -> Result<(), Trouble> {
     let began = Instant::now();
-    let tray = unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) }.map_err(|_| "there's no taskbar".to_string())?;
+    let tray = unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) }.map_err(|_| Trouble::NoTaskbar)?;
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(tray, Some(&mut pid)) };
     let open = windows_of(pid);
     if let Some(why) = blocker(&open) {
-        return Err(format!("it wasn't restarted, because {why}"));
+        return Err(Trouble::Busy(why));
     }
     // A hidden copy window is a leftover, or a copy that's only just started: one of those shows itself within a second or so.
     if open.iter().any(|(class, visible)| class == "OperationStatusWindow" && !visible) {
         std::thread::sleep(COPY_SHOWS_WITHIN);
         if let Some(why) = blocker(&windows_of(pid)) {
-            return Err(format!("it wasn't restarted, because {why}"));
+            return Err(Trouble::Busy(why));
         }
     }
-    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, pid) }.map_err(|e| e.to_string())?;
-    unsafe { PostMessageW(Some(tray), EXIT_EXPLORER, WPARAM(0), LPARAM(0)) }.map_err(|e| e.to_string())?;
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, pid) }.map_err(|e| Trouble::Windows(e.to_string()))?;
+    unsafe { PostMessageW(Some(tray), EXIT_EXPLORER, WPARAM(0), LPARAM(0)) }.map_err(|e| Trouble::Windows(e.to_string()))?;
     let mut left = unsafe { WaitForSingleObject(process, LEAVES_WITHIN) } == WAIT_OBJECT_0;
     if !left {
         if has_taskbar() {
             let _ = unsafe { CloseHandle(process) };
-            return Err("it didn't close, so it's been left running".into());
+            return Err(Trouble::LeftRunning);
         }
         // Its taskbar has gone, and it hasn't. Something opened since would still be worth keeping, but not at the cost of a taskbar:
         // a new Explorer comes up beside it.
         let open = blocker(&windows_of(pid));
-        crate::log(format!("Explorer closed its taskbar but didn't exit: {}", open.map_or("ending it".to_string(), |why| format!("leaving it running, because {why}"))));
+        crate::log(format!("Explorer closed its taskbar but didn't exit: {}", open.map_or("ending it".to_string(), |why| format!("leaving it running, because {}", why.of(0)))));
         if open.is_none() {
             let _ = unsafe { TerminateProcess(process, 1) };
             left = unsafe { WaitForSingleObject(process, ENDED_WITHIN) } == WAIT_OBJECT_0;
@@ -131,12 +175,12 @@ pub fn restart() -> Result<(), String> {
     // Started with a shell already there, it would only open a folder window.
     if !has_taskbar() {
         let windows = std::env::var_os("WINDIR").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
-        std::process::Command::new(windows.join("explorer.exe")).spawn().map_err(|e| format!("it closed, and couldn't be started again: {e}"))?;
+        std::process::Command::new(windows.join("explorer.exe")).spawn().map_err(|e| Trouble::NotStarted(e.to_string()))?;
     }
     let waited = Instant::now();
     while !has_taskbar() {
         if waited.elapsed() >= COMES_BACK_WITHIN {
-            return Err("it closed, and the taskbar hasn't come back".into());
+            return Err(Trouble::NotBack);
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -153,12 +197,13 @@ pub fn request_file() -> PathBuf {
     pms_tap::data_dir().join("restart-explorer.txt")
 }
 
-/// You've asked for a restart. The daemon does it if there is one, as it has things to look after while that happens.
+/// You've asked for a restart. The daemon does it if there is one, as it has things to look after while that happens. Why it
+/// wasn't, in the language of now (the command line's is English).
 pub fn ask() -> Result<(), String> {
     if let Some(why) = busy() {
-        return Err(format!("Explorer wasn't restarted, because {why}.{}", if why == FOLDER_OPEN { SEPARATE_PROCESS } else { "" }));
+        return Err(format!("{}{}", e::ASKED_NOT.with(&[("why", &why.t())]), way_round(why)));
     }
-    if crate::daemon::running() { std::fs::write(request_file(), "").map_err(|e| e.to_string()) } else { restart() }
+    if crate::daemon::running() { std::fs::write(request_file(), "").map_err(|e| e.to_string()) } else { restart().map_err(|t| t.words(crate::lang::current())) }
 }
 
 #[cfg(test)]
@@ -172,12 +217,19 @@ mod tests {
     #[test]
     fn it_never_goes_with_something_open() {
         assert_eq!(blocker(&windows(&[("Shell_TrayWnd", true), ("Progman", true)])), None);
-        assert_eq!(blocker(&windows(&[("CabinetWClass", true)])), Some("a File Explorer window is open"));
-        assert_eq!(blocker(&windows(&[("CabinetWClass", false)])), Some("a File Explorer window is open"), "even out of sight");
-        assert_eq!(blocker(&windows(&[("CabinetWClass", true), ("OperationStatusWindow", true)])), Some("a file copy is running"), "that's the one that matters");
+        assert_eq!(blocker(&windows(&[("CabinetWClass", true)])), Some(e::FOLDER_OPEN));
+        assert_eq!(blocker(&windows(&[("CabinetWClass", false)])), Some(e::FOLDER_OPEN), "even out of sight");
+        assert_eq!(blocker(&windows(&[("CabinetWClass", true), ("OperationStatusWindow", true)])), Some(e::COPYING), "that's the one that matters");
         assert_eq!(blocker(&windows(&[("OperationStatusWindow", false)])), None, "the last copy's window, kept hidden after it's done");
-        assert_eq!(blocker(&windows(&[("#32770", true)])), Some("one of Explorer's dialogs is open"));
+        assert_eq!(blocker(&windows(&[("#32770", true)])), Some(e::DIALOG_OPEN));
         assert_eq!(blocker(&windows(&[("#32770", false)])), None, "Explorer keeps hidden ones of its own");
+    }
+
+    #[test]
+    fn the_log_hears_why_in_english() {
+        assert_eq!(Trouble::Busy(e::COPYING).words(0), "it wasn't restarted, because a file copy is running");
+        assert_eq!(Trouble::NotStarted("no".into()).words(0), "it closed, and couldn't be started again: no");
+        assert!(e::SEPARATE_PROCESS.of(0).contains("separate process"), "and the way round an open folder");
     }
 
     #[test]

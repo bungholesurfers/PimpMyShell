@@ -6,7 +6,11 @@
 //!   3      the crab bouncing around, changing color, as a DVD player's logo does when left alone
 //!   4      static
 //!   5      the PimpCast (pimpcast.rs): IT GON RAIN!
-//!   6      the console: the PIMPBOX (pms-pimpbox), which plays Doom's games with POOM, plugged in like a console of the day. It's a process
+//!   37     Number One (iss/): the International Space Station's urine tank, from NASA's telemetry, the flag an astronaut's
+//!          planted on the moon filled to its level. It goes online for it only once the settings say so, and only while it's
+//!          watched; until then it says it's off, and shuffling passes it by. A click goes round the station's other water.
+//!          Now and then PTV, the channel, plays a bump: a few seconds of 3D (iss/bumps.rs).
+//!   304    the console: the PIMPBOX (pms-pimpbox), which plays Doom's games with POOM, plugged in like a console of the day. It's a process
 //!          of its own with a screen of its own, and any number of TVs can tune in. Changing the channel doesn't touch it: it
 //!          has a power button of its own. With nobody watching it rests, and carries on when someone tunes back in. The channel
 //!          is always there: asked for with no game to play, it opens the settings' TV page, where the games are. With a game and
@@ -15,7 +19,8 @@
 //!          uplink, about the price of scrambled TV. On the same bars, as it went out, tracking errors and all.
 //!
 //! Each set has a remote, in the tooltip (the TAP's remote.rs): channel up and down, shuffle, and power for the TV and the
-//! console. Clicking the picture itself stops shuffling; after that, it picks up the controller and plays.
+//! console. Clicking the picture itself stops shuffling; after that, it picks up the controller and plays (on Number One's
+//! channel, it tours the station's water instead).
 //!
 //! Shuffling goes by a beat all the sets share, so that they can move together. With jitter, each is late by its own random amount,
 //! up to a quarter of the beat. How long the beat is and whether there's jitter are for every set, whichever remote changes them.
@@ -45,8 +50,15 @@ const MIDNIGHT_CHANNEL: u32 = 1295;
 pub const GAME: u32 = pms_screen::GAME_CHANNEL;
 /// The screen the console draws on.
 pub const CONSOLE: &str = "pimpbox";
+/// Number One's channel.
+pub const ISS: u32 = crate::iss::CHANNEL;
 /// Every channel, in the order up goes through them.
-pub const CHANNELS: [u32; 6] = [2, 3, 4, 5, GAME, MIDNIGHT_CHANNEL];
+pub const CHANNELS: [u32; 7] = [2, 3, 4, 5, ISS, GAME, MIDNIGHT_CHANNEL];
+
+/// A channel as it's called now: the console was on 6, before Number One came, on 37, and it went to 304.
+pub fn renumbered(channel: u32) -> u32 {
+    if channel == 6 { GAME } else { channel }
+}
 /// Where a set starting up begins its run through the channels, and where it ends and stays, unless the settings say otherwise.
 pub const INTRO_FROM: u32 = MIDNIGHT_CHANNEL;
 pub const INTRO_TO: u32 = GAME;
@@ -155,6 +167,7 @@ pub(crate) fn glyph(c: char) -> [u8; 5] {
         ':' => [0, 2, 0, 2, 0],
         '/' => [1, 1, 2, 4, 4],
         '?' => [6, 1, 2, 0, 2],
+        '%' => [4, 1, 2, 4, 1],
         '!' => [2, 2, 2, 0, 2],
         ';' => [0, 2, 0, 2, 4],
         '(' => [1, 2, 2, 2, 1],
@@ -471,6 +484,8 @@ pub enum Clicked {
     Play,
     /// It's on the console's channel, and there's no game.
     NoGame,
+    /// It's on Number One's, which is switched off: to the settings, where it's switched on.
+    IssOff,
 }
 
 /// What a set keeps between runs.
@@ -521,6 +536,9 @@ pub struct Tv {
     /// The console's newest frame shown.
     shown: u64,
     cast: crate::pimpcast::PimpCast,
+    /// Number One, on this set; and whether shuffling may land there: it's switched on.
+    iss: crate::iss::NumberOne,
+    iss_ready: bool,
     /// The time on the clock the sets share, and how long a beat is by it, in milliseconds.
     now: u64,
     every: u64,
@@ -562,6 +580,8 @@ impl Tv {
             card_for: None,
             shown: 0,
             cast: Default::default(),
+            iss: Default::default(),
+            iss_ready: false,
             now: 0,
             every: u64::from(USUAL_SHUFFLE) * 1000,
             jitter: true,
@@ -609,6 +629,34 @@ impl Tv {
     /// signal, until something moves it.
     pub fn set_game(&mut self, has_game: bool, ready: bool) {
         (self.has_game, self.console_ready) = (has_game, ready);
+    }
+
+    /// Whether Number One is switched on, so that shuffling may go there.
+    pub fn set_iss(&mut self, ready: bool) {
+        self.iss_ready = ready;
+    }
+
+    /// Whether it's showing Number One, past the run through the channels.
+    pub fn on_iss(&self) -> bool {
+        self.on && !self.in_intro && CHANNELS[self.channel] == ISS
+    }
+
+    /// Plays one of Number One's bumps, on its channel, now: as it's asked for. A set that's off is switched on for it.
+    pub fn bump(&mut self, kind: crate::iss::bumps::Kind) {
+        if !self.on {
+            self.press(Button::TvPower);
+        }
+        self.pick(ISS);
+        // Not the channel's number over it: it's what was asked for.
+        self.snow = 0;
+        self.number = 0;
+        crate::log(format!("Number One: PTV plays {}, as asked", kind.name()));
+        self.iss.play(kind, crate::iss::tank_of(&crate::iss::now()));
+    }
+
+    /// The tank Number One's tour is on, if it's on one.
+    pub fn iss_tour(&self) -> Option<crate::iss::Tank> {
+        self.iss.touring()
     }
 
     /// Whether it's on, and on the console's channel.
@@ -668,6 +716,7 @@ impl Tv {
         self.drawn = None;
         self.shown = 0;
         self.cast.restart();
+        self.iss.restart();
     }
 
     fn tune(&mut self, channel: u32) {
@@ -736,7 +785,9 @@ impl Tv {
             | Button::ConsoleOff
             | Button::GameNext
             | Button::GamePrev
-            | Button::ConsoleGame => {}
+            | Button::ConsoleGame
+            | Button::MoreSets
+            | Button::FewerSets => {}
             Button::GameChannel => {
                 self.shuffle = false;
                 self.tune(GAME);
@@ -762,6 +813,14 @@ impl Tv {
             self.press(Button::Shuffle);
             return Clicked::Done;
         }
+        // Number One's: round the station's water, or, switched off, to where it's switched on.
+        if CHANNELS[self.channel] == ISS {
+            if !self.iss_ready {
+                return Clicked::IssOff;
+            }
+            self.iss.tour();
+            return Clicked::Done;
+        }
         if self.has_game && (game_on || CHANNELS[self.channel] == GAME) {
             if CHANNELS[self.channel] != GAME {
                 self.tune(GAME);
@@ -780,7 +839,7 @@ impl Tv {
         let last = CHANNELS.len() - 1;
         loop {
             let pick = if self.random(6) == 0 { last } else { self.random(last as u32) as usize };
-            if pick != self.channel && (CHANNELS[pick] != GAME || self.console_ready) {
+            if pick != self.channel && (CHANNELS[pick] != GAME || self.console_ready) && (CHANNELS[pick] != ISS || self.iss_ready) {
                 self.channel = pick;
                 break;
             }
@@ -959,6 +1018,11 @@ impl Tv {
                         return false;
                     }
                 }
+                ISS => {
+                    if !self.iss.frame(dt, &mut c, number_up, !self.in_intro) {
+                        return false;
+                    }
+                }
                 GAME => match game {
                     Some(screen) => {
                         screen.watch();
@@ -1042,6 +1106,9 @@ struct Shared {
     sets: AtomicUsize,
     /// What the game that's in the console is called.
     game_title: Mutex<String>,
+    /// The speed demo the console's showing, as the TV's info lines say it for the PIMPBOX card (demos::showing): empty when it's
+    /// showing none.
+    game_demo: Mutex<String>,
     /// How long a beat is, in seconds, whether there's jitter, and whether a remote has changed either and that's yet to be saved.
     shuffle_seconds: AtomicU32,
     jitter: AtomicBool,
@@ -1066,11 +1133,11 @@ fn state_file() -> PathBuf {
     crate::config::beside_config("tv.txt")
 }
 
-/// Opens the settings on the TV page, in front: a click got us here, and passes that on.
-fn open_settings(config: &Path) {
+/// Opens the settings on `page` (the PIMPBOX's, or the TV's), in front: a click got us here, and passes that on.
+fn open_settings(config: &Path, page: &str) {
     use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
     let Ok(me) = std::env::current_exe() else { return };
-    match std::process::Command::new(me.with_file_name("pms-gui.exe")).arg("--page=pimpbox").arg(config).spawn() {
+    match std::process::Command::new(me.with_file_name("pms-gui.exe")).arg(format!("--page={page}")).arg(config).spawn() {
         Ok(gui) => {
             let _ = unsafe { AllowSetForegroundWindow(gui.id()) };
         }
@@ -1093,7 +1160,7 @@ fn parse_state(text: &str) -> (HashMap<String, Kept>, bool) {
             ["console", on] => game_on = *on != "0",
             [channel, shuffle, on, name] => {
                 if let Ok(channel) = channel.parse() {
-                    sets.insert(name.to_string(), Kept { channel, shuffle: *shuffle != "0", on: *on != "0" });
+                    sets.insert(name.to_string(), Kept { channel: renumbered(channel), shuffle: *shuffle != "0", on: *on != "0" });
                 }
             }
             _ => {}
@@ -1126,11 +1193,14 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
     let mut said = String::new();
     // While a game's in front, the size its picture saying so was drawn at.
     let mut rested: Option<(u32, u32)> = None;
+    // What Number One's card says, when that was, and on which tank of its tour.
+    let mut iss_said: Option<(Instant, Option<crate::iss::Tank>, String)> = None;
     while !stop.load(Ordering::Relaxed) {
         let began = Instant::now();
         let (has_game, game_on, battery) = (shared.has_game.load(Ordering::Relaxed), shared.game_on.load(Ordering::Relaxed), shared.battery.load(Ordering::Relaxed));
         let autostart = shared.autostart.load(Ordering::Relaxed);
         tv.set_game(has_game, has_game && (game_on || autostart));
+        tv.set_iss(crate::iss::switched_on());
         tv.evicted = shared.console_evicted.lock().ok().and_then(|e| *e);
         let mut changed = false;
         // The console's been asked for by name, as opposed to come across: with no game, that's the way to the games.
@@ -1188,8 +1258,14 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
             }
         }
         if let Some(channel) = screen.take_tune() {
-            tv.pick(channel);
-            asked |= channel == GAME;
+            // One of Number One's bumps, asked for: on its channel, now.
+            if channel >= pms_screen::BUMP {
+                let which = crate::iss::bumps::Kind::ALL.get((channel - pms_screen::BUMP) as usize).copied();
+                tv.bump(crate::iss::asked_for(which));
+            } else {
+                tv.pick(channel);
+                asked |= channel == GAME;
+            }
             changed = true;
         }
         // Its picture, while it's on. Sent away to make room, it's switched off but still there: then it's the sad set that
@@ -1210,6 +1286,11 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
                     None => shared.pop.store(true, Ordering::Relaxed),
                 },
                 Clicked::NoGame => asked = true,
+                Clicked::IssOff => {
+                    if let Ok(config) = shared.config.lock() {
+                        open_settings(&config, "tv");
+                    }
+                }
                 Clicked::Done => {}
             }
         }
@@ -1225,7 +1306,7 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
             && tv.is_on()
             && let Ok(config) = shared.config.lock()
         {
-            open_settings(&config);
+            open_settings(&config, "pimpbox");
         }
         if changed {
             touched = Instant::now();
@@ -1239,8 +1320,22 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
         let alone = shared.sets.load(Ordering::Relaxed) == 1 && shared.game_pid.load(Ordering::Relaxed) != 0;
         // And, for the console's own tooltip, what's in it and why it's gone, if it has.
         let title = shared.game_title.lock().map(|t| t.clone()).unwrap_or_default();
+        let demo = shared.game_demo.lock().map(|t| t.clone()).unwrap_or_default();
         let video = crate::config::CONSOLE_VIDEO.get(shared.video.load(Ordering::Relaxed) as usize).copied().unwrap_or_default();
-        let info = format!("every\t{}\nalone\t{}\ngame\t{title}\nevicted\t{}\nvideo\t{video}\n", shuffle_words(seconds), u8::from(alone), tv.evicted.unwrap_or_default());
+        let mut info = format!("every\t{}\nalone\t{}\ngame\t{title}\nevicted\t{}\nvideo\t{video}\n{demo}", shuffle_words(seconds), u8::from(alone), tv.evicted.unwrap_or_default());
+        // On Number One's channel, what its card beside the remote says.
+        // Said again each second, as it says how long ago, and when the tour moves on.
+        if tv.on_iss() {
+            if iss_said.as_ref().is_none_or(|(at, tour, _)| at.elapsed() >= Duration::from_secs(1) || *tour != tv.iss_tour()) {
+                iss_said = Some((Instant::now(), tv.iss_tour(), crate::iss::remote_lines(tv.iss_tour())));
+            }
+            if !info.ends_with('\n') {
+                info.push('\n');
+            }
+            info.push_str(iss_said.as_ref().map_or("", |(.., lines)| lines.as_str()));
+        } else {
+            iss_said = None;
+        }
         if said != info {
             screen.set_info(&info);
             said = info;
@@ -1297,7 +1392,7 @@ fn run(name: &str, stop: &AtomicBool, shared: &Shared) {
 pub struct Screens {
     sets: Vec<(String, JoinHandle<()>, Arc<AtomicBool>)>,
     shared: Arc<Shared>,
-    game: Option<std::process::Child>,
+    game: Option<pms_spawn::Child>,
     /// What's in the console.
     playing: Option<std::path::PathBuf>,
     loaded: bool,
@@ -1312,6 +1407,12 @@ pub struct Screens {
     game_off: bool,
     /// The video mode the console that's there was last told of.
     game_video: String,
+    /// Whether the game's to be sandboxed, as the settings say; and whether the console that's there was started so.
+    poom_sandboxed: bool,
+    game_sandboxed: bool,
+    /// When the console's in efficiency mode, as the settings say; and as the console that's there was told.
+    poom_efficient: String,
+    game_efficient: String,
     /// The last lines the game wrote to its stderr: a panic says why there, and nowhere else.
     game_said: Arc<Mutex<std::collections::VecDeque<String>>>,
     /// The shuffling the settings last said.
@@ -1335,6 +1436,9 @@ impl Screens {
         if let Ok(mut console) = self.shared.console.lock() {
             *console = None;
         }
+        if let Ok(mut demo) = self.shared.game_demo.lock() {
+            demo.clear();
+        }
         self.shared.game_pid.store(0, Ordering::Relaxed);
         if let Some(mut game) = self.game.take() {
             // An instrumented build (PGO training) lets it go instead: it goes with the daemon, ending as a program does, which
@@ -1342,8 +1446,8 @@ impl Screens {
             if cfg!(pms_pgo) {
                 return drop(game);
             }
-            let _ = game.kill();
-            let _ = game.wait();
+            game.kill();
+            game.wait();
         }
     }
 
@@ -1372,29 +1476,78 @@ impl Screens {
     }
 
     /// Starts the console, with `wad` in it, putting out a picture in the `video` mode: switched on, or off (for its display).
+    ///
+    /// It's a helper (pms-spawn): in a job of its own that ends with the daemon, with room for one more process, the game,
+    /// and no console. Its screen is made here and handed to it.
     fn start_game(&mut self, wad: &Path, video: &str, on: bool) {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let Ok(me) = std::env::current_exe() else { return };
         let exe = me.with_file_name(crate::parts::PIMPBOX);
         let saves = crate::wads::saves();
         if !exe.is_file() {
             return crate::parts::found_missing(crate::parts::PIMPBOX);
         }
+        // Without its game the console still comes on, and says it can't play: but that's said here too.
+        if !crate::parts::here(crate::parts::POOM) {
+            crate::parts::found_missing(crate::parts::POOM);
+        }
         if std::fs::create_dir_all(&saves).is_err() {
             return;
         }
-        let spawned = std::process::Command::new(&exe)
+        let screen = match Screen::create(CONSOLE) {
+            Ok(s) => Arc::new(s),
+            Err(e) => return crate::log(format!("console: {e}")),
+        };
+        let (mapping, event) = screen.handles();
+        let (mapping, event) = match (pms_spawn::Shared::new(mapping), pms_spawn::Shared::new(event)) {
+            (Ok(m), Ok(e)) => (m, e),
+            (Err(e), _) | (_, Err(e)) => return crate::log(format!("console: {e}")),
+        };
+        let command = pms_spawn::Command::new(&exe)
             .arg(wad)
-            .arg(CONSOLE)
+            .arg(format!("handles:{}:{}", mapping.number(), event.number()))
             .arg(std::process::id().to_string())
             .arg(video)
             .arg(if on { "on" } else { "off" })
             .arg(crate::wads::shaders())
+            .args(["--language", crate::lang::language().code])
+            .args(["--efficient", &self.poom_efficient])
             .current_dir(&saves)
-            .stderr(std::process::Stdio::piped())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+            .inherit(&mapping)
+            .inherit(&event)
+            .stderr(pms_spawn::Stdio::Piped)
+            .processes(2)
+            .children(true)
+            // An instrumented build (PGO training) has to end as a program does, with the daemon, to write what it recorded.
+            .ends_with_parent(!cfg!(pms_pgo));
+        // The game in its sandbox: the console's told which, and starts it in it. If it can't be made, there's no game, rather
+        // than one that isn't in the sandbox the settings asked for.
+        let command = if self.poom_sandboxed {
+            let wads = crate::wads::dir();
+            match crate::sandbox::container(crate::sandbox::Helper::Poom, &[(&wads, false), (&saves, true)], false) {
+                Ok(c) => {
+                    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                    let caps = c.capabilities.iter().map(|s| hex(s)).collect::<Vec<_>>().join(",");
+                    command.args(["--poom-sandbox".to_string(), hex(&c.sid), caps, u8::from(c.lpac).to_string()]).arg(&c.folder)
+                }
+                Err(e) => {
+                    crate::sandbox::said(crate::sandbox::Helper::Poom, &e);
+                    return crate::log(format!("console: the game's sandbox couldn't be made, so there's no game: {e}"));
+                }
+            }
+        } else {
+            command
+        };
+        let spawned = command.spawn();
+        if spawned.is_ok() && self.poom_sandboxed {
+            crate::sandbox::said(crate::sandbox::Helper::Poom, "");
+        }
+        if spawned.is_ok()
+            && let Ok(mut console) = self.shared.console.lock()
+        {
+            *console = Some(screen);
+        }
+        self.game_sandboxed = self.poom_sandboxed;
+        self.game_efficient = self.poom_efficient.clone();
         match spawned {
             Ok(mut child) => {
                 // The last lines are kept, and only said if it falls over: enough to reach back past a backtrace to the panic.
@@ -1414,6 +1567,12 @@ impl Screens {
                                 // one nobody's played yet: it's the one before it that was.
                                 if said == "POOM started" {
                                     shared.played.store(false, Ordering::Relaxed);
+                                }
+                                // Which speed demo it's showing, if any: for the PIMPBOX card.
+                                if let Some(file) = said.strip_prefix("POOM shows ")
+                                    && let Ok(mut demo) = shared.game_demo.lock()
+                                {
+                                    *demo = crate::demos::showing(std::path::Path::new(file));
                                 }
                                 // And one somebody's pressed a key at, in the console's window, has been: however long
                                 // ago the window was opened, and whichever game was in it then.
@@ -1491,12 +1650,31 @@ impl Screens {
             self.shared.game_on.store(game_on, Ordering::Relaxed);
         }
         self.shared.battery.store(battery, Ordering::Relaxed);
+        crate::iss::follow(config, battery);
         let was = self.shared.busy.swap(self.load.busy(Instant::now()), Ordering::Relaxed);
         if self.shared.busy.load(Ordering::Relaxed) != was {
             crate::log(format!("TV: {} fps, as the PC is {}", if was { FPS } else { BUSY_FPS }, if was { "quiet again" } else { "busy" }));
         }
         self.shared.resting.store(!active, Ordering::Relaxed);
         self.shared.autostart.store(config.console_autostart, Ordering::Relaxed);
+        // The game's sandbox, switched on or off: the console starts again, so that the game's started the new way.
+        self.poom_sandboxed = config.sandboxed(crate::sandbox::Helper::Poom);
+        // Speed demos: kept up to date while they're wanted (now and then, on a thread of its own). The console finds what plays
+        // itself, each time it starts its game.
+        crate::demos::keep_up(config, self.game.is_some() && !self.game_off);
+        if self.game.is_some() && self.game_sandboxed != self.poom_sandboxed {
+            crate::log(format!("console: the game's sandbox is switched {}: starting it again", if self.poom_sandboxed { "on" } else { "off" }));
+            self.stop_game();
+        }
+        // So too when it's in efficiency mode: the console's the one that knows when its window's open.
+        self.poom_efficient = config.efficiency.clone().unwrap_or_default().pimpbox;
+        if !crate::config::PIMPBOX_EFFICIENT.contains(&self.poom_efficient.as_str()) {
+            self.poom_efficient = crate::config::Efficiency::default().pimpbox;
+        }
+        if self.game.is_some() && self.game_efficient != self.poom_efficient {
+            crate::log(format!("console: efficiency mode is now \"{}\": starting it again", self.poom_efficient));
+            self.stop_game();
+        }
         // Only what the settings say, unless a remote is ahead of them.
         if self.shared.video_asked.load(Ordering::Relaxed) == 0 {
             self.shared.video.store(crate::config::CONSOLE_VIDEO.iter().position(|v| *v == config.console_video).unwrap_or(0) as u32, Ordering::Relaxed);
@@ -1530,11 +1708,11 @@ impl Screens {
             *said = evicted;
         }
         if let Some(game) = &mut self.game
-            && let Ok(Some(status)) = game.try_wait()
+            && let Some(code) = game.try_wait()
         {
             // Quit from its menu ends it too, and a fresh start is what's wanted then.
-            crate::log(format!("console: the game stopped ({status})"));
-            if !status.success()
+            crate::log(format!("console: the game stopped (exit code {code:#x})"));
+            if code != 0
                 && let Ok(said) = self.game_said.lock()
             {
                 // What it said, without a backtrace's frames: the panic, where it was, and the last word.
@@ -1729,18 +1907,20 @@ mod tests {
     fn up_and_down_go_round_every_channel_with_or_without_a_game() {
         let mut tv = on(2, false);
         let mut seen = vec![];
-        for _ in 0..5 {
+        for _ in 0..6 {
             tv.press(Button::ChannelUp);
             seen.push(channel(&tv));
         }
-        assert_eq!(seen, [3, 4, 5, GAME, 1295]);
+        assert_eq!(seen, [3, 4, 5, 37, 304, 1295]);
         tv.press(Button::ChannelUp);
         assert_eq!(channel(&tv), 2);
         tv.press(Button::ChannelDown);
         assert_eq!(channel(&tv), 1295);
         tv.press(Button::ChannelDown);
         assert_eq!(channel(&tv), GAME);
-        let mut tv = on(5, true);
+        tv.press(Button::ChannelDown);
+        assert_eq!(channel(&tv), ISS, "switched off or not, Number One's there to go to");
+        let mut tv = on(ISS, true);
         tv.press(Button::ChannelUp);
         assert_eq!(channel(&tv), GAME);
     }
@@ -1755,7 +1935,13 @@ mod tests {
             assert_ne!(tv.channel, before);
             seen.insert(channel(&tv));
         }
-        assert_eq!(seen.len(), CHANNELS.len() - 1, "all but the console");
+        assert_eq!(seen.len(), CHANNELS.len() - 2, "all but the console, and Number One, switched off");
+        assert!(!seen.contains(&ISS));
+        tv.set_iss(true);
+        assert!((0..200).any(|_| {
+            tv.wander();
+            channel(&tv) == ISS
+        }), "switched on, it's in the shuffle");
         let (mut tv, mut px) = (on(3, false), vec![0; W * H * 4]);
         tv.left = 10;
         tv.frame(DT, W, H, &mut px, None);
@@ -1775,8 +1961,8 @@ mod tests {
                 seen.push(channel(&tv));
             }
         }
-        assert_eq!(seen, [1295, 2, 3, 4, 5, GAME]);
-        assert!((13_500..15_000).contains(&ms), "Captain Midnight for six seconds, then two for each channel: {ms}");
+        assert_eq!(seen, [1295, 2, 3, 4, 5, 37, 304]);
+        assert!((15_500..17_000).contains(&ms), "Captain Midnight for six seconds, then two for each channel: {ms}");
     }
 
     #[test]
@@ -1798,7 +1984,7 @@ mod tests {
 
     #[test]
     fn the_console_channel_is_always_there_but_shuffling_keeps_off_it_unless_something_is_on() {
-        let mut tv = on(5, false);
+        let mut tv = on(ISS, false);
         tv.press(Button::ChannelUp);
         assert_eq!(channel(&tv), GAME);
         assert!(tv.on_console());
@@ -1932,7 +2118,7 @@ mod tests {
         tv.start_intro(INTRO_FROM, INTRO_TO);
         assert!(!tv.intro.is_empty() && !tv.shuffle, "no game needed");
         assert_eq!(intro(3, 5), [(3, INTRO_MS), (4, INTRO_MS)]);
-        assert_eq!(intro(4, 2), [(4, INTRO_MS), (5, INTRO_MS), (GAME, INTRO_MS), (MIDNIGHT_CHANNEL, INTRO_MIDNIGHT_MS)], "round past the top");
+        assert_eq!(intro(4, 2), [(4, INTRO_MS), (5, INTRO_MS), (ISS, INTRO_MS), (GAME, INTRO_MS), (MIDNIGHT_CHANNEL, INTRO_MIDNIGHT_MS)], "round past the top");
         assert!(intro(5, 5).is_empty(), "starting where it ends: it just goes there");
         assert_eq!(intro(77, 99), intro(INTRO_FROM, INTRO_TO), "channels there aren't are the usual ones");
         let mut tv = Tv::new(3, Kept::default(), false);
@@ -2019,7 +2205,7 @@ mod tests {
     }
 
     #[test]
-    fn with_the_console_off_channel_six_says_so() {
+    fn with_the_console_off_its_channel_says_so() {
         let (mut tv, mut px) = (on(GAME, true), vec![0; W * H * 4]);
         assert!(tv.frame(DT, W, H, &mut px, None));
         assert_eq!(rgb(&px, 1, 1), [0, 0, 170]);
@@ -2028,11 +2214,37 @@ mod tests {
 
     #[test]
     fn what_a_set_keeps_comes_back() {
-        let sets = HashMap::from([("TV".to_string(), Kept { channel: 6, shuffle: false, on: true }), ("TV 2".to_string(), Kept { channel: 4, shuffle: true, on: false })]);
+        let sets = HashMap::from([("TV".to_string(), Kept { channel: GAME, shuffle: false, on: true }), ("TV 2".to_string(), Kept { channel: 4, shuffle: true, on: false })]);
         let (back, game_on) = parse_state(&state_text(&sets, false));
         assert_eq!(back, sets);
         assert!(!game_on);
         assert!(parse_state("").1, "on, to begin with");
         assert!(parse_state("rubbish\nmore\trubbish").0.is_empty());
+    }
+
+    #[test]
+    fn a_set_left_on_the_console_before_it_moved_is_on_it_still() {
+        let (sets, _) = parse_state("console\t1\n6\t0\t1\tTV\n5\t1\t1\tTV 2\n37\t0\t1\tTV 3\n");
+        assert_eq!(sets["TV"].channel, GAME, "6 was the console's: it's on 304 now");
+        assert_eq!((sets["TV 2"].channel, sets["TV 3"].channel), (5, ISS), "the rest are as they were");
+        assert!(state_text(&sets, true).contains("304\t0\t1\tTV\n"), "and it's kept that way");
+        assert_eq!((renumbered(6), renumbered(304), renumbered(1295)), (GAME, 304, 1295));
+        assert_eq!((GAME, ISS), (304, 37));
+    }
+
+    #[test]
+    fn a_click_on_number_one_tours_its_water_or_says_it_is_off() {
+        let mut tv = on(ISS, true);
+        assert_eq!(tv.click(true), Clicked::IssOff, "switched off: to its settings, and not to the console");
+        assert_eq!(channel(&tv), ISS);
+        tv.set_iss(true);
+        assert_eq!(tv.click(true), Clicked::Done);
+        assert_eq!((channel(&tv), tv.iss_tour()), (ISS, Some(crate::iss::Tank::Waste)), "round the station's water");
+        let mut shuffling = Tv::new(3, Kept { channel: ISS, shuffle: true, on: true }, true);
+        assert_eq!(shuffling.click(true), Clicked::Done);
+        assert!(!shuffling.shuffle && shuffling.iss_tour().is_none(), "the first click only stops the shuffling, as anywhere");
+        let mut starting = Tv::new(3, Kept::default(), false);
+        starting.start_intro(5, GAME);
+        assert!(!starting.on_iss(), "on the way through, it isn't watched");
     }
 }

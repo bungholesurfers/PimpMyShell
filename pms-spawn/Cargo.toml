@@ -1,0 +1,11 @@
+[package]
+name = "pms-spawn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "How PimpMyShell starts its helpers: each in a job of its own, with only the handles it's given, and no console"
+publish = false
+
+# Nothing: the few calls it makes are declared here, so that the console's workspace, which has a lockfile of its own,
+# can use it as it is.
+[dependencies]

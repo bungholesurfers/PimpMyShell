@@ -174,9 +174,9 @@ fn disk_model(number: u32) -> Option<String> {
         9 => "iSCSI",
         10 => "SAS",
         11 => "SATA",
-        12 => "SD card",
+        12 => crate::lang::meters::BUS_SD_CARD.t(),
         13 => "MMC",
-        14 | 15 => "virtual",
+        14 | 15 => crate::lang::meters::BUS_VIRTUAL.t(),
         16 => "Storage Spaces",
         17 => "NVMe",
         _ => "",
@@ -496,7 +496,7 @@ pub fn space(free: u64, total: u64) -> String {
         let g = b as f64 / (1u64 << 30) as f64;
         if g >= 1024.0 { format!("{:.1} TB", g / 1024.0) } else { format!("{g:.0} GB") }
     };
-    format!("{} free of {}", gb(free), gb(total))
+    crate::lang::meters::SPACE.with(&[("free", &gb(free)), ("total", &gb(total))])
 }
 
 #[cfg(test)]

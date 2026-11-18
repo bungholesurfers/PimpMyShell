@@ -342,14 +342,27 @@ pub fn more(c: &mut Canvas, how_many: Option<usize>, faded: f32) {
     }
 }
 
-/// The button that says sets come by themselves, and leads to the setting.
-pub fn automatic(c: &mut Canvas) {
+/// The button that says sets come by themselves, and switches that: `on`, a light A on black in a purple frame; off, the A and
+/// its frame dim, with nothing behind them, as the plus is once it's put away.
+pub fn automatic(c: &mut Canvas, on: bool) {
     c.px.fill(0);
     let (w, h) = (c.w, c.h);
-    rect(c, 0, 0, w, h, PURPLE);
-    rect(c, 1, 1, w.saturating_sub(2), h.saturating_sub(2), BLACK);
     let s = (w.min(h) / 7).max(1);
-    c.text("A", w.saturating_sub(3 * s) / 2, h.saturating_sub(5 * s) / 2, s, PURPLE_LIGHT, false);
+    let (x, y) = (w.saturating_sub(3 * s) / 2, h.saturating_sub(5 * s) / 2);
+    if on {
+        rect(c, 0, 0, w, h, PURPLE);
+        rect(c, 1, 1, w.saturating_sub(2), h.saturating_sub(2), BLACK);
+        c.text("A", x, y, s, PURPLE_LIGHT, false);
+    } else {
+        for py in 0..h {
+            for px in 0..w {
+                if py == 0 || px == 0 || py + 1 == h || px + 1 == w {
+                    over(c, px, py, PURPLE, 0.5);
+                }
+            }
+        }
+        c.text("A", x, y, s, PURPLE, false);
+    }
 }
 
 /// The light for playing below the set's best.

@@ -36,13 +36,33 @@ pub const LENGTH: f32 = HIT + 3.55;
 /// How long the short one lasts: the console coming back on when it's only just been on. The mark and the name come up out
 /// of the dark, with no blow to shake them, and from there it's the end of the long one.
 pub const SHORT: f32 = LENGTH - HIT;
+/// The looks the console's own icon (its taskbar button) takes as this plays, after the animation's own colors (icon.rs, with
+/// each look's colors): as it warms up and its name rains down; for each flash of that rain; from when the ball's a mirror ball
+/// in its hall; and from the mark on, as the console's program file has it.
+pub mod icon;
+pub use icon::Look;
+
+/// How long a flash lasts on the icon: the rain's one frame on screen would be gone before the taskbar showed it.
+pub const ICON_FLASH: f32 = 0.15;
+
+/// The icon's look `t` seconds in (the short one, `short`, starts at the mark).
+pub fn look(t: f32, short: bool) -> Look {
+    if short || t >= HIT {
+        return Look::Mark;
+    }
+    if std::iter::once(FLIP).chain(LANDS).any(|at| (at..at + ICON_FLASH).contains(&t)) {
+        return Look::Flash;
+    }
+    if t >= BALL { Look::Hall } else { Look::Rain }
+}
+
 /// What goes on in the hall was timed for a ball that came at 2: how much later than that it comes.
 const LATER: f32 = BALL - 2.0;
 /// The last time it comes down, and how high each bounce after a landing takes its middle above where it rests.
 const LAST: f32 = LANDS[LANDS.len() - 1];
 const PEAKS: [f32; 4] = [1.1, 0.95, 0.8, 0.6];
 
-/// The mark, as dots.
+/// The mark, as dots. The same as `dollar.txt` beside this, which the console's build draws its icon from (a test says so).
 const DOLLAR: [&str; 13] = [
     ".....#.....",
     "..#######..",
@@ -1289,6 +1309,27 @@ pub mod gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_icon_goes_green_purple_with_green_flashes_and_then_orange() {
+        assert_eq!(look(0.0, false), Look::Rain);
+        assert_eq!(look(RAIN + 0.05, false), Look::Rain);
+        assert_eq!(look(FLIP + 0.01, false), Look::Flash, "the rain's own flip to black on green");
+        assert_eq!(look(BALL - 0.01, false), Look::Rain);
+        assert_eq!(look(BALL + 0.01, false), Look::Hall);
+        for at in LANDS {
+            assert_eq!(look(at + 0.01, false), Look::Flash);
+            assert_eq!(look(at + ICON_FLASH + 0.01, false), Look::Hall);
+        }
+        assert_eq!(look(HIT, false), Look::Mark);
+        assert_eq!(look(0.0, true), Look::Mark, "the short one starts at the mark");
+    }
+
+    #[test]
+    fn the_icons_mark_is_this_one() {
+        let file: Vec<&str> = include_str!("dollar.txt").lines().collect();
+        assert_eq!(file, DOLLAR, "dollar.txt, which pms-pimpbox's icon is drawn from, is the mark");
+    }
 
     #[test]
     fn the_mark_knows_how_far_off_it_is() {

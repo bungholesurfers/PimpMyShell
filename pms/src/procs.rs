@@ -24,7 +24,7 @@ use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QU
 use windows::Win32::System::WindowsProgramming::QueryProcessCycleTime;
 
 /// The programs that are PimpMyShell's, whoever started them.
-const OURS: [&str; 5] = ["pmsd.exe", "pms-gui.exe", "pms.exe", crate::parts::PIMPBOX, "pms-twatch.exe"];
+const OURS: [&str; 7] = ["pmsd.exe", "pms-gui.exe", "pms.exe", crate::parts::PIMPBOX, crate::parts::POOM, "pms-twatch.exe", crate::fetch::FETCH];
 
 /// One of them, as it is now.
 #[derive(Clone, Debug, PartialEq)]
@@ -115,11 +115,9 @@ pub fn ours() -> Vec<Proc> {
         if found.iter().any(|p| p.pid == pid) || found.len() >= 64 {
             continue;
         }
-        let Some((_, parent, name)) = everything.iter().find(|(p, ..)| *p == pid) else { continue };
+        let Some((_, _, name)) = everything.iter().find(|(p, ..)| *p == pid) else { continue };
         let Some((busy, private)) = measured(pid) else { continue };
-        // The game in the console is the console's own program again: said, since the name doesn't.
-        let game = name.eq_ignore_ascii_case(crate::parts::PIMPBOX) && everything.iter().any(|(p, _, n)| p == parent && n.eq_ignore_ascii_case(crate::parts::PIMPBOX));
-        found.push(Proc { pid, name: if game { format!("{name} (POOM)") } else { name.clone() }, depth, busy, private });
+        found.push(Proc { pid, name: name.clone(), depth, busy, private });
         todo.extend(everything.iter().filter(|(child, parent, _)| *parent == pid && *child != pid).map(|(child, ..)| (*child, depth + 1)).rev());
     }
     found
@@ -136,7 +134,7 @@ pub fn shell() -> Option<Proc> {
         GetWindowThreadProcessId(taskbar, Some(&mut pid));
     }
     let (busy, private) = measured(pid)?;
-    Some(Proc { pid, name: "explorer.exe (the taskbar, with PimpMyShell's part in it)".into(), depth: 0, busy, private })
+    Some(Proc { pid, name: crate::lang::procs::EXPLORER.t().into(), depth: 0, busy, private })
 }
 
 /// How long a process has had a processor, and how much memory is its alone, from the list the system keeps of every
@@ -197,10 +195,10 @@ pub fn dwm() -> Option<Proc> {
 }
 
 /// What the Desktop Window Manager has to do with PimpMyShell, for whoever's reading its row.
-pub const DWM_IS: &str = "Desktop Window Manager: the system compositor. The taskbar is a XAML island whose visual tree, with PimpMyShell's elements in it, is a tree of Windows.UI.Composition visuals that DWM composes every frame. So the meters' and TVs' surfaces, the acrylic and other effect brushes, and every composition animation (glows, ripples, toasts, the remote's beam) are rendered here, on DWM's own GPU time and video memory, not in Explorer.";
+pub const DWM_IS: crate::lang::procs::Id = crate::lang::procs::DWM_IS;
 
 /// What the graphics memory figures are, and aren't, for whoever's reading them.
-pub const GPU_MEMORY_IS: &str = "GPU figures are Windows' own per-process counters, the ones Task Manager shows. The memory column is dedicated video memory committed to each process, which isn't what it has on the card: memory the card has paged out to system RAM still counts, and a surface shared between processes counts in each of them (most of all in dwm.exe, which holds every window's). So a row can overstate what a process really occupies, and the rows can add up to more than the card has in use.";
+pub const GPU_MEMORY_IS: crate::lang::procs::Id = crate::lang::procs::GPU_MEMORY_IS;
 
 /// How much of the graphics card each process is using, and how much of its memory: looked at as often as it's asked.
 /// The first look says nothing of how busy anything is, as that's measured between two.
@@ -252,10 +250,9 @@ impl Gpus {
         }
     }
 
-    /// For each process that's using a card: how much of it (a percentage, the busiest of the card's engines, as Task
-    /// Manager has it), and how many bytes of its dedicated memory are committed to it. Committed, which isn't the same as
-    /// on the card: see `GPU_MEMORY_IS`.
-    pub fn look(&mut self) -> std::collections::HashMap<u32, (f32, u64)> {
+    /// For each process that's using a card: how much of it, which kinds of its engines, and how many bytes of its
+    /// dedicated memory are committed to it (`GpuUse`). Committed, which isn't the same as on the card: see `GPU_MEMORY_IS`.
+    pub fn look(&mut self) -> std::collections::HashMap<u32, GpuUse> {
         use std::collections::HashMap;
         unsafe { windows::Win32::System::Performance::PdhCollectQueryData(self.query) };
         // A counter's instance is named for its process, its card, and for an engine which of the card's: pid_1234_luid_0x…_0x…_phys_0_eng_3_engtype_3D.
@@ -265,24 +262,71 @@ impl Gpus {
             let card = rest.strip_prefix("luid_")?.to_ascii_lowercase();
             (!self.made_up.iter().any(|made_up| card.starts_with(made_up.as_str()))).then_some((pid.parse().ok()?, card))
         };
-        let mut engines: HashMap<(u32, String), f64> = HashMap::new();
+        // Each process's engines by kind: every engine of a kind, on every card, added up.
+        let mut kinds: HashMap<u32, Vec<(String, f64)>> = HashMap::new();
         for (name, value) in crate::meters::instances(self.busy).unwrap_or_default() {
-            if let Some(which) = named(&name) {
-                *engines.entry(which).or_default() += value;
+            if let Some((pid, _)) = named(&name) {
+                let (kind, of) = (engine_kind(&name), kinds.entry(pid).or_default());
+                match of.iter_mut().find(|(k, _)| *k == kind) {
+                    Some((_, busy)) => *busy += value.max(0.0),
+                    None => of.push((kind, value.max(0.0))),
+                }
             }
         }
-        let mut found: HashMap<u32, (f32, u64)> = HashMap::new();
-        for ((pid, _), busy) in engines {
-            let so_far = found.entry(pid).or_default();
-            so_far.0 = so_far.0.max(busy.clamp(0.0, 100.0) as f32);
+        let mut found: HashMap<u32, GpuUse> = HashMap::new();
+        for (pid, kinds) in kinds {
+            let (busy, engines) = in_all(kinds);
+            found.insert(pid, GpuUse { busy, memory: 0, engines });
         }
         for (name, value) in crate::meters::instances(self.memory).unwrap_or_default() {
             if let Some((pid, _)) = named(&name) {
-                found.entry(pid).or_default().1 += value.max(0.0) as u64;
+                found.entry(pid).or_default().memory += value.max(0.0) as u64;
             }
         }
         found
     }
+}
+
+/// What a process is doing with the graphics cards, as of a look.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GpuUse {
+    /// How much of the cards it's using, as a percentage: every engine it's using, added up. A card has an engine for each
+    /// kind of work (drawing, decoding video, copying), each of which can be busy up to 100%, so a process on two of them
+    /// at once can pass 100. Task Manager's column shows the busiest one alone.
+    pub busy: f32,
+    /// How many bytes of the cards' dedicated memory are committed to it.
+    pub memory: u64,
+    /// The kinds of engine it's using, busiest first: "3D", "Video Decode", "Copy".
+    pub engines: Vec<String>,
+}
+
+/// As little of an engine as shows in a figure with one decimal place: less than that isn't worth naming it for.
+const WORTH_NAMING: f64 = 0.05;
+
+/// The kind of engine a counter's instance is for, as it's shown: `pid_1_luid_…_eng_3_engtype_VideoDecode` is "Video Decode".
+fn engine_kind(instance: &str) -> String {
+    let Some((_, kind)) = instance.split_once("engtype_") else { return "Other".into() };
+    let mut shown = String::new();
+    for c in kind.chars() {
+        // A word begins at a capital that comes after a small letter, and where there's an underline.
+        if c.is_ascii_uppercase() && shown.chars().last().is_some_and(|before| before.is_ascii_lowercase()) {
+            shown.push(' ');
+        }
+        shown.push(if c == '_' { ' ' } else { c });
+    }
+    if shown.trim().is_empty() { "Other".into() } else { shown.trim().to_string() }
+}
+
+/// What a process's engines come to, kind by kind: how busy they are in all, and the kinds to name for it, busiest first.
+/// Those are the ones doing enough to show in the figure; and the busiest alone, where only all of them together do.
+fn in_all(mut kinds: Vec<(String, f64)>) -> (f32, Vec<String>) {
+    let busy: f64 = kinds.iter().map(|(_, busy)| busy).sum();
+    kinds.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut engines: Vec<String> = kinds.iter().filter(|(_, busy)| *busy >= WORTH_NAMING).map(|(kind, _)| kind.clone()).collect();
+    if engines.is_empty() && busy >= WORTH_NAMING {
+        engines.extend(kinds.first().map(|(kind, _)| kind.clone()));
+    }
+    (busy as f32, engines)
 }
 
 impl Gpus {
@@ -327,6 +371,29 @@ mod tests {
         if let Some(mut gpus) = Gpus::new() {
             let _ = gpus.look();
         }
+    }
+
+    #[test]
+    fn an_engine_is_named_for_its_kind() {
+        assert_eq!(engine_kind("pid_1234_luid_0x00000000_0x0000d2f4_phys_0_eng_3_engtype_VideoDecode"), "Video Decode");
+        assert_eq!(engine_kind("pid_1234_luid_0x00000000_0x0000d2f4_phys_0_eng_0_engtype_3D"), "3D");
+        assert_eq!(engine_kind("pid_1_luid_0x0_0x1_phys_0_eng_5_engtype_Compute_0"), "Compute 0");
+        assert_eq!(engine_kind("pid_1_luid_0x0_0x1_phys_0_eng_7_engtype_Legacy Overlay"), "Legacy Overlay");
+        assert_eq!(engine_kind("pid_1_luid_0x0_0x1_phys_0_eng_7_engtype_"), "Other");
+        assert_eq!(engine_kind("pid_1_luid_0x0_0x1_phys_0"), "Other");
+    }
+
+    #[test]
+    fn engines_add_up_and_the_busy_ones_are_named() {
+        let kinds = |of: &[(&str, f64)]| of.iter().map(|(kind, busy)| (kind.to_string(), *busy)).collect::<Vec<_>>();
+        // Two at once, each most of the way: more than one engine's worth.
+        assert_eq!(in_all(kinds(&[("3D", 70.0), ("Video Decode", 80.0), ("Copy", 0.0)])), (150.0, vec!["Video Decode".to_string(), "3D".to_string()]));
+        // Too little to show isn't named, and nothing at all is nothing.
+        assert_eq!(in_all(kinds(&[("3D", 2.0), ("Copy", 0.01)])).1, ["3D"]);
+        assert_eq!(in_all(kinds(&[("3D", 0.0), ("Copy", 0.0)])), (0.0, vec![]));
+        assert_eq!(in_all(Vec::new()), (0.0, vec![]));
+        // Each too little by itself, and enough together to show: the busiest stands for them.
+        assert_eq!(in_all(kinds(&[("Copy", 0.03), ("3D", 0.04)])).1, ["3D"]);
     }
 
     #[test]

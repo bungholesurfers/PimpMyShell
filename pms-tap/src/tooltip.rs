@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 
 use pms_xaml::{
-    Border, Canvas, CornerRadius, FontFamily, FrameworkElement, PointerEventHandler, Rectangle, SolidColorBrush, TextBlock, Thickness, UIElement,
+    Border, Canvas, CornerRadius, FrameworkElement, PointerEventHandler, Rectangle, SolidColorBrush, TextBlock, Thickness, UIElement,
 };
 use pms_xaml::Popup;
 use windows::Foundation::{Point, Rect, Size};
@@ -79,13 +79,13 @@ fn build(ctx: &Ctx) -> R<Tips> {
     let tray = resolve_elem("SystemTrayFrame")?;
     let parent = crate::layout::grid_above(ctx, tray)?;
     // No background: only the zones in it catch the pointer.
-    let overlay = Canvas::new().map_err(w)?;
+    let overlay = crate::stage::canvas()?;
     parent.Children().map_err(w)?.Append(&ui(&overlay)?).map_err(w)?;
 
     let text = TextBlock::new().map_err(w)?;
     text.SetFontSize(12.0).map_err(w)?;
     // Fixed-width: readings are padded to line up and to stay put as they change.
-    text.SetFontFamily(&FontFamily::CreateInstanceWithName(&HSTRING::from("Cascadia Mono, Consolas")).map_err(w)?).map_err(w)?;
+    text.SetFontFamily(&crate::stage::font("Cascadia Mono, Consolas")?).map_err(w)?;
     text.SetForeground(&brush(TEXT)?).map_err(w)?;
     let border = Border::new().map_err(w)?;
     border.SetBackground(&brush(BACKGROUND)?).map_err(w)?;
@@ -123,23 +123,23 @@ pub fn set_zones(specs: Vec<ZoneSpec>) {
                 let rect = Rectangle::new().map_err(w)?;
                 rect.SetFill(&brush(Color { A: 0, R: 0, G: 0, B: 0 })?).map_err(w)?;
                 let el = ui(&rect)?;
-                let moved = PointerEventHandler::new(move |_, args| {
+                let moved = PointerEventHandler::new(move |_, args| crate::guard(|| {
                     if let Some(p) = args.as_ref().and_then(|a| a.GetCurrentPoint(None::<&UIElement>).ok()).and_then(|p| p.Position().ok()) {
                         hover(i, p);
                     }
                     Ok(())
-                });
+                }));
                 el.PointerEntered(&moved).map_err(w)?;
-                el.Tapped(&pms_xaml::TappedEventHandler::new(move |_, _| {
+                el.Tapped(&pms_xaml::TappedEventHandler::new(move |_, _| crate::guard(|| {
                     tapped(i);
                     Ok(())
-                }))
+                })))
                 .map_err(w)?;
                 el.PointerMoved(&moved).map_err(w)?;
-                el.PointerExited(&PointerEventHandler::new(move |_, _| {
+                el.PointerExited(&PointerEventHandler::new(move |_, _| crate::guard(|| {
                     leave(i);
                     Ok(())
-                }))
+                })))
                 .map_err(w)?;
                 children.Append(&el).map_err(w)?;
                 t.zones.push(Zone { rect, meter: usize::MAX, left: 0.0, top: 0.0, width: 0.0, bars: Vec::new(), bar0: 0, device: None });
@@ -176,6 +176,7 @@ pub fn set_zones(specs: Vec<ZoneSpec>) {
 fn tapped(i: usize) {
     let meter = TIPS.with_borrow(|s| s.as_ref().and_then(|t| t.zones.get(i)).map(|z| z.meter));
     if let Some(source) = meter.and_then(crate::meters::screen_source) {
+        crate::remote::clicked();
         crate::screen::click(&source);
     }
 }
@@ -271,7 +272,13 @@ fn show(text: Option<String>) {
             let x = if p.X + OFFSET.X + size.Width + 4.0 > room { (p.X - OFFSET.X - size.Width).max(0.0) } else { p.X + OFFSET.X };
             t.popup.SetHorizontalOffset(x as f64).map_err(w)?;
             t.popup.SetVerticalOffset((p.Y - OFFSET.Y - size.Height) as f64 - 18.0).map_err(w)?;
-            t.popup.SetIsOpen(true).map_err(w)
+            let was_open = t.popup.IsOpen().unwrap_or(false);
+            t.popup.SetIsOpen(true).map_err(w)?;
+            // Over every window, as a tooltip should be (remote.rs says why it might not be).
+            if !was_open {
+                crate::remote::float_popups();
+            }
+            Ok(())
         })();
         if let Err(e) = r {
             crate::log(format!("tooltip: {e}"));

@@ -137,6 +137,14 @@ impl Emitter {
             r.brush.StartAnimation(&HSTRING::from("Color"), &fade).map_err(w)?;
             self.retiring.push((r.shape, now + Duration::from_millis(rest as u64 + 100)));
         }
+        // No more than two sets finishing at once: started over and over (a flood of notifications, each one restarting the
+        // rings), they'd otherwise pile up, each a ring as wide as the taskbar, every one redrawn each frame. The oldest go first.
+        let most = 2 * self.rings.len();
+        if self.retiring.len() > most {
+            for (shape, _) in self.retiring.drain(..self.retiring.len() - most) {
+                remove(list, &shape)?;
+            }
+        }
         Ok(())
     }
 }

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
 use windows::Win32::System::Memory::{CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
-use windows_core::HSTRING;
+use windows_core::{HSTRING, PCWSTR};
 
 /// The biggest frame, either way: a taskbar at 350% is about 170 pixels tall.
 pub const MAX_SIDE: u32 = 256;
@@ -26,7 +26,7 @@ const SLOTS: usize = 3;
 const SLOT_BYTES: usize = (MAX_SIDE * MAX_SIDE * 4) as usize;
 const PIXELS_AT: usize = 4096;
 const BYTES: usize = PIXELS_AT + SLOTS * SLOT_BYTES;
-const MAGIC: u32 = u32::from_le_bytes(*b"PMS6");
+const MAGIC: u32 = u32::from_le_bytes(*b"PMS7");
 /// As much as a screen can say about itself, in the room before the pixels.
 const INFO_BYTES: usize = 3072;
 
@@ -53,10 +53,21 @@ struct Header {
     watched: AtomicU64,
     /// A channel asked for from the list, until the TV has taken it.
     wanted_channel: AtomicU32,
+    /// Live video that goes to the screen straight from the GPU, not through these frames (`offer_surface`): which offer this
+    /// is (0, none yet), the process that has the surface, and its handle there (0: there's none now).
+    surface_offer: AtomicU64,
+    surface_from: AtomicU32,
+    surface: AtomicU64,
+    /// The reader's answer: the last offer it's showing, and the last it couldn't.
+    surface_shown: AtomicU64,
+    surface_refused: AtomicU64,
     /// How long `info` is, and what the writer has to say, for whatever shows the buttons.
     info_len: AtomicU32,
     info: [AtomicU8; INFO_BYTES],
 }
+
+// The header has to fit in the room before the pixels.
+const _: () = assert!(size_of::<Header>() <= PIXELS_AT);
 
 /// The buttons on a screen's remote.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -105,15 +116,26 @@ pub enum Button {
     GamePrev,
     /// Said to the console's own screen: the game it's to play has changed, and its screen's `info` says to which.
     ConsoleGame,
+    /// One more, or one fewer, of the Twatch TVs that may come by themselves: said to the button beside the sets that switches
+    /// those on and off.
+    MoreSets,
+    FewerSets,
 }
 
 /// The channels there are, and what a remote calls them.
-pub const CHANNELS: [(u32, &str); 6] = [(2, "TEST CARD"), (3, "CRAB"), (4, "STATIC"), (5, "PIMPCAST"), (6, "PIMPBOX"), (1295, "MIDNIGHT")];
-pub const GAME_CHANNEL: u32 = 6;
+pub const CHANNELS: [(u32, &str); 7] = [(2, "TEST CARD"), (3, "CRAB"), (4, "STATIC"), (5, "PIMPCAST"), (ISS_CHANNEL, "NUMBER ONE"), (GAME_CHANNEL, "PIMPBOX"), (1295, "MIDNIGHT")];
+/// The console's channel. It was 6, until Number One came.
+pub const GAME_CHANNEL: u32 = 304;
+/// Number One: the ISS's urine tank.
+pub const ISS_CHANNEL: u32 = 37;
+/// Asked for as a channel (`tune`), one of Number One's bumps: on its channel, now. This, plus which (as the daemon's
+/// `iss::bumps::Kind::ALL` has them); or `BUMP_ANY`, the next of all of them.
+pub const BUMP: u32 = 0x4000_0000;
+pub const BUMP_ANY: u32 = BUMP + 0xFFFF;
 /// The channels whose picture a click pops out into a window of its own, on the desktop.
 pub const POPS_OUT: [u32; 1] = [GAME_CHANNEL];
 
-pub const BUTTONS: [Button; 28] = [
+pub const BUTTONS: [Button; 30] = [
     Button::ChannelUp,
     Button::ChannelDown,
     Button::Shuffle,
@@ -142,6 +164,8 @@ pub const BUTTONS: [Button; 28] = [
     Button::GameNext,
     Button::GamePrev,
     Button::ConsoleGame,
+    Button::MoreSets,
+    Button::FewerSets,
 ];
 
 /// For what draws a screen, first thing: Windows keeps the pointer busy for seconds after a program starts, until it asks for its
@@ -239,6 +263,48 @@ impl Screen {
         Ok(screen)
     }
 
+    /// A screen with no name, which nothing can open but by a handle it's given: for one only this process and a helper it
+    /// starts share. The helper gets `handles` (pms-spawn's `inherit`) and takes them up with `from_handles`.
+    pub fn unnamed() -> Result<Screen, String> {
+        let mapping = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, BYTES as u32, PCWSTR::null()) }.map_err(|e| format!("a screen: {e}"))?;
+        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, BYTES) };
+        if view.Value.is_null() {
+            let _ = unsafe { CloseHandle(mapping) };
+            return Err("a screen: couldn't map it".into());
+        }
+        let event = match unsafe { CreateEventW(None, false, false, PCWSTR::null()) } {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = unsafe { UnmapViewOfFile(view) };
+                let _ = unsafe { CloseHandle(mapping) };
+                return Err(format!("a screen: {e}"));
+            }
+        };
+        let screen = Screen { mapping, view: view.Value as *mut u8, event };
+        screen.header().magic.store(MAGIC, Ordering::Release);
+        Ok(screen)
+    }
+
+    /// Its memory's and its event's handles, for handing to the process that draws on it.
+    pub fn handles(&self) -> (usize, usize) {
+        (self.mapping.0 as usize, self.event.0 as usize)
+    }
+
+    /// The screen whose handles were handed to this process: for drawing on.
+    pub fn from_handles(mapping: usize, event: usize) -> Result<Screen, String> {
+        let mapping = HANDLE(mapping as *mut _);
+        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, BYTES) };
+        if view.Value.is_null() {
+            return Err("the screen it was handed: couldn't map it".into());
+        }
+        let screen = Screen { mapping, view: view.Value as *mut u8, event: HANDLE(event as *mut _) };
+        if screen.header().magic.load(Ordering::Acquire) != MAGIC {
+            return Err("what it was handed isn't a screen".into());
+        }
+        screen.header().writer.store(std::process::id(), Ordering::Relaxed);
+        Ok(screen)
+    }
+
     fn mapped(name: &str, mapping: HANDLE) -> Result<Screen, String> {
         let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, BYTES) };
         if view.Value.is_null() {
@@ -295,18 +361,85 @@ impl Screen {
         true
     }
 
+    /// Counts a frame that went to the screen another way (`offer_surface`): its number goes up, as `publish`'s does, with no
+    /// pixels, which `latest` never takes.
+    pub fn counted(&self) {
+        let h = self.header();
+        let next = h.seq.load(Ordering::Relaxed) + 1;
+        let size = &h.sizes[(next % SLOTS as u64) as usize];
+        size[0].store(0, Ordering::Relaxed);
+        size[1].store(0, Ordering::Relaxed);
+        h.seq.store(next, Ordering::Release);
+        let _ = unsafe { SetEvent(self.event) };
+    }
+
+    /// How many frames there have been, published or counted.
+    pub fn frames(&self) -> u64 {
+        self.header().seq.load(Ordering::Acquire)
+    }
+
+    /// Offers the reader a surface to show live video on, straight from the GPU: a DirectComposition surface's `handle` in
+    /// process `from` (0, none: the offer's withdrawn). Returns the offer's number, for `answer`.
+    pub fn offer_surface(&self, from: u32, handle: u64) -> u64 {
+        let h = self.header();
+        h.surface_from.store(from, Ordering::Relaxed);
+        h.surface.store(handle, Ordering::Relaxed);
+        h.surface_offer.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The surface on offer, for the reader: (the offer's number, the process, the handle). A number of 0 is no offer yet.
+    pub fn surface(&self) -> (u64, u32, u64) {
+        let h = self.header();
+        loop {
+            let n = h.surface_offer.load(Ordering::Acquire);
+            let (from, handle) = (h.surface_from.load(Ordering::Relaxed), h.surface.load(Ordering::Relaxed));
+            // Offered again meanwhile: what was read may be half one and half the other.
+            if h.surface_offer.load(Ordering::Acquire) == n {
+                return (n, from, handle);
+            }
+        }
+    }
+
+    /// The reader says whether it's showing offer `n`.
+    pub fn surface_taken(&self, n: u64, shown: bool) {
+        let h = self.header();
+        if shown { h.surface_shown.store(n, Ordering::Release) } else { h.surface_refused.store(n, Ordering::Release) }
+    }
+
+    /// What the reader said of offer `n`: shown, couldn't be, or nothing yet.
+    pub fn answer(&self, n: u64) -> Option<bool> {
+        let h = self.header();
+        if h.surface_refused.load(Ordering::Acquire) == n {
+            Some(false)
+        } else if h.surface_shown.load(Ordering::Acquire) == n {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
     /// Copies the newest frame into `out`, if it's newer than `after` and of `width` by `height` pixels. Returns its
     /// number. A frame of another size is one drawn before the size was asked for: it's skipped.
     pub fn latest(&self, after: u64, width: u32, height: u32, out: &mut [u8]) -> Option<u64> {
         let h = self.header();
-        let n = h.seq.load(Ordering::Acquire);
-        let size = &h.sizes[(n % SLOTS as u64) as usize];
-        let fits = size[0].load(Ordering::Relaxed) == width && size[1].load(Ordering::Relaxed) == height;
-        if n == after || !fits || out.len() != (width * height * 4) as usize {
-            return None;
+        let mut taken = None;
+        // A frame's slot is written over again `SLOTS` frames on. Should the writer get that far while this copies (we'd have to
+        // be held up for whole frames), `out` could be part one frame and part another: so it looks again after, and takes the
+        // newer one then. A few goes, and after those what it has, which is no worse than not having looked.
+        for _ in 0..3 {
+            let n = h.seq.load(Ordering::Acquire);
+            let size = &h.sizes[(n % SLOTS as u64) as usize];
+            let fits = size[0].load(Ordering::Relaxed) == width && size[1].load(Ordering::Relaxed) == height;
+            if n == after || !fits || out.len() != (width * height * 4) as usize {
+                break;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(self.slot(n), out.as_mut_ptr(), out.len()) };
+            taken = Some(n);
+            if !overtaken(n, h.seq.load(Ordering::Acquire), SLOTS as u64) {
+                break;
+            }
         }
-        unsafe { std::ptr::copy_nonoverlapping(self.slot(n), out.as_mut_ptr(), out.len()) };
-        Some(n)
+        taken
     }
 
     /// Says the screen was clicked. Returns the process drawing it.
@@ -397,6 +530,12 @@ impl Screen {
     }
 }
 
+/// Whether the writer may have begun drawing over frame `n`'s slot, now that the newest frame is `now`: it does that for
+/// frame `n + slots`, which it starts on once `n + slots - 1` is up.
+fn overtaken(n: u64, now: u64, slots: u64) -> bool {
+    now + 1 >= n + slots
+}
+
 impl Drop for Screen {
     fn drop(&mut self) {
         let _ = unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.view as *mut _ }) };
@@ -416,6 +555,28 @@ mod tests {
     #[test]
     fn nothing_to_open_until_its_made() {
         assert!(Screen::open(&unique("none")).is_err());
+    }
+
+    #[test]
+    fn an_unnamed_screen_is_reached_by_its_handles() {
+        use windows::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        let shown = Screen::unnamed().unwrap();
+        // As a helper gets them: copies of the handles, which it then owns.
+        let (mapping, event) = shown.handles();
+        let copy = |h: usize| {
+            let mut out = HANDLE::default();
+            unsafe { DuplicateHandle(GetCurrentProcess(), HANDLE(h as *mut _), GetCurrentProcess(), &mut out, 0, false, DUPLICATE_SAME_ACCESS) }.unwrap();
+            out.0 as usize
+        };
+        let drawn = Screen::from_handles(copy(mapping), copy(event)).unwrap();
+        shown.want(1, 1);
+        assert!(drawn.publish(1, 1, &[9, 8, 7, 6]));
+        assert!(shown.wait(1000));
+        let mut out = [0u8; 4];
+        assert!(shown.latest(0, 1, 1, &mut out).is_some());
+        assert_eq!(out, [9, 8, 7, 6]);
+        assert_eq!(shown.writer(), std::process::id());
     }
 
     #[test]
@@ -459,6 +620,37 @@ mod tests {
     }
 
     #[test]
+    fn a_surface_is_offered_answered_and_withdrawn_and_its_frames_counted() {
+        let name = unique("surface");
+        let writer = Screen::create(&name).unwrap();
+        let reader = Screen::open(&name).unwrap();
+        assert_eq!(reader.surface(), (0, 0, 0), "nothing offered yet");
+        let first = writer.offer_surface(1234, 0x4a8);
+        assert_eq!(reader.surface(), (first, 1234, 0x4a8));
+        assert_eq!(writer.answer(first), None);
+        reader.surface_taken(first, true);
+        assert_eq!(writer.answer(first), Some(true));
+        // A new player: a new offer, which the old answer doesn't answer.
+        let second = writer.offer_surface(5678, 0x4a8);
+        assert_ne!(first, second);
+        assert_eq!(writer.answer(second), None);
+        reader.surface_taken(second, false);
+        assert_eq!(writer.answer(second), Some(false));
+        let gone = writer.offer_surface(0, 0);
+        assert_eq!(reader.surface(), (gone, 0, 0));
+        // Frames that went the other way: counted, with nothing for `latest` to take.
+        reader.want(2, 1);
+        let before = reader.frames();
+        writer.counted();
+        assert_eq!(reader.frames(), before + 1);
+        let mut out = [7u8; 8];
+        assert_eq!(reader.latest(before, 2, 1, &mut out), None);
+        assert_eq!(out, [7; 8], "untouched");
+        assert!(writer.publish(2, 1, &[1, 2, 3, 4, 5, 6, 7, 8]));
+        assert_eq!(reader.latest(before + 1, 2, 1, &mut out), Some(before + 2));
+    }
+
+    #[test]
     fn a_click_reaches_the_writer() {
         let name = unique("click");
         let writer = Screen::create(&name).unwrap();
@@ -489,5 +681,14 @@ mod tests {
         writer.publish(1, 1, &[0; 4]);
         let mut out = [0u8; 16];
         assert_eq!(writer.latest(0, 2, 2, &mut out), None, "a frame of another size is skipped");
+    }
+
+    #[test]
+    fn a_frame_is_only_drawn_over_slots_frames_on() {
+        // With three slots, frame 7's is next written for frame 10, which is begun once 9 is up.
+        assert!(!overtaken(7, 7, 3) && !overtaken(7, 8, 3), "the next frame goes somewhere else");
+        assert!(overtaken(7, 9, 3) && overtaken(7, 12, 3));
+        // With two (the console's link to its game), for the one after next: begun once the next is up.
+        assert!(!overtaken(7, 7, 2) && overtaken(7, 8, 2));
     }
 }

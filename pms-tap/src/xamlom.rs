@@ -3,8 +3,6 @@
 
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals, dead_code)]
 
-use std::mem::ManuallyDrop;
-
 use windows::Win32::Foundation::RECT;
 use windows_core::{BOOL, BSTR, GUID, HRESULT, IInspectable, IUnknown, IUnknown_Vtbl, PCWSTR, interface};
 
@@ -26,14 +24,18 @@ pub struct VisualElementState(pub i32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BaseValueSource(pub i32);
 
-/// BSTRs in structs handed to us as `[in]` are owned by the caller, hence `ManuallyDrop`.
+/// The strings in these structs are ours to free, even in the `VisualElement` that `OnVisualTreeChange` is handed, where XAML
+/// gives them away ("the contract is that we are giving ownership of these strings to the callback", WinUI's
+/// LiveVisualTree.cpp, which passes `element.release()`): so they're `BSTR`s, which free themselves when they're dropped.
+/// Held as the caller's (as they once were, in `ManuallyDrop`), all four of every element that ever came into the taskbar's
+/// tree stayed in Explorer's memory: its type's name and three empty strings, about 130 bytes each element (2026-11-16).
 #[repr(C)]
 pub struct SourceInfo {
-    pub FileName: ManuallyDrop<BSTR>,
+    pub FileName: BSTR,
     pub LineNumber: u32,
     pub ColumnNumber: u32,
     pub CharPosition: u32,
-    pub Hash: ManuallyDrop<BSTR>,
+    pub Hash: BSTR,
 }
 
 #[repr(C)]
@@ -48,8 +50,8 @@ pub struct ParentChildRelation {
 pub struct VisualElement {
     pub Handle: InstanceHandle,
     pub SrcInfo: SourceInfo,
-    pub Type: ManuallyDrop<BSTR>,
-    pub Name: ManuallyDrop<BSTR>,
+    pub Type: BSTR,
+    pub Name: BSTR,
     pub NumChildren: u32,
 }
 

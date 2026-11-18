@@ -38,6 +38,9 @@ const TYPES: &[&str] = &[
     "Windows.UI.Xaml.RoutedEventArgs",
     "Windows.UI.Xaml.Input.TappedEventHandler",
     "Windows.UI.Xaml.Input.TappedRoutedEventArgs",
+    // A second tap quick on the first is a double tap, and no tap: for keys where every press counts, it's one more.
+    "Windows.UI.Xaml.Input.DoubleTappedEventHandler",
+    "Windows.UI.Xaml.Input.DoubleTappedRoutedEventArgs",
     "Windows.UI.Xaml.Input.PointerEventHandler",
     "Windows.UI.Xaml.Input.PointerRoutedEventArgs",
     // Swiping a toast away: capturing the pointer while it drags.
@@ -78,6 +81,15 @@ const TYPES: &[&str] = &[
     "Windows.UI.Xaml.Controls.Image",
     "Windows.UI.Xaml.DependencyProperty",
     "Windows.UI.Xaml.DependencyPropertyChangedCallback",
+    // Panels and paths are made from markup: made with `new()`, Explorer's XAML never frees them (pms-tap's stage.rs).
+    "Windows.UI.Xaml.Markup.XamlReader",
+    // A notification card's pictures and glow, drawn by XAML (composition visuals of our own hung on a card stayed for good).
+    "Windows.UI.Xaml.Media.ImageBrush",
+    "Windows.UI.Xaml.Media.TileBrush",
+    "Windows.UI.Xaml.Media.Stretch",
+    "Windows.UI.Xaml.Media.AlignmentX",
+    "Windows.UI.Xaml.Media.AlignmentY",
+    "Windows.UI.Xaml.Media.Imaging.BitmapImage",
 ];
 
 /// Namespaces the `windows` crate already projects (and which XAML signatures mention).

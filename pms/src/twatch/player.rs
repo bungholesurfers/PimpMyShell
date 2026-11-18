@@ -5,7 +5,7 @@
 //! stream keeps stalling.
 
 use std::io::{BufRead, Write};
-use std::process::{Child, ChildStdin, Stdio};
+use std::fs::File;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -169,6 +169,9 @@ pub enum Said {
     Failed(String),
     Ended,
     Note(String),
+    /// A DirectComposition surface it presents each frame to, straight from the GPU: its handle, in the player (0: none any
+    /// more), for Explorer to show.
+    Surface(u64),
 }
 
 fn read(line: &str) -> Option<Said> {
@@ -180,39 +183,49 @@ fn read(line: &str) -> Option<Said> {
         "failed" => Said::Failed(rest.to_string()),
         "ended" => Said::Ended,
         "note" => Said::Note(rest.to_string()),
+        "surface" => Said::Surface(rest.trim().parse().ok()?),
         _ => return None,
     })
 }
 
 /// A running player, drawing on a screen of its own.
 pub struct Player {
-    child: Child,
-    stdin: ChildStdin,
-    name: String,
+    child: pms_spawn::Child,
+    stdin: File,
     pub screen: Option<Screen>,
 }
 
 impl Player {
     /// Starts one, on the screen called `name`, within `pace`. What it says goes to `events`, tagged with `set` and `id`.
-    pub fn start(url: &str, name: &str, pace: &Pace, set: usize, id: u64, events: Sender<Event>) -> Result<Player, String> {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    ///
+    /// It's a helper (pms-spawn): in a job that ends with the daemon, as its only process, with no console. Its screen has no
+    /// name, and is handed to it. The stream's address, which carries Twitch's token for it, and the proxy, which can carry a
+    /// password, go down its stdin before anything else, never on its command line or in its environment, where any program
+    /// could read them. Through the proxy, it goes as `session` (net::route_as): the somebody the stream was found as.
+    pub fn start(url: &str, session: Option<&crate::net::Session>, pace: &Pace, set: usize, id: u64, events: Sender<Event>) -> Result<Player, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("pms-twatch.exe");
-        let mut command = std::process::Command::new(exe);
-        // Through the proxy, if that's where the video goes: then it fetches everything itself, not Windows.
-        match crate::net::route_for(crate::net::Use::Video) {
-            Some(proxy) => command.env("PMS_TWATCH_PROXY", proxy),
-            None => command.env_remove("PMS_TWATCH_PROXY"),
+        let screen = Screen::unnamed()?;
+        let (mapping, frame) = screen.handles();
+        let (mapping, frame) = (pms_spawn::Shared::new(mapping)?, pms_spawn::Shared::new(frame)?);
+        let sandbox = crate::sandbox::for_online(crate::sandbox::Helper::Twatch, crate::net::Use::Video, session, &[])?;
+        // Sandboxed, through a proxy, it goes by way of the relay in its container: the address it's given is that.
+        let command = pms_spawn::Command::new(exe)
+            .arg("--screen")
+            .args([mapping.number().to_string(), frame.number().to_string(), pace.limit().to_string(), pace.floor().to_string()])
+            .inherit(&mapping)
+            .inherit(&frame)
+            .stdin(pms_spawn::Stdio::Piped)
+            .stdout(pms_spawn::Stdio::Piped)
+            .power(crate::efficiency::flags(crate::efficiency::Part::Twatch));
+        let (command, relayed) = match sandbox {
+            Some((c, relayed)) => (command.container(c), relayed),
+            None => (command, None),
         };
-        let mut child = command
-            .args([url, name, &pace.limit().to_string(), &pace.floor().to_string()])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("pms-twatch: {e}"))?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else { return Err("pms-twatch: no pipes".into()) };
+        let mut child = command.spawn()?;
+        let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else { return Err("pms-twatch: no pipes".into()) };
+        // Through the proxy, if that's where the video goes: then it fetches everything itself, not Windows.
+        let proxy = relayed.or_else(|| crate::net::route_as(crate::net::Use::Video, session)).map_or(String::new(), |p| format!("proxy {p}\n"));
+        stdin.write_all(format!("{proxy}play {url}\n").as_bytes()).map_err(|e| format!("pms-twatch: {e}"))?;
         std::thread::spawn(move || {
             for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Some(said) = read(&line) {
@@ -221,7 +234,7 @@ impl Player {
             }
             let _ = events.send(Event::Player { set, id, said: Said::Ended });
         });
-        Ok(Player { child, stdin, name: name.to_string(), screen: None })
+        Ok(Player { child, stdin, screen: Some(screen) })
     }
 
     pub fn tell(&mut self, line: &str) {
@@ -229,19 +242,26 @@ impl Player {
         let _ = self.stdin.flush();
     }
 
-    /// Its screen, once it has made it.
+    /// Its screen.
     pub fn screen(&mut self) -> Option<&Screen> {
-        if self.screen.is_none() {
-            self.screen = Screen::open(&self.name).ok();
-        }
         self.screen.as_ref()
+    }
+
+    /// In efficiency mode or out of it from now on (pms_spawn's `power`): whether Windows took it.
+    pub fn power(&self, flags: u32) -> bool {
+        self.child.set_power(flags)
+    }
+
+    /// Its process.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
     }
 }
 
 impl Drop for Player {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.kill();
+        self.child.wait();
     }
 }
 
@@ -336,6 +356,8 @@ mod tests {
         assert_eq!(read("playing 1280 720"), Some(Said::Playing));
         assert_eq!(read("rate 3400000"), Some(Said::Rate(3_400_000)));
         assert_eq!(read("failed it broke badly"), Some(Said::Failed("it broke badly".into())));
+        assert_eq!(read("surface 1192"), Some(Said::Surface(1192)));
+        assert_eq!(read("surface"), None);
         assert_eq!(read("what"), None);
     }
 }

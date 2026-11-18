@@ -25,7 +25,11 @@ const FREEDOOM: Download<'static> = Download {
 };
 const FREEDOOM_WAD: &str = "freedoom1.wad";
 const FREEDOOM_LICENCE: &str = "freedoom-COPYING.txt";
-const FREEDOOM_WAD_SHA256: &str = "7323bcc168c5a45ff10749b339960e98314740a734c30d4b9f3337001f9e703d";
+/// Both of Freedoom's games, in its release: Phase 1 (episodes, like Doom) and Phase 2 (32 maps, like Doom II).
+const FREEDOOM_WADS: [(&str, &str); 2] = [
+    (FREEDOOM_WAD, "7323bcc168c5a45ff10749b339960e98314740a734c30d4b9f3337001f9e703d"),
+    ("freedoom2.wad", "a8772e088847032510d97ba2312406a6998f21cbab44d4ff10696faa9c0ecd4b"),
+];
 const SHAREWARE: Download<'static> = Download {
     file: "doom-wad-shareware_1.9.fixed-5_all.deb",
     url: "https://deb.debian.org/debian/pool/non-free/d/doom-wad-shareware/doom-wad-shareware_1.9.fixed-5_all.deb",
@@ -229,21 +233,16 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// What `d` says it is, checked.
-/// Something to make requests for `what` with (net.rs), through the proxy if that's what's wanted.
-pub(crate) fn agent(what: crate::net::Use, patience: std::time::Duration, redirects: u32) -> ureq::Agent {
-    crate::net::agent(what, patience, redirects, &format!("PimpMyShell/{}", crate::version::CURRENT))
-}
-
 pub(crate) fn fetch(d: &Download, progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>, String> {
-    use std::time::Duration;
     let mut reader: Box<dyn Read> = match std::env::var_os("PMS_WAD_SOURCE") {
         Some(folder) => Box::new(std::fs::File::open(Path::new(&folder).join(d.file)).map_err(|e| format!("{}: {e}", d.file))?),
         None => {
-            let response = agent(crate::net::Use::Downloads, Duration::from_secs(600), 3).get(d.url).call().map_err(|e| format!("{}: {e}", d.url))?;
-            if !response.status().is_success() {
-                return Err(format!("{}: {}", d.url, response.status()));
+            // By way of pms-fetch.exe: what comes back is checked here, below, before anything's made of it.
+            let got = crate::fetch::download(crate::net::Use::Downloads, d.url, d.size, 3, progress).map_err(|e| format!("{}: {e}", d.url))?;
+            if !(200..300).contains(&got.status) {
+                return Err(format!("{}: {}", d.url, got.status));
             }
-            Box::new(response.into_body().into_reader())
+            Box::new(std::io::Cursor::new(got.body))
         }
     };
     let mut bytes = Vec::with_capacity(d.size as usize);
@@ -321,15 +320,24 @@ pub(crate) fn zip_file(zip: &[u8], name: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// The WAD in Freedoom's release, kept with the licence it has to stay with.
+/// The WADs in Freedoom's release, both games, each checked, kept with the licence they have to stay with: Phase 1's path.
 fn unpack_freedoom(zip: &[u8]) -> Result<PathBuf, String> {
-    let wad = zip_file(zip, FREEDOOM_WAD)?;
-    if hex(&Sha256::digest(&wad)) != FREEDOOM_WAD_SHA256 {
-        return Err("that's not the WAD it should be".into());
+    let mut wads = Vec::new();
+    for (name, sha256) in FREEDOOM_WADS {
+        let wad = zip_file(zip, name)?;
+        if hex(&Sha256::digest(&wad)) != sha256 {
+            return Err(format!("{name} isn't the WAD it should be"));
+        }
+        wads.push((name, wad));
     }
     let licence = zip_file(zip, "COPYING.txt")?;
     keep(FREEDOOM_LICENCE, &licence)?;
-    keep(FREEDOOM_WAD, &wad)
+    let mut first = None;
+    for (name, wad) in wads {
+        let path = keep(name, &wad)?;
+        first.get_or_insert(path);
+    }
+    first.ok_or_else(|| "no WAD in it".into())
 }
 
 fn keep(name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
@@ -368,7 +376,8 @@ pub fn remove(name: &str) -> Result<(), String> {
         return Err(format!("{name}: not a WAD"));
     }
     std::fs::remove_file(dir().join(name)).map_err(|e| format!("{name}: {e}"))?;
-    if name.eq_ignore_ascii_case(FREEDOOM_WAD) {
+    // Freedoom's licence goes with the last of its games.
+    if FREEDOOM_WADS.iter().any(|(f, _)| name.eq_ignore_ascii_case(f)) && !list().iter().any(|n| FREEDOOM_WADS.iter().any(|(f, _)| n.eq_ignore_ascii_case(f))) {
         let _ = std::fs::remove_file(dir().join(FREEDOOM_LICENCE));
     }
     Ok(())

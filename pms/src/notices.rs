@@ -13,6 +13,8 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::lang::notices as t;
+
 /// How often a notice that lasts (notification access) comes again.
 pub const AGAIN: Duration = Duration::from_secs(5 * 60);
 /// Cards of our own take ids from here up, far above the notification platform's (which count up from 1), and
@@ -41,28 +43,31 @@ pub struct Notice {
     pub hint: String,
     /// While it lasts, it comes again this often; None: once.
     pub again: Option<Duration>,
+    /// Up for the toasts' usual time (`[toasts] duration_ms`), not Windows' long one: news with nothing to do about it.
+    pub brief: bool,
 }
 
 /// Favorites that have just gone live, best first. There's nothing to do about it, so a click goes to the first one's channel.
 pub fn favorite_live(handles: &[String]) -> Notice {
     let title = match handles {
-        [one] => format!("{one} is live"),
-        [one, two] => format!("{one} and {two} are live"),
-        [one, rest @ ..] => format!("{one} and {} more are live", rest.len()),
+        [one] => t::LIVE_ONE.with(&[("one", one)]),
+        [one, two] => t::LIVE_TWO.with(&[("one", one), ("two", two)]),
+        [one, rest @ ..] => t::LIVE_MORE.with(&[("one", one), ("n", &rest.len())]),
         [] => String::new(),
     };
     Notice {
         key: "favorite live",
         title,
-        body: "On Twitch now. Select to watch.".into(),
+        body: t::LIVE_BODY.t().into(),
         heading: String::new(),
         detail: String::new(),
         fix: None,
         keep_native: false,
         opens: handles.first().map(|h| format!("https://www.twitch.tv/{h}")),
         reveal: None,
-        hint: "On Twitch now.".into(),
+        hint: t::LIVE_HINT.t().into(),
         again: None,
+        brief: true,
     }
 }
 
@@ -70,19 +75,36 @@ pub fn favorite_live(handles: &[String]) -> Notice {
 pub fn console_spared() -> Notice {
     Notice {
         key: "console spared",
-        title: "The PIMPBOX is still running, though memory is low".into(),
-        body: "You've been playing, so we didn't close your game.".into(),
-        heading: "We left your game running".into(),
-        detail: "Your PC is low on memory, and the PIMPBOX would usually close to free some. You've played this game, and closing it \
-                 would lose anything you haven't saved, so it keeps running until it's restarted.\n\n\
-                 To free that memory yourself, save your game and switch the console off on the TV's remote."
-            .into(),
+        title: t::SPARED_TITLE.t().into(),
+        body: t::SPARED_BODY.t().into(),
+        heading: t::SPARED_HEADING.t().into(),
+        detail: t::SPARED_DETAIL.t().into(),
         fix: None,
         keep_native: false,
         opens: None,
         reveal: None,
-        hint: "You've been playing, so we didn't close your game.".into(),
+        hint: t::SPARED_BODY.t().into(),
         again: None,
+        brief: false,
+    }
+}
+
+/// The ISS has emptied its urine tank, down to `level` percent: Number One saw it (channel 37), and you asked to be told.
+pub fn iss_flushed(level: f32) -> Notice {
+    let level = level.round() as i64;
+    Notice {
+        key: "iss flushed",
+        title: t::ISS_FLUSHED_TITLE.t().into(),
+        body: t::ISS_FLUSHED_BODY.with(&[("level", &level)]),
+        heading: t::ISS_FLUSHED_HEADING.t().into(),
+        detail: t::ISS_FLUSHED_DETAIL.with(&[("level", &level)]),
+        fix: None,
+        keep_native: false,
+        opens: None,
+        reveal: None,
+        hint: t::ISS_FLUSHED_HINT.t().into(),
+        again: None,
+        brief: false,
     }
 }
 
@@ -93,43 +115,48 @@ const RESTART_EXPLORER: &str = "pms:restart-explorer";
 pub fn explorer_heavy(taps: usize, megabytes: u64) -> Notice {
     Notice {
         key: "explorer",
-        title: "Explorer could use a restart".into(),
-        body: "Old copies of PimpMyShell are taking up its memory. Select for details.".into(),
-        heading: "Restart Explorer to free up memory?".into(),
-        detail: format!(
-            "Windows can't unload PimpMyShell from Explorer, so every update leaves an old copy behind until Explorer restarts. It has {taps} \
-             copies now, and it's using {megabytes} MB.\n\n\
-             Your taskbar goes away for a few seconds. We won't restart Explorer while a File Explorer window, a file copy or an Explorer \
-             dialog is open in it.\n\n\
-             Nothing restarts unless you select Restart Explorer."
-        ),
-        fix: Some(("Restart Explorer", RESTART_EXPLORER.into())),
+        title: t::EXPLORER_TITLE.t().into(),
+        body: t::EXPLORER_BODY.t().into(),
+        heading: t::EXPLORER_HEADING.t().into(),
+        detail: t::EXPLORER_DETAIL.with(&[("taps", &taps), ("megabytes", &megabytes)]),
+        fix: Some((t::EXPLORER_FIX.t(), RESTART_EXPLORER.into())),
         keep_native: false,
         opens: None,
         reveal: None,
-        hint: "You can restart it in PimpMyShell's Settings, under General.".into(),
+        hint: t::EXPLORER_HINT.t().into(),
         again: None,
+        brief: false,
     }
+}
+
+/// The name of the file at `path`, or `otherwise`.
+fn file_name(path: &Path, otherwise: &str) -> String {
+    path.file_name().map_or(otherwise.into(), |n| n.to_string_lossy().into_owned())
+}
+
+/// After the first few of a list, how many more there are, on a line of its own: or nothing.
+fn and_more(more: usize, gap: &str) -> String {
+    if more > 0 { format!("{gap}{}", t::AND_MORE.with(&[("n", &more)])) } else { String::new() }
 }
 
 /// Lines of the watchlist at `path` that can't be channels: skipped, and the rest are in use.
 pub fn watchlist(path: &Path, bad: &[(usize, String)]) -> Notice {
-    let name = path.file_name().map_or("the watchlist".into(), |n| n.to_string_lossy().into_owned());
-    let lines: Vec<String> = bad.iter().take(6).map(|(n, text)| format!("Line {n}: {text}")).collect();
-    let more = bad.len().saturating_sub(lines.len());
-    let rest = if more > 0 { format!("\n...and {more} more") } else { String::new() };
+    let name = file_name(path, t::WATCHLIST_NAME.t());
+    let lines: Vec<String> = bad.iter().take(6).map(|(n, text)| t::LINE.with(&[("n", n), ("text", text)])).collect();
+    let lines = format!("{}{}", lines.join("\n"), and_more(bad.len().saturating_sub(lines.len()), "\n"));
     Notice {
         key: "watchlist",
-        title: "Some of your favorites were skipped".into(),
-        body: format!("{name} has lines that can't be channels. Select to see them."),
-        heading: format!("There's a problem in {name}"),
-        detail: format!("These aren't channel names, so they were skipped. The rest of your favorites are working.\n\n{}{rest}\n\nFix them and save the file. Your changes take effect right away.", lines.join("\n")),
-        fix: Some(("Open watchlist", path.display().to_string())),
+        title: t::WATCHLIST_TITLE.t().into(),
+        body: t::WATCHLIST_BODY.with(&[("name", &name)]),
+        heading: t::PROBLEM_IN.with(&[("name", &name)]),
+        detail: t::WATCHLIST_DETAIL.with(&[("lines", &lines)]),
+        fix: Some((t::WATCHLIST_FIX.t(), path.display().to_string())),
         keep_native: false,
         opens: None,
         reveal: Some(path.display().to_string()),
-        hint: format!("Fix {name} and save it."),
+        hint: t::FIX_AND_SAVE.with(&[("name", &name)]),
         again: None,
+        brief: false,
     }
 }
 
@@ -139,53 +166,44 @@ const SETTINGS_ON: &str = "pms:settings:";
 /// Settings in the file at `path` that couldn't be used (`config.issues`): each back to its default, or left out, and the rest
 /// loaded. Said once for each time the file changes and still has some, as an update can bring them about as easily as a slip.
 pub fn settings_issues(path: &Path, issues: &[String]) -> Notice {
-    let name = path.file_name().map_or("pms.toml".into(), |n| n.to_string_lossy().into_owned());
+    let name = file_name(path, "pms.toml");
     let said: Vec<String> = issues.iter().take(6).map(|e| crate::problem::Problem::of(path, e).words()).collect();
-    let more = issues.len().saturating_sub(said.len());
-    let rest = if more > 0 { format!("\n\n...and {more} more") } else { String::new() };
+    let said = format!("{}{}", said.join("\n\n"), and_more(issues.len().saturating_sub(said.len()), "\n\n"));
     let page = issues.first().map_or("general", |e| crate::config::settings_page(&crate::config::issue_setting(e)));
     Notice {
         key: "settings issues",
-        title: "Some of your settings couldn't be used".into(),
-        body: format!("Everything else in {name} loaded. Select to see which."),
-        heading: format!("Some settings in {name} couldn't be used"),
-        detail: format!(
-            "Each of these is back to its default for now, or left out, and everything else in your settings loaded. That can happen \
-             after an update, as well as after a slip.\n\n{}{rest}\n\nSettings marks each in red where it belongs. Choose a value there, \
-             or fix the file and save it.",
-            said.join("\n\n")
-        ),
-        fix: Some(("Open Settings", format!("{SETTINGS_ON}{page}"))),
+        title: t::ISSUES_TITLE.t().into(),
+        body: t::ISSUES_BODY.with(&[("name", &name)]),
+        heading: t::ISSUES_HEADING.with(&[("name", &name)]),
+        detail: t::ISSUES_DETAIL.with(&[("issues", &said)]),
+        fix: Some((t::OPEN_SETTINGS.t(), format!("{SETTINGS_ON}{page}"))),
         keep_native: false,
         opens: None,
         reveal: Some(path.display().to_string()),
-        hint: "Settings marks them in red where they belong.".into(),
+        hint: t::ISSUES_HINT.t().into(),
         again: None,
+        brief: false,
     }
 }
 
 /// The network settings' file at `path` won't load, so nothing goes online: there's no knowing whether a proxy was wanted, and
 /// going without one might be what mustn't happen.
 pub fn network_settings(path: &Path, error: &str) -> Notice {
-    let name = path.file_name().map_or("pms-network.toml".into(), |n| n.to_string_lossy().into_owned());
+    let name = file_name(path, "pms-network.toml");
     let problem = crate::problem::Problem::of(path, error).words();
     Notice {
         key: "network",
-        title: format!("Offline until {name} is fixed"),
-        body: "Your network settings didn't load, so PimpMyShell isn't going online. Select for details.".into(),
-        heading: format!("There's a problem in {name}"),
-        detail: format!(
-            "Your network settings didn't load, so PimpMyShell can't tell whether you wanted a proxy. Rather than risk going \
-             online without one, it doesn't go online at all: no checking who's live, no Twatch TV video, no update checks and no \
-             downloads.\n\n{problem}\n\nFix the file and save it, and everything goes back to normal by itself. To go without a proxy, \
-             delete the file."
-        ),
-        fix: Some(("Open file", path.display().to_string())),
+        title: t::NETWORK_TITLE.with(&[("name", &name)]),
+        body: t::NETWORK_BODY.t().into(),
+        heading: t::PROBLEM_IN.with(&[("name", &name)]),
+        detail: t::NETWORK_DETAIL.with(&[("problem", &problem)]),
+        fix: Some((t::OPEN_FILE.t(), path.display().to_string())),
         keep_native: false,
         opens: None,
         reveal: Some(path.display().to_string()),
-        hint: format!("Nothing goes online until {name} is fixed."),
+        hint: t::NETWORK_HINT.with(&[("name", &name)]),
         again: None,
+        brief: false,
     }
 }
 
@@ -193,26 +211,20 @@ pub fn network_settings(path: &Path, error: &str) -> Notice {
 pub fn notification_access() -> Notice {
     Notice {
         key: "notification access",
-        title: "Notifications can't appear in the taskbar".into(),
-        body: "Windows isn't letting PimpMyShell read notifications. Select to fix it.".into(),
-        heading: "Let PimpMyShell read your notifications".into(),
-        detail: "To show notifications in the taskbar, PimpMyShell needs to read them as they arrive. Windows doesn't \
-                 allow that right now, so your notifications appear as standard pop-ups.\n\n\
-                 To fix this, go to Settings > Privacy & security > Notifications, and turn on Notification access and \
-                 Let apps access your notifications. Your notifications move to the taskbar within a few seconds.\n\n\
-                 If you'd rather keep standard pop-ups, select Keep Windows notifications. We'll turn off taskbar \
-                 notifications and stop reminding you."
-            .into(),
-        fix: Some(("Open notification settings", "ms-settings:privacy-notifications".into())),
+        title: t::TOASTS_TITLE.t().into(),
+        body: t::ACCESS_BODY.t().into(),
+        heading: t::ACCESS_HEADING.t().into(),
+        detail: t::ACCESS_DETAIL.t().into(),
+        fix: Some((t::ACCESS_FIX.t(), "ms-settings:privacy-notifications".into())),
         keep_native: true,
         opens: None,
         reveal: None,
-        hint: "To fix this, turn on notification access in Settings > Privacy & security > Notifications.".into(),
+        hint: t::ACCESS_HINT.t().into(),
         again: Some(AGAIN),
+        brief: false,
     }
 }
 
-/// Toasts couldn't start, for a reason other than notification access.
 /// Where a newer Streamlink is got: the fix that opens the settings.
 const TWATCH_SETTINGS: &str = "pms:twatch";
 
@@ -222,23 +234,17 @@ pub fn newer_streamlink(version: &str) -> Notice {
     let have = crate::streamlink::version().unwrap_or_default();
     Notice {
         key: "streamlink",
-        title: format!("Streamlink {version} may fix Twatch TV"),
-        body: "It couldn't open a channel that's live. Select to see your options.".into(),
-        heading: format!("Update Streamlink to {version}?"),
-        detail: format!(
-            "Streamlink {have} couldn't open a channel that Twitch says is live. That usually means Twitch changed something, and \
-             a newer Streamlink is usually how that gets fixed.\n\n\
-             Nothing has been downloaded. If you update, we'll only accept a build that GitHub's runners uploaded and that matches \
-             GitHub's digest. That proves it's the file the Streamlink project published. It doesn't prove the file is safe.\n\n\
-             You can read about this release at {}. To update, open the settings and select Get the newest.",
-            crate::streamlink::URL
-        ),
-        fix: Some(("Open Twatch TV settings", TWATCH_SETTINGS.into())),
+        title: t::NEWER_STREAMLINK_TITLE.with(&[("version", &version)]),
+        body: t::NEWER_STREAMLINK_BODY.t().into(),
+        heading: t::NEWER_STREAMLINK_HEADING.with(&[("version", &version)]),
+        detail: t::NEWER_STREAMLINK_DETAIL.with(&[("have", &have), ("url", &crate::streamlink::URL)]),
+        fix: Some((t::TWATCH_SETTINGS.t(), TWATCH_SETTINGS.into())),
         keep_native: false,
         opens: None,
         reveal: None,
-        hint: format!("Streamlink {version} may fix Twatch TV. You can get it in Settings, under Twatch TV."),
+        hint: t::NEWER_STREAMLINK_HINT.with(&[("version", &version)]),
         again: None,
+        brief: false,
     }
 }
 
@@ -247,24 +253,17 @@ pub fn newer_streamlink(version: &str) -> Notice {
 pub fn no_streamlink() -> Notice {
     Notice {
         key: "streamlink",
-        title: "Twatch TV needs Streamlink".into(),
-        body: "A favorite is live, but there's nothing to play it with. Select to see your options.".into(),
-        heading: "Get Streamlink for live video?".into(),
-        detail: format!(
-            "One of your favorites is live, but your TwaTVs need Streamlink to play live video, and it isn't installed. It's a separate, \
-             free program that turns a channel into a stream. It isn't in PimpMyShell's installer, and nothing is downloaded until you ask.\n\n\
-             To get it, open the settings and select Download, under Streamlink. It's about 85 MB, the newest stable build from {}, and we \
-             only accept a build that GitHub's runners uploaded and that matches GitHub's digest.\n\n\
-             If you'd rather not, choose Always under Pictures instead of video. Your TwaTVs then show a new picture every minute, which \
-             doesn't need Streamlink.",
-            crate::streamlink::URL
-        ),
-        fix: Some(("Open Twatch TV settings", TWATCH_SETTINGS.into())),
+        title: t::NO_STREAMLINK_TITLE.t().into(),
+        body: t::NO_STREAMLINK_BODY.t().into(),
+        heading: t::NO_STREAMLINK_HEADING.t().into(),
+        detail: t::NO_STREAMLINK_DETAIL.with(&[("url", &crate::streamlink::URL)]),
+        fix: Some((t::TWATCH_SETTINGS.t(), TWATCH_SETTINGS.into())),
         keep_native: false,
         opens: None,
         reveal: None,
-        hint: "A favorite is live, but live video needs Streamlink. You can get it in Settings, under Twatch TV.".into(),
+        hint: t::NO_STREAMLINK_HINT.t().into(),
         again: None,
+        brief: false,
     }
 }
 
@@ -272,23 +271,20 @@ pub fn no_streamlink() -> Notice {
 pub fn missing_part(file: &'static str) -> Notice {
     let dir = crate::parts::path(file).and_then(|p| p.parent().map(crate::shown)).unwrap_or_default();
     let without = crate::parts::without(file);
+    let with: &[(&str, &dyn std::fmt::Display)] = &[("file", &file), ("without", &without), ("dir", &dir)];
     Notice {
         key: file,
-        title: "Part of PimpMyShell is missing".into(),
-        body: format!("{file} isn't there, so {without}. Select to see how to fix it."),
-        heading: format!("{file} is missing"),
-        detail: format!(
-            "PimpMyShell's {file} should be in {dir}, beside pmsd.exe, but it isn't, so {without}.\n\n\
-             Something may have taken it away: an antivirus program, a cleanup tool, or an update that didn't finish. If your \
-             antivirus did, it may say why, and let you put it back.\n\n\
-             Otherwise, installing PimpMyShell again puts it back, and keeps your settings. The installer is on the releases page."
-        ),
-        fix: Some(("Open the releases page", crate::update::RELEASES_PAGE.into())),
+        title: t::MISSING_TITLE.t().into(),
+        body: t::MISSING_BODY.with(with),
+        heading: t::MISSING_HEADING.with(with),
+        detail: t::MISSING_DETAIL.with(with),
+        fix: Some((t::MISSING_FIX.t(), crate::update::RELEASES_PAGE.into())),
         keep_native: false,
         opens: None,
         reveal: crate::parts::path("pmsd.exe").map(|p| p.display().to_string()),
-        hint: format!("{file} is missing, so {without}. Installing PimpMyShell again puts it back."),
+        hint: t::MISSING_HINT.with(with),
         again: None,
+        brief: false,
     }
 }
 
@@ -303,20 +299,16 @@ pub fn problem(what: &str, error: &str) -> Notice {
     Notice {
         key: "problem",
         title: what.to_string(),
-        body: "A report would help us fix this. Select for details.".into(),
-        heading: "Help us fix this".into(),
-        detail: format!(
-            "{what}. It's nothing you did, and your taskbar is fine.\n\n\
-             A report usually tells us why. It has your Windows version, PimpMyShell's logs and settings, and the layout of \
-             your taskbar. It leaves out your Windows user name and what your notifications say.\n\n\
-             Select Save report to see it. Nothing is sent: you decide whether to post it.\n\nDetails: {error}"
-        ),
-        fix: Some(("Save report", REPORT.to_string())),
+        body: t::PROBLEM_BODY.t().into(),
+        heading: t::PROBLEM_HEADING.t().into(),
+        detail: t::PROBLEM_DETAIL.with(&[("what", &what), ("error", &error)]),
+        fix: Some((t::SAVE_REPORT.t(), REPORT.to_string())),
         keep_native: false,
         opens: None,
         reveal: None,
-        hint: "To help us fix it, select Save a report in PimpMyShell's menu in the system tray.".into(),
+        hint: t::PROBLEM_HINT.t().into(),
         again: None,
+        brief: false,
     }
 }
 
@@ -335,9 +327,10 @@ pub fn save_report(config: &Path) {
     }
 }
 
-/// id Software's licence for the shareware episode, and whether it's agreed to. Nothing is fetched otherwise.
+/// id Software's licence for the shareware episode, and whether it's agreed to. Nothing is fetched otherwise. The licence is as
+/// id Software wrote it, in English, whatever language the rest is in.
 pub fn accepts_shareware_license() -> bool {
-    crate::tray::explain("Doom shareware: id Software's license", &reflowed(crate::wads::SHAREWARE_LICENSE), &["I agree, download it"]).is_some()
+    crate::tray::explain(t::SHAREWARE_HEADING.t(), &reflowed(crate::wads::SHAREWARE_LICENSE), &[t::SHAREWARE_AGREE.t()]).is_some()
 }
 
 /// `text` with each paragraph on one line, for a window to wrap: a text wrapped for a terminal, as a license is, breaks raggedly
@@ -354,12 +347,7 @@ fn reflowed(text: &str) -> String {
 
 /// What posting a report means, and whether to go ahead.
 pub fn wants_to_post() -> bool {
-    let text = "It's in the folder that just opened, and it hasn't been sent anywhere.\n\n\
-                GitHub issues are public: anyone can read and download what you attach, and search engines can find it. The \
-                report leaves out your Windows user name and what your notifications say, but it does have your settings, \
-                the names of apps that sent notifications, and your Windows version. Read it first, and remove anything \
-                you'd rather not share.\n\nYou need a GitHub account to post it.";
-    crate::tray::explain("Your report is saved", text, &["Open GitHub"]).is_some()
+    crate::tray::explain(t::POST_HEADING.t(), t::POST_TEXT.t(), &[t::POST_OPEN.t()]).is_some()
 }
 
 /// What PimpMyShell works with, in the README.
@@ -368,32 +356,23 @@ const SUPPORTED: &str = "https://github.com/bungholesurfers/PimpMyShell#what-it-
 /// Something else runs the taskbar (`name`, if we know it), so there's nothing for us to hook. Nothing's wrong, and
 /// nothing we can do: this one's said kindly, and a little jive.
 pub fn taskbar_replaced(name: Option<&str>) -> Notice {
-    let (who, running) = match name {
-        Some(n) => (n.to_string(), format!("We dig {n}, but it's running your taskbar right now")),
-        None => ("Something else".to_string(), "Something other than Windows seems to be running your taskbar right now".to_string()),
-    };
-    let way_back = match name {
-        Some(n) => format!("Switch back to the Windows 11 taskbar in {n}'s settings"),
-        None => "Switch back to the Windows 11 taskbar".to_string(),
+    let (who, running, way_back) = match name {
+        Some(n) => (n.to_string(), t::REPLACED_RUNNING.with(&[("name", &n)]), t::REPLACED_WAY_BACK.with(&[("name", &n)])),
+        None => (t::REPLACED_SOMEONE.t().to_string(), t::REPLACED_RUNNING_UNKNOWN.t().to_string(), t::REPLACED_WAY_BACK_UNKNOWN.t().to_string()),
     };
     Notice {
         key: "taskbar replaced",
-        title: format!("{who} has the keys to your taskbar"),
-        body: "PimpMyShell only rolls with the Windows 11 taskbar. Select for details.".into(),
-        heading: "PimpMyShell only rolls with the Windows 11 taskbar".into(),
-        detail: format!(
-            "{running}, and PimpMyShell can only work with the one that comes with Windows 11. Meters, taskbar \
-             notifications and the rest have nowhere to live, so PimpMyShell is laying low. Your PC is cool, and \
-             nothing's been changed.\n\nWant to get pimped? {way_back}, and PimpMyShell will be right there with \
-             you. Happy with your ride? That's cool too: you can exit PimpMyShell from its menu in the system tray. \
-             We won't bring this up again."
-        ),
-        fix: Some(("See what's supported", SUPPORTED.to_string())),
+        title: t::REPLACED_TITLE.with(&[("who", &who)]),
+        body: t::REPLACED_BODY.t().into(),
+        heading: t::REPLACED_HEADING.t().into(),
+        detail: t::REPLACED_DETAIL.with(&[("running", &running), ("way_back", &way_back)]),
+        fix: Some((t::REPLACED_FIX.t(), SUPPORTED.to_string())),
         keep_native: false,
         opens: None,
         reveal: None,
-        hint: format!("{way_back} to use PimpMyShell. Until then, it's laying low."),
+        hint: t::REPLACED_HINT.with(&[("way_back", &way_back)]),
         again: None,
+        brief: false,
     }
 }
 
@@ -403,66 +382,63 @@ pub fn toasts_refused(error: &str, around: &[&str]) -> Notice {
     let why = if around.is_empty() {
         String::new()
     } else {
-        format!("{} also changes your taskbar, which may be why. Turning that off and restarting Windows Explorer may help.\n\n", around.join(" and "))
+        let others = around.join(&format!(" {} ", t::AND.t()));
+        format!("{}\n\n", t::REFUSED_WHY.with(&[("others", &others)]))
     };
     Notice {
         key: "toasts",
-        title: "Notifications can't appear in the taskbar".into(),
-        body: "They're back to standard pop-ups. Select for details.".into(),
-        heading: "Notifications appear as standard pop-ups for now".into(),
-        detail: format!(
-            "PimpMyShell couldn't show a notification in the taskbar, so notifications went back to standard pop-ups. \
-             The ones that failed are in notification center. We'll try the taskbar again in a few minutes.\n\n\
-             {why}A report would help us fix this. Select Save report to see it. Nothing is sent: you decide whether to \
-             post it.\n\nDetails: {error}"
-        ),
-        fix: Some(("Save report", REPORT.to_string())),
+        title: t::TOASTS_TITLE.t().into(),
+        body: t::REFUSED_BODY.t().into(),
+        heading: t::POPUPS_HEADING.t().into(),
+        detail: t::REFUSED_DETAIL.with(&[("why", &why), ("error", &error)]),
+        fix: Some((t::SAVE_REPORT.t(), REPORT.to_string())),
         keep_native: false,
         opens: None,
         reveal: None,
-        hint: "They appear as standard pop-ups for now. The ones that failed are in notification center.".into(),
+        hint: t::REFUSED_HINT.t().into(),
         again: None,
+        brief: false,
     }
 }
 
+/// Toasts couldn't start, for a reason other than notification access.
 pub fn toasts_failed(error: &str) -> Notice {
     Notice {
         key: "toasts",
-        title: "Notifications can't appear in the taskbar".into(),
-        body: "Windows didn't let PimpMyShell listen for them. Select for details.".into(),
-        heading: "Notifications appear as standard pop-ups for now".into(),
-        detail: format!(
-            "PimpMyShell couldn't start listening for notifications, so they appear as standard pop-ups. We'll keep \
-             trying, and they'll move to the taskbar once it works.\n\nDetails: {error}"
-        ),
+        title: t::TOASTS_TITLE.t().into(),
+        body: t::FAILED_BODY.t().into(),
+        heading: t::POPUPS_HEADING.t().into(),
+        detail: t::FAILED_DETAIL.with(&[("error", &error)]),
         fix: None,
         keep_native: false,
         opens: None,
         reveal: None,
-        hint: "They appear as standard pop-ups for now. We'll keep trying.".into(),
+        hint: t::FAILED_HINT.t().into(),
         again: None,
+        brief: false,
     }
 }
 
 /// The config at `path` didn't load. `kept`: the taskbar keeps the one that last did; otherwise PimpMyShell started
 /// without one (a stock taskbar).
 pub fn config(path: &Path, error: &str, kept: bool) -> Notice {
-    let name = path.file_name().map_or("pms.toml".into(), |n| n.to_string_lossy().into_owned());
+    let name = file_name(path, "pms.toml");
     let problem = crate::problem::Problem::of(path, error);
     let error = problem.words();
-    let now = if kept { "PimpMyShell is still using your last working settings." } else { "PimpMyShell started with the standard taskbar." };
+    let now = if kept { t::CONFIG_KEPT.t() } else { t::CONFIG_STOCK.t() };
     Notice {
         key: "config",
-        title: "We couldn't load your settings".into(),
-        body: format!("{now} Select to see what's wrong."),
-        heading: format!("There's a problem in {name}"),
-        detail: format!("{now}\n\n{error}\n\nFix the problem and save the file. Your changes take effect right away. If you'd rather go back, the Settings window can restore your last working settings."),
-        fix: Some(("Open settings file", path.display().to_string())),
+        title: t::CONFIG_TITLE.t().into(),
+        body: t::CONFIG_BODY.with(&[("now", &now)]),
+        heading: t::PROBLEM_IN.with(&[("name", &name)]),
+        detail: t::CONFIG_DETAIL.with(&[("now", &now), ("error", &error)]),
+        fix: Some((t::CONFIG_FIX.t(), path.display().to_string())),
         keep_native: false,
         opens: None,
         reveal: Some(path.display().to_string()),
-        hint: format!("{now} Fix {name} and save it. Your changes take effect right away."),
+        hint: t::CONFIG_HINT.with(&[("now", &now), ("name", &name)]),
         again: None,
+        brief: false,
     }
 }
 
@@ -558,13 +534,13 @@ pub fn explain(n: &Notice) {
                 return crate::tray::open_settings_on(page);
             }
             if target == RESTART_EXPLORER {
-                if let Err(why) = crate::explorer::ask() {
-                    // The heading says it wasn't, so the words only need say why.
-                    let because = why.strip_prefix("Explorer wasn't restarted, because ").map_or(why.clone(), |rest| {
-                        let mut letters = rest.chars();
-                        letters.next().map_or(String::new(), |first| first.to_uppercase().chain(letters).collect())
-                    });
-                    crate::tray::explain("Explorer wasn't restarted", &because, &[]);
+                // The heading says it wasn't, so the words only need say why.
+                let asked = match crate::explorer::busy() {
+                    Some(why) => Err(crate::explorer::why_not(why)),
+                    None => crate::explorer::ask(),
+                };
+                if let Err(why) = asked {
+                    crate::tray::explain(t::NOT_RESTARTED.t(), &why, &[]);
                 }
                 return;
             }
@@ -596,20 +572,18 @@ pub enum Choice {
 
 /// The notice's explanation, waiting for its answer (examples/dialogs.rs shows them so; `explain` acts on it).
 pub fn choose(n: &Notice) -> Choice {
-    const KEEP_NATIVE: &str = "Keep Windows notifications";
-    const REVEAL: &str = "Show in File Explorer";
-    let mut choices: Vec<&str> = n.fix.iter().map(|(label, _)| *label).collect();
+    // Told apart by which they are, not by what they say: the words are the language's.
+    let mut choices: Vec<(&str, Choice)> = n.fix.iter().map(|(label, _)| (*label, Choice::Fix)).collect();
     if n.keep_native {
-        choices.push(KEEP_NATIVE);
+        choices.push((t::KEEP_NATIVE.t(), Choice::KeepNative));
     }
     if n.reveal.is_some() {
-        choices.push(REVEAL);
+        choices.push((t::REVEAL.t(), Choice::Reveal));
     }
-    match crate::tray::explain(&n.heading, &n.detail, &choices).map(|i| choices[i]) {
-        Some(KEEP_NATIVE) => Choice::KeepNative,
-        Some(REVEAL) => Choice::Reveal,
-        Some(_) => Choice::Fix,
-        None => Choice::Close,
+    let labels: Vec<&str> = choices.iter().map(|(label, _)| *label).collect();
+    match crate::tray::explain(&n.heading, &n.detail, &labels) {
+        Some(i) if i < choices.len() => choices.swap_remove(i).1,
+        _ => Choice::Close,
     }
 }
 
@@ -644,6 +618,12 @@ mod tests {
         assert!(n.detail.contains("44") && n.detail.contains("360 MB"));
         assert_eq!(n.fix.as_ref().map(|f| f.1.as_str()), Some(RESTART_EXPLORER), "it's a button you press");
         assert_eq!(n.again, None, "and it's said once");
+    }
+
+    #[test]
+    fn a_favorite_going_live_is_up_for_the_usual_time_and_a_problem_for_the_long_one() {
+        assert!(favorite_live(&["one".into()]).brief);
+        assert!(!console_spared().brief && !notification_access().brief);
     }
 
     #[test]
