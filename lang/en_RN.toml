@@ -868,6 +868,7 @@ general_cpu = "see-pee-you"  # en:3c2510a9
 general_gpu = "gee-pee-you"  # en:8a160835
 general_gpu_engines = "gee-pee-you engines"  # en:879c6206
 general_dedi_gpu_mem_commit = "gee-pee-you's own memory, spoke fer"  # en:55188755
+general_gpu_mem_resident = "an' whut's settin on it"  # en:2c81fd61
 general_twatch_tv_watchlist = "Twatch TV watch list"  # en:d8137af3
 start_glow_start_button = "start button"  # en:7ef4eab9
 power_twatch_tv = "Twatch TV"  # en:39637140
@@ -1202,9 +1203,9 @@ part_tv = "tee-vee"  # en:2af5720f
 try_iss = "Lightstreamer"  # en:18f2d164
 
 [procs]
-explorer = "explorer.exe (the taskbar, with PimpMyShell's piece in it)"  # en:48190aa1
+explorer = "explorer.exe (diddled by PMS TAP)"  # en:e641926b
 dwm_is = "Desktop Window Manager: winders' compositor. the taskbar's a XAML island whose visual tree, with PimpMyShell's doodads in it, is a tree a Windows.UI.Composition visuals that DWM puts together every frame. so the meters' and tee-vees' surfaces, the acrylic and them other effect brushes, and every composition animation (glows, ripples, toasts, the clicker's beam) is drawn here, on DWM's own GPU time and video memory, not in Explorer."  # en:dcd779d9
-gpu_memory_is = "GPU figgers is winders' own per-process counters, the ones Task Manager shows. a card's got a engine fer each kind a work (3D, Video Decode, Copy and such). the GPU column adds up every engine a process is usin, so it kin go past 100%, where Task Manager shows just the busiest one; GPU engines names the ones it's usin, busiest first. the memory column is dedicated video memory committed to each process, which ain't whut it's got on the card: memory the card paged out to system RAM still counts, and a surface shared tween processes counts in each of em (most of all in dwm.exe, which holds every winder's). so a row kin make out a process takes more'n it really does, and the rows kin add up to more'n the card's got in use."  # en:c4567ff9
+gpu_memory_is = "GPU figgers is winders' own per-process counters, the ones Task Manager shows. a card's got a engine fer each kind a work (3D, Video Decode, Copy and such). the GPU column adds up every engine a process is usin, so it kin go past 100%, where Task Manager shows just the busiest one; GPU engines names the ones it's usin, busiest first. the spoke-fer column is dedicated video memory committed to each process, which ain't whut it's got on the card: memory the card paged out to system RAM still counts, and a surface shared tween processes counts in each of em (most of all in dwm.exe, which holds every winder's). so a row kin make out a process takes more'n it really does, and the rows kin add up to more'n the card's got in use. whut's settin on it is the part that's on the card right now. if spoke-fer keeps a-growin while whut's settin on it stays put, that's memory that got took and never give back."  # en:c9a987b5
 
 [meters]
 space = "{free} free outta {total}"  # en:e968ba80

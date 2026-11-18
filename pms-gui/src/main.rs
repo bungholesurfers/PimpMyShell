@@ -61,6 +61,10 @@ fn main() -> eframe::Result {
     if flag("--welcome") || flag("--whats-new") {
         std::process::exit(if winui::available() { winui::welcome(path, flag("--whats-new")) } else { 255 });
     }
+    // One settings window for the user's own settings: starting another brings that one to the front.
+    if config::is_default(&path) && !model::only_window(flag("--egui") || flag("--winui")) {
+        return Ok(());
+    }
     // `--no-winui` acts as if the Windows App Runtime weren't here.
     let runtime = !flag("--no-winui") && winui::available();
     let mut fallback = None;

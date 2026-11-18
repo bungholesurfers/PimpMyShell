@@ -206,6 +206,8 @@ pub struct Gpus {
     query: windows::Win32::System::Performance::PDH_HQUERY,
     busy: windows::Win32::System::Performance::PDH_HCOUNTER,
     memory: windows::Win32::System::Performance::PDH_HCOUNTER,
+    /// What of that is on the cards just now.
+    resident: windows::Win32::System::Performance::PDH_HCOUNTER,
     /// Each card's dedicated memory in use, all told.
     whole: windows::Win32::System::Performance::PDH_HCOUNTER,
     /// The cards that aren't cards (WARP), as the counters' names spell them.
@@ -236,22 +238,25 @@ impl Gpus {
             if PdhOpenQueryW(None, 0, &mut query) != 0 {
                 return None;
             }
-            let (mut busy, mut memory, mut whole) = (PDH_HCOUNTER::default(), PDH_HCOUNTER::default(), PDH_HCOUNTER::default());
+            let (mut busy, mut memory, mut resident, mut whole) = (PDH_HCOUNTER::default(), PDH_HCOUNTER::default(), PDH_HCOUNTER::default(), PDH_HCOUNTER::default());
             let added = PdhAddEnglishCounterW(query, windows_core::w!(r"\GPU Engine(*)\Utilization Percentage"), 0, &mut busy) == 0
                 && PdhAddEnglishCounterW(query, windows_core::w!(r"\GPU Process Memory(*)\Dedicated Usage"), 0, &mut memory) == 0;
             if !added {
                 PdhCloseQuery(query);
                 return None;
             }
-            // Not every Windows has this one: without it there's only no total to give.
+            // Not every Windows has these: without them there's only no total, and nothing resident, to give. Local Usage is
+            // what's in the card's own memory segments, which is what System Informer calls dedicated and resident: a process
+            // whose Dedicated Usage climbed by 19 MB a second (pms-twatch.exe, 0.1.8) stayed at 51 MB on it throughout.
             PdhAddEnglishCounterW(query, windows_core::w!(r"\GPU Adapter Memory(*)\Dedicated Usage"), 0, &mut whole);
+            PdhAddEnglishCounterW(query, windows_core::w!(r"\GPU Process Memory(*)\Local Usage"), 0, &mut resident);
             PdhCollectQueryData(query);
-            Some(Gpus { query, busy, memory, whole, made_up })
+            Some(Gpus { query, busy, memory, resident, whole, made_up })
         }
     }
 
     /// For each process that's using a card: how much of it, which kinds of its engines, and how many bytes of its
-    /// dedicated memory are committed to it (`GpuUse`). Committed, which isn't the same as on the card: see `GPU_MEMORY_IS`.
+    /// dedicated memory are committed to it, and how many are on a card (`GpuUse`): see `GPU_MEMORY_IS`.
     pub fn look(&mut self) -> std::collections::HashMap<u32, GpuUse> {
         use std::collections::HashMap;
         unsafe { windows::Win32::System::Performance::PdhCollectQueryData(self.query) };
@@ -276,11 +281,16 @@ impl Gpus {
         let mut found: HashMap<u32, GpuUse> = HashMap::new();
         for (pid, kinds) in kinds {
             let (busy, engines) = in_all(kinds);
-            found.insert(pid, GpuUse { busy, memory: 0, engines });
+            found.insert(pid, GpuUse { busy, engines, ..GpuUse::default() });
         }
         for (name, value) in crate::meters::instances(self.memory).unwrap_or_default() {
             if let Some((pid, _)) = named(&name) {
                 found.entry(pid).or_default().memory += value.max(0.0) as u64;
+            }
+        }
+        for (name, value) in crate::meters::instances(self.resident).unwrap_or_default() {
+            if let Some((pid, _)) = named(&name) {
+                found.entry(pid).or_default().resident += value.max(0.0) as u64;
             }
         }
         found
@@ -296,6 +306,8 @@ pub struct GpuUse {
     pub busy: f32,
     /// How many bytes of the cards' dedicated memory are committed to it.
     pub memory: u64,
+    /// How many bytes it has on the cards just now: none of what's been paged out to system memory.
+    pub resident: u64,
     /// The kinds of engine it's using, busiest first: "3D", "Video Decode", "Copy".
     pub engines: Vec<String>,
 }

@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "pimpbox-boot"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "windows",
 ]
@@ -504,11 +504,11 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "pms-lang"
-version = "0.1.8"
+version = "0.1.9"
 
 [[package]]
 name = "pms-pimpbox"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "pimpbox-boot",
  "pms-lang",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "pms-poom"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "room",
  "windows",
@@ -531,11 +531,11 @@ dependencies = [
 
 [[package]]
 name = "pms-res"
-version = "0.1.8"
+version = "0.1.9"
 
 [[package]]
 name = "pms-screen"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "windows",
  "windows-core",
@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "pms-spawn"
-version = "0.1.8"
+version = "0.1.9"
 
 [[package]]
 name = "proc-macro-crate"

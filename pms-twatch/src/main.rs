@@ -51,17 +51,17 @@ use windows::Media::Streaming::Adaptive::{AdaptiveMediaSource, AdaptiveMediaSour
 use windows::Storage::Streams::DataWriter;
 use windows::Web::Http::Filters::{IHttpFilter, IHttpFilter_Impl};
 use windows::Web::Http::{HttpBufferContent, HttpClient, HttpMethod, HttpProgress, HttpRequestMessage, HttpResponseMessage, HttpStatusCode};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, S_OK};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::DirectComposition::DCompositionCreateSurfaceHandle;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAP_READ,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactoryMedia, IDXGIKeyedMutex,
+    DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactoryMedia,
     IDXGISurface, IDXGISwapChain1,
 };
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11SurfaceFromDXGISurface;
@@ -93,16 +93,18 @@ fn w(e: windows_core::Error) -> String {
 /// averaged here, on the CPU.
 ///
 /// What the CPU spends on a frame (2026-11-17, 85×48, NVIDIA): ~6 million cycles with the frame averaged here, ~4 with the GPU
-/// averaging, ~3 with `drawn` shared as well. Most of what's left is Windows' player's own copy, the same whatever the size: its
-/// device isn't ours, so for a texture of ours that isn't shared it makes a shared one, draws on that and copies it over, a
-/// new one every frame. Given one that's shared already, with a keyed mutex, it draws straight onto it.
+/// averaging. Most of what's left is Windows' player's own copy, the same whatever the size: its device isn't ours, so it makes
+/// a shared texture, draws on that and copies it over to `drawn`, a new one every frame, which it lets go of.
+///
+/// `drawn` isn't shared itself, though the player would draw straight onto one that was, for ~1 million cycles less: it opens
+/// a shared texture of ours again every frame and never lets go of what it opened, so the process's video memory grows by a
+/// frame's worth each frame, 19 MB a second at 60 (0.1.8, 2026-11-18: 1.8 GB a set after a while, with a keyed mutex or an
+/// NT handle alike).
 struct Target {
     width: u32,
     height: u32,
     surface: IDirect3DSurface,
     drawn: ID3D11Texture2D,
-    /// `drawn`'s keyed mutex, when it's shared: Windows' player takes it while it draws, and so do we while the GPU copies.
-    keyed: Option<IDXGIKeyedMutex>,
     /// The texture with mip levels and its view, for the GPU to average with: None where it's done here. (The player won't draw
     /// on one itself: a level's own surface isn't one it takes.)
     mips: Option<(ID3D11Texture2D, ID3D11ShaderResourceView)>,
@@ -110,17 +112,13 @@ struct Target {
     out: Vec<u8>,
 }
 
-/// The key that Windows' player takes `drawn`'s mutex with, and gives it back with.
-const KEY: u64 = 0;
-
 struct Frames {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     target: Option<Target>,
     screen: Screen,
-    /// Whether the GPU averages, and whether `drawn` is shared: each until it turns out it can't be.
+    /// Whether the GPU averages: until it turns out it can't.
     on_gpu: bool,
-    shared: bool,
     /// When the next frame's to be taken, at most `FPS` a second; the ones between are let go.
     next: Option<Instant>,
     /// The picture straight to the taskbar, where it can be: None until there's a frame for it, and for good once it can't.
@@ -216,11 +214,8 @@ static FPS: AtomicU32 = AtomicU32::new(0);
 // The device is made for use from any thread, and the context is only ever used with the mutex around this held.
 unsafe impl Send for Frames {}
 
-fn texture(device: &ID3D11Device, width: u32, height: u32, readable: bool, mips: u32, shared: bool) -> R<ID3D11Texture2D> {
-    let mut misc = if mips > 1 { D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32 } else { 0 };
-    if shared {
-        misc |= D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0 as u32;
-    }
+fn texture(device: &ID3D11Device, width: u32, height: u32, readable: bool, mips: u32) -> R<ID3D11Texture2D> {
+    let misc = if mips > 1 { D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32 } else { 0 };
     let desc = D3D11_TEXTURE2D_DESC {
         Width: width,
         Height: height,
@@ -238,24 +233,23 @@ fn texture(device: &ID3D11Device, width: u32, height: u32, readable: bool, mips:
     made.ok_or_else(|| "no texture".to_string())
 }
 
-/// What the player draws on, `width`×`height` wanted: averaged on the GPU (`on_gpu`) or here, and `shared` or not.
-fn target(device: &ID3D11Device, width: u32, height: u32, on_gpu: bool, shared: bool) -> R<Target> {
+/// What the player draws on, `width`×`height` wanted: averaged on the GPU (`on_gpu`) or here.
+fn target(device: &ID3D11Device, width: u32, height: u32, on_gpu: bool) -> R<Target> {
     let (fine_w, fine_h) = (width * FINE, height * FINE);
     let out = vec![0; (width * height * 4) as usize];
-    let drawn = texture(device, fine_w, fine_h, false, 1, shared)?;
-    let keyed = if shared { Some(drawn.cast::<IDXGIKeyedMutex>().map_err(w)?) } else { None };
+    let drawn = texture(device, fine_w, fine_h, false, 1)?;
     let dxgi: IDXGISurface = drawn.cast().map_err(w)?;
     let surface: IDirect3DSurface = unsafe { CreateDirect3D11SurfaceFromDXGISurface(&dxgi) }.map_err(w)?.cast().map_err(w)?;
     if on_gpu {
         // Each level down averages 2×2 of the one above: the last is the size wanted.
-        let mipped = texture(device, fine_w, fine_h, false, LEVELS, false)?;
+        let mipped = texture(device, fine_w, fine_h, false, LEVELS)?;
         let mut view = None;
         unsafe { device.CreateShaderResourceView(&mipped, None, Some(&mut view)) }.map_err(w)?;
-        let readable = texture(device, width, height, true, 1, false)?;
-        return Ok(Target { width, height, surface, drawn, keyed, mips: Some((mipped, view.ok_or("no view")?)), readable, out });
+        let readable = texture(device, width, height, true, 1)?;
+        return Ok(Target { width, height, surface, drawn, mips: Some((mipped, view.ok_or("no view")?)), readable, out });
     }
-    let readable = texture(device, fine_w, fine_h, true, 1, false)?;
-    Ok(Target { width, height, surface, drawn, keyed, mips: None, readable, out })
+    let readable = texture(device, fine_w, fine_h, true, 1)?;
+    Ok(Target { width, height, surface, drawn, mips: None, readable, out })
 }
 
 /// Averages `fine`, `FINE` times the size each way with `pitch` bytes a row, down to `out`, opaque.
@@ -320,14 +314,10 @@ impl Frames {
         }
         if self.target.as_ref().is_none_or(|t| (t.width, t.height) != (width, height)) {
             self.target = None;
-            // The best there can be first, then without what didn't work, each given up on for good.
+            // The best there can be first, then without what didn't work, given up on for good.
             while self.target.is_none() {
-                match target(&self.device, width, height, self.on_gpu, self.shared) {
+                match target(&self.device, width, height, self.on_gpu) {
                     Ok(t) => self.target = Some(t),
-                    Err(e) if self.shared => {
-                        self.shared = false;
-                        say(&format!("note frames: not shared from now on, as it couldn't be: {e}"));
-                    }
                     Err(e) if self.on_gpu => {
                         self.on_gpu = false;
                         say(&format!("note frames: averaged here from now on, as the GPU couldn't: {e}"));
@@ -338,19 +328,9 @@ impl Frames {
         }
         let t = self.target.as_mut().ok_or("no target")?;
         player.CopyFrameToVideoSurface(&t.surface).map_err(w)?;
-        if let Some(k) = &t.keyed {
-            // Windows' player has given it back by now; if it's kept it, or used another key, it's to be a texture of ours alone.
-            let got = unsafe { (Interface::vtable(k).AcquireSync)(Interface::as_raw(k), KEY, 50) };
-            if got != S_OK {
-                self.shared = false;
-                self.target = None;
-                say(&format!("note frames: not shared from now on, as the player didn't give it back ({:#x})", got.0));
-                return Ok(());
-            }
-        }
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
-            // The frame goes where it's averaged, then the mutex goes back: the copy itself happens on the GPU, in turn.
+            // The frame goes where it's averaged: the copy itself happens on the GPU, in turn.
             let fine_rows = if let Some((mipped, _)) = &t.mips {
                 self.context.CopySubresourceRegion(mipped, 0, 0, 0, 0, &t.drawn, 0, None);
                 None
@@ -358,9 +338,6 @@ impl Frames {
                 self.context.CopyResource(&t.readable, &t.drawn);
                 Some(height * FINE)
             };
-            if let Some(k) = &t.keyed {
-                let _ = k.ReleaseSync(KEY);
-            }
             if let Some((mipped, view)) = &t.mips {
                 self.context.GenerateMips(view);
                 // Straight to the taskbar, where it can be; and once Explorer's showing it, only that, and a count.
@@ -579,7 +556,7 @@ fn run() -> R<()> {
     unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.map_err(w)?;
     let screen = Screen::from_handles(mapping.parse().map_err(|_| "--screen: a handle's a number")?, frame.parse().map_err(|_| "--screen: a handle's a number")?)?;
     let (device, context) = device()?;
-    let frames = Arc::new(Mutex::new(Frames { device, context, target: None, screen, on_gpu: true, shared: true, next: None, shown: None, can_show: true }));
+    let frames = Arc::new(Mutex::new(Frames { device, context, target: None, screen, on_gpu: true, next: None, shown: None, can_show: true }));
 
     let uri = Uri::CreateUri(&HSTRING::from(url.as_str())).map_err(w)?;
     let made = match proxy {

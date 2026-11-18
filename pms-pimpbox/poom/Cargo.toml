@@ -3,7 +3,7 @@
 # it's sandboxed. Its library is what goes between the two (`link`), which the console takes too.
 [package]
 name = "pms-poom"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 license = "GPL-2.0-only"
 description = "POOM: the game in the PIMPBOX, on room, the Doom engine"

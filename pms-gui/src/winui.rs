@@ -978,12 +978,12 @@ impl Settings {
         // A table: a line between each row and column and the next, every other row a shade apart, and the one the pointer's
         // over a shade more. `at` is the row's place among them all, and none for the headings.
         let over = self.over_row;
-        let line = |at: Option<usize>, cells: [String; 7], fine_print: String, quiet: bool| -> View {
-            let [name, cpu, memory, gpu, engines, video, sandbox] = cells;
+        let line = |at: Option<usize>, cells: [String; 8], fine_print: String, quiet: bool| -> View {
+            let [name, cpu, memory, gpu, engines, video, resident, sandbox] = cells;
             let said = |text: String, _column: i32, right: bool| -> View {
-                let t = TextBlock::new().text(text).font_size(12.0).opacity(if quiet { 0.6 } else { 1.0 }).vertical_alignment(VerticalAlignment::Center);
-                // A name too long for its column goes onto a second line; nothing else is that long.
-                if right { t.horizontal_alignment(HorizontalAlignment::Right).into() } else { t.text_wrapping(TextWrapping::Wrap).into() }
+                // Too long for its column, it goes onto another line: a name, or a heading.
+                let t = TextBlock::new().text(text).font_size(TABLE_TEXT).opacity(if quiet { 0.6 } else { 1.0 }).vertical_alignment(VerticalAlignment::Center).text_wrapping(TextWrapping::Wrap);
+                if right { t.horizontal_alignment(HorizontalAlignment::Right).into() } else { t.into() }
             };
             // A figure: each of its digits in a place as wide as any other's, so that figures line up under each other and
             // don't shift about as they change; its unit after it, in a place of its own. Nothing at all is said quietly.
@@ -995,9 +995,9 @@ impl Settings {
                 }
                 // Not how busy a processor's been, though: none at all, to the last place shown, isn't none.
                 let nothing = column != 1 && figures.chars().all(|c| c == '0' || c == '.');
-                let place = |c: String, wide: f64| -> View { Border::new().width(wide).content(TextBlock::new().text(c).font_size(12.0).horizontal_alignment(HorizontalAlignment::Center)) };
-                let mut places: Vec<View> = figures.chars().map(|c| place(c.to_string(), if c == '.' { 3.5 } else { 7.0 })).collect();
-                places.push(place(unit.trim().to_string(), if unit.trim() == "%" { 12.0 } else { 24.0 }));
+                let place = |c: String, wide: f64| -> View { Border::new().width(wide).content(TextBlock::new().text(c).font_size(TABLE_TEXT).horizontal_alignment(HorizontalAlignment::Center)) };
+                let mut places: Vec<View> = figures.chars().map(|c| place(c.to_string(), if c == '.' { 3.0 } else { 6.5 })).collect();
+                places.push(place(unit.trim().to_string(), if unit.trim() == "%" { 11.0 } else { 22.0 }));
                 StackPanel::new()
                     .orientation(Orientation::Horizontal)
                     .horizontal_alignment(HorizontalAlignment::Right)
@@ -1010,16 +1010,28 @@ impl Settings {
             let kinds: View = if quiet || engines.is_empty() {
                 said(engines, 4, false)
             } else {
-                TextBlock::new().text(engines.clone()).font_size(12.0).vertical_alignment(VerticalAlignment::Center).text_trimming(TextTrimming::CharacterEllipsis).tooltip(engines)
+                TextBlock::new().text(engines.clone()).font_size(TABLE_TEXT).vertical_alignment(VerticalAlignment::Center).text_trimming(TextTrimming::CharacterEllipsis).tooltip(engines)
             };
-            // Each in a cell of its own, with a line at its left for every column but the first.
+            // Each in a cell of its own, with a line at its left for every column but the first; and but what's resident, the
+            // other half of the commit, which has a dotted line (`dotted`) between the two instead.
             let cell = |content: View, column: i32| -> View {
                 Border::new()
                     .grid_column(column)
-                    .padding(Thickness::xy(8.0, 4.0))
+                    .padding(Thickness::xy(6.0, 4.0))
                     .border_brush(Brush::Solid(TABLE_LINE))
-                    .border_thickness(Thickness::new(if column == 0 { 0.0 } else { 1.0 }, 0.0, 0.0, 0.0))
+                    .border_thickness(Thickness::new(if column == 0 || column == RESIDENT { 0.0 } else { 1.0 }, 0.0, 0.0, 0.0))
                     .content(content)
+            };
+            // XAML's dashed strokes aren't to be had here (windows-reactor's brushes are solid, and its shapes have no dashes), so
+            // the dots are pieces of the line: a grid of rows all the same height, every other one filled, which share out whatever
+            // height the row has. Nothing in it has a height of its own, so it never makes a row taller.
+            let dotted = || -> View {
+                Grid::new()
+                    .grid_column(RESIDENT)
+                    .width(1.0)
+                    .horizontal_alignment(HorizontalAlignment::Left)
+                    .rows(vec![GridLength::STAR; 2 * TABLE_DOTS - 1])
+                    .keyed_children((0..TABLE_DOTS).map(|i| KeyedView::new(i.to_string(), Border::new().grid_row(2 * i as i32).background(Brush::Solid(TABLE_LINE)))))
             };
             let shade = match at {
                 Some(at) if over == Some(at) => TABLE_OVER,
@@ -1028,11 +1040,21 @@ impl Settings {
             };
             // The sandbox: its kind and helper in short, and all of it (its full name, SID and capabilities) for whoever points.
             let boxed: View = if quiet || fine_print.is_empty() {
-                said(sandbox, 6, false)
+                said(sandbox, 7, false)
             } else {
-                TextBlock::new().text(sandbox).font_size(12.0).vertical_alignment(VerticalAlignment::Center).text_trimming(TextTrimming::CharacterEllipsis).tooltip(fine_print)
+                TextBlock::new().text(sandbox).font_size(TABLE_TEXT).vertical_alignment(VerticalAlignment::Center).text_trimming(TextTrimming::CharacterEllipsis).tooltip(fine_print)
             };
-            let cells = Grid::new().columns(TABLE_COLUMNS).children((cell(said(name, 0, false), 0), cell(value(cpu, 1), 1), cell(value(memory, 2), 2), cell(value(gpu, 3), 3), cell(kinds, 4), cell(value(video, 5), 5), cell(boxed, 6)));
+            let cells = Grid::new().columns(TABLE_COLUMNS).children((
+                cell(said(name, 0, false), 0),
+                cell(value(cpu, 1), 1),
+                cell(value(memory, 2), 2),
+                cell(value(gpu, 3), 3),
+                cell(kinds, 4),
+                cell(value(video, 5), 5),
+                dotted(),
+                cell(value(resident, RESIDENT), RESIDENT),
+                cell(boxed, 7),
+            ));
             // The line under it; and a fill, clear as it may be, which is what lets a row know the pointer's over it.
             let row = Border::new().background(Brush::Solid(shade)).border_brush(Brush::Solid(TABLE_LINE)).border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0));
             match at {
@@ -1042,16 +1064,16 @@ impl Settings {
         };
         let megabytes = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1_048_576.0);
         let running = |at: usize, p: &model::Running| {
-            let (gpu, engines, video) = p.gpu.as_ref().map_or_else(Default::default, |g| (format!("{:.1}%", g.busy), g.engines.join(", "), megabytes(g.memory)));
+            let (gpu, engines, video, resident) = p.gpu.as_ref().map_or_else(Default::default, |g| (format!("{:.1}%", g.busy), g.engines.join(", "), megabytes(g.memory), megabytes(g.resident)));
             let (sandbox, fine_print) = sandbox_said(p.sandbox.as_ref());
-            line(Some(at), [format!("{}{}", "\u{2003}".repeat(p.depth), p.name), p.cpu.map_or_else(String::new, |c| format!("{c:.2}%")), megabytes(p.memory), gpu, engines, video, sandbox], fine_print, false)
+            line(Some(at), [format!("{}{}", "\u{2003}".repeat(p.depth), p.name), p.cpu.map_or_else(String::new, |c| format!("{c:.2}%")), megabytes(p.memory), gpu, engines, video, resident, sandbox], fine_print, false)
         };
         // A frame around the rows, which have the line under each of them themselves.
         let table = |rows: Vec<View>, above: f64| -> View {
             let rows = StackPanel::new().keyed_children(rows.into_iter().enumerate().map(|(i, v)| KeyedView::new(i.to_string(), v)));
             Border::new().margin(Thickness::new(0.0, above, 0.0, 0.0)).border_brush(Brush::Solid(TABLE_LINE)).border_thickness(Thickness::new(1.0, 1.0, 1.0, 0.0)).content(rows)
         };
-        let mut ours = vec![line(None, [s::GENERAL_NAME.t(), s::GENERAL_CPU.t(), s::GENERAL_MEMORY.t(), s::GENERAL_GPU.t(), s::GENERAL_GPU_ENGINES.t(), s::GENERAL_DEDI_GPU_MEM_COMMIT.t(), s::SANDBOX_COLUMN.t()].map(String::from), String::new(), true)];
+        let mut ours = vec![line(None, [s::GENERAL_NAME.t(), s::GENERAL_CPU.t(), s::GENERAL_MEMORY.t(), s::GENERAL_GPU.t(), s::GENERAL_GPU_ENGINES.t(), s::GENERAL_DEDI_GPU_MEM_COMMIT.t(), s::GENERAL_GPU_MEM_RESIDENT.t(), s::SANDBOX_COLUMN.t()].map(String::from), String::new(), true)];
         ours.extend(m.procs.iter().enumerate().map(|(at, p)| running(at, p)));
         let mut processes = vec![table(ours, 0.0)];
         // And, a little apart, what isn't ours but does our work: the Explorer the taskbar's in, and the Desktop Window Manager.
@@ -2387,7 +2409,22 @@ impl Settings {
 
 /// The processes' table: a name, and each figure in a column as wide as it can need. Its lines and shades are grey with
 /// little to them, which shows as a shade lighter on a dark window and a shade darker on a light one.
-const TABLE_COLUMNS: [GridLength; 7] = [GridLength::STAR, GridLength::Pixel(72.0), GridLength::Pixel(92.0), GridLength::Pixel(68.0), GridLength::Pixel(118.0), GridLength::Pixel(122.0), GridLength::Pixel(96.0)];
+const TABLE_COLUMNS: [GridLength; 8] = [
+    GridLength::STAR,
+    GridLength::Pixel(62.0),
+    GridLength::Pixel(82.0),
+    GridLength::Pixel(56.0),
+    GridLength::Pixel(106.0),
+    GridLength::Pixel(96.0),
+    GridLength::Pixel(80.0),
+    GridLength::Pixel(92.0),
+];
+/// The processes' table's column of what's resident on the cards, after the commit's.
+const RESIDENT: i32 = 6;
+/// The size of the processes' table's text.
+const TABLE_TEXT: f64 = 11.0;
+/// How many dots the line between the commit and what's resident has in a row.
+const TABLE_DOTS: usize = 5;
 
 /// A process's sandbox, as the processes' table shows it: in short, and all of it, for its tooltip.
 fn sandbox_said(sandbox: Option<&pms::sandbox::Sandbox>) -> (String, String) {

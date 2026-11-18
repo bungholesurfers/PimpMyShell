@@ -2792,7 +2792,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "pms"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "pms-art"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64",
  "eframe",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "pms-fetch"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "jpeg-decoder",
  "ureq",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "pms-gui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "eframe",
  "pms",
@@ -2853,22 +2853,22 @@ dependencies = [
 
 [[package]]
 name = "pms-lang"
-version = "0.1.8"
+version = "0.1.9"
 
 [[package]]
 name = "pms-recon"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "windows",
 ]
 
 [[package]]
 name = "pms-res"
-version = "0.1.8"
+version = "0.1.9"
 
 [[package]]
 name = "pms-screen"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "windows",
  "windows-core 0.62.2",
@@ -2876,11 +2876,11 @@ dependencies = [
 
 [[package]]
 name = "pms-spawn"
-version = "0.1.8"
+version = "0.1.9"
 
 [[package]]
 name = "pms-tap"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "pms-lang",
  "pms-res",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "pms-twatch"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "pms-screen",
  "ureq",
@@ -2906,14 +2906,14 @@ dependencies = [
 
 [[package]]
 name = "pms-ui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "eframe",
 ]
 
 [[package]]
 name = "pms-xaml"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "windows",
  "windows-bindgen",
@@ -5163,7 +5163,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "pms-lang",
 ]

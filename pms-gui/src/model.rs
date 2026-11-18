@@ -31,9 +31,39 @@ fn page_file() -> PathBuf {
 
 /// Sends the settings window that's open, if there is one, to `page`, and brings it to the front: false if there's none.
 pub fn go_to_page(page: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+    if unsafe { FindWindowW(windows_core::PCWSTR::null(), &windows_core::HSTRING::from(WINDOW_TITLE)) }.is_err() {
+        return false;
+    }
+    let _ = std::fs::write(page_file(), page);
+    bring_forward()
+}
+
+/// Whether this is the only settings window of the user's own settings: true, and it stays the only one for as long as this
+/// process runs. False, if there's one already, which is brought to the front instead: once it has its window, should it be
+/// starting too (a double-click on the shortcut starts two). A window for another settings file (a scratch copy) isn't one.
+/// `taking_over`: started by the window that's open, to be the other kind of window in its place (`open_classic`,
+/// `open_new`), so it waits a few seconds for that one to go.
+pub fn only_window(taking_over: bool) -> bool {
+    use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+    let Ok(held) = (unsafe { CreateMutexW(None, false, windows_core::w!("Local\\PimpMyShell.Settings")) }) else { return true };
+    // Held, and left open, for as long as this process runs; Windows lets go of it when it ends, however it ends.
+    let got = unsafe { WaitForSingleObject(held, if taking_over { 5_000 } else { 0 }) };
+    if got == WAIT_OBJECT_0 || got == WAIT_ABANDONED {
+        return true;
+    }
+    let started = Instant::now();
+    while !bring_forward() && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Brings the settings window that's open to the front: false if there's none.
+fn bring_forward() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow};
     let Ok(window) = (unsafe { FindWindowW(windows_core::PCWSTR::null(), &windows_core::HSTRING::from(WINDOW_TITLE)) }) else { return false };
-    let _ = std::fs::write(page_file(), page);
     unsafe {
         if IsIconic(window).as_bool() {
             let _ = ShowWindow(window, SW_RESTORE);

@@ -551,6 +551,7 @@ general_memory = "Memory"
 general_gpu = "GPU"
 general_gpu_engines = "GPU engines"
 general_dedi_gpu_mem_commit = "Dedi. GPU mem. commit"
+general_gpu_mem_resident = "resident"
 general_show_less = "Show less"
 general_show_more = "Show more..."
 general_your_files = "Your files"
@@ -1282,9 +1283,9 @@ try_iss = "Lightstreamer"
 
 # On the settings' General page, beside what PimpMyShell's processes use (pms): the taskbar's own row, and what the rows mean.
 [procs]
-explorer = "explorer.exe (the taskbar, with PimpMyShell's part in it)"
+explorer = "explorer.exe (diddled by PMS TAP)"
 dwm_is = "Desktop Window Manager: the system compositor. The taskbar is a XAML island whose visual tree, with PimpMyShell's elements in it, is a tree of Windows.UI.Composition visuals that DWM composes every frame. So the meters' and TVs' surfaces, the acrylic and other effect brushes, and every composition animation (glows, ripples, toasts, the remote's beam) are rendered here, on DWM's own GPU time and video memory, not in Explorer."
-gpu_memory_is = "GPU figures are Windows' own per-process counters, the ones Task Manager shows. A card has an engine for each kind of work (3D, Video Decode, Copy and so on). The GPU column adds up every engine a process is using, so it can pass 100%, where Task Manager shows the busiest one alone; GPU engines names the ones it's using, busiest first. The memory column is dedicated video memory committed to each process, which isn't what it has on the card: memory the card has paged out to system RAM still counts, and a surface shared between processes counts in each of them (most of all in dwm.exe, which holds every window's). So a row can overstate what a process really occupies, and the rows can add up to more than the card has in use."
+gpu_memory_is = "GPU figures are Windows' own per-process counters, the ones Task Manager shows. A card has an engine for each kind of work (3D, Video Decode, Copy and so on). The GPU column adds up every engine a process is using, so it can pass 100%, where Task Manager shows the busiest one alone; GPU engines names the ones it's using, busiest first. The commit column is dedicated video memory committed to each process, which isn't what it has on the card: memory the card has paged out to system RAM still counts, and a surface shared between processes counts in each of them (most of all in dwm.exe, which holds every window's). So a row can overstate what a process really occupies, and the rows can add up to more than the card has in use. Resident is the part of it that's on the card just now. A commit that keeps growing while resident stays put is memory that's been taken and not given back."
 
 # What the meters' tooltips say about a disk or a network card (pms), besides its readings.
 [meters]
